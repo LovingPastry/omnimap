@@ -1,5 +1,5 @@
 <p align="center">
-<h1 align="center"><strong> OmniMap: A Comprehensive Mapping Framework Integrating Optics, Geometry, and Semantics</strong></h1>
+<h1 align="center"><strong> OmniMap: A General Mapping Framework Integrating Optics, Geometry, and Semantics</strong></h1>
 </p>
 
 
@@ -100,7 +100,7 @@ If you find our work helpful, please cite:
 
 ```bibtex
 @article{omnimap,
-  title={OmniMap: A Comprehensive Mapping Framework Integrating Optics, Geometry, and Semantics},
+  title={OmniMap: A General Mapping Framework Integrating Optics, Geometry, and Semantics},
   author={Deng, Yinan and Yue, Yufeng and Dou, Jianyu and Zhao, Jingyu and Wang, Jiahui and Tang, Yujie and Yang, Yi and Fu, Mengyin},
   journal={IEEE Transactions on Robotics},
   year={2025}
