@@ -7,3 +7,6 @@
 [submodule "thirdparty/all-MiniLM-L6-v2"]
 	path = thirdparty/all-MiniLM-L6-v2
 	url = https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2
+[submodule "thirdparty/mmcv"]
+	path = thirdparty/mmcv
+	url = https://github.com/open-mmlab/mmcv.git
