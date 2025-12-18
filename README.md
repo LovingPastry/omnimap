@@ -23,8 +23,8 @@ Robotic systems demand accurate and comprehensive 3D environment perception, req
 ### Clone this repo
 
 ```bash
-git clone https://github.com/omnimap123/anonymous_code.git
-cd anonymous_code
+git clone git@github.com:LovingPastry/omnimap.git
+cd omnimap
 ```
 
 ### Install the required libraries
@@ -32,8 +32,19 @@ Use conda to install the required environment. To avoid problems, it is recommen
 
 
 ```bash
-conda env create -f environment.yml
+conda env create -f environment.yaml # 使用修改后的环境文件
 conda activate omnimap
+
+# 本地安装 thirdparty 包
+export CPATH=$CONDA_PREFIX/include:$CPATH
+pip install ./thirdparty/simple-knn --no-build-isolation
+pip install ./thirdparty/diff-gaussian-rasterization --no-build-isolation
+
+# 克隆 thirdparty 子模块
+git submodule update --init --recursive
+git submodule add https://github.com/AILab-CVC/YOLO-World.git thirdparty/YOLO-World
+git submodule add https://github.com/baaivision/tokenize-anything.git thirdparty/TAP
+git submodule add https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2 thirdparty/all-MiniLM-L6-v2
 ```
 
 ###  Install YOLO-World Model

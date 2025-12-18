@@ -1,0 +1,9 @@
+[submodule "thirdparty/YOLO-World"]
+	path = thirdparty/YOLO-World
+	url = https://github.com/AILab-CVC/YOLO-World.git
+[submodule "thirdparty/TAP"]
+	path = thirdparty/TAP
+	url = https://github.com/baaivision/tokenize-anything.git
+[submodule "thirdparty/all-MiniLM-L6-v2"]
+	path = thirdparty/all-MiniLM-L6-v2
+	url = https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2

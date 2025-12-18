@@ -11,6 +11,10 @@ dependencies:
   - pytorch=2.1.2
   - pytorch-cuda=11.8
   - cudatoolkit=11.8
+  - cuda-nvcc=11.8          # 新增
+  - cuda-cudart-dev=11.8     # 新增
+  - cuda-driver-dev=11.8     # 新增
+  - ninja                    # 新增
   - scipy
   - opencv
   - tqdm
@@ -22,8 +26,8 @@ dependencies:
   - pip
   - pip:
     - torch-scatter -f https://data.pyg.org/whl/torch-2.1.2+cu118.html
-    - thirdparty/simple-knn
-    - thirdparty/diff-gaussian-rasterization
+    # - thirdparty/simple-knn
+    # - thirdparty/diff-gaussian-rasterization
     - numpy==1.26.4
     - setuptools==69.5.1
     - torchmetrics

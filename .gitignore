@@ -1,0 +1,70 @@
+# OS / 编辑器
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Python / Conda
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.dylib
+*.egg-info/
+dist/
+build/
+pip-wheel-metadata/
+.eggs/
+.venv/
+venv/
+.env
+.env.*
+
+# Jupyter
+.ipynb_checkpoints/
+
+# 测试 / 覆盖率 / 类型检查
+.pytest_cache/
+.coverage
+coverage.xml
+.mypy_cache/
+.pytype/
+
+# 日志 / 运行输出
+logs/
+log/
+outputs/
+output/
+runs/
+wandb/
+lightning_logs/
+tensorboard/
+
+# 数据 / 模型（按需保留）
+data/
+datasets/
+checkpoints/
+weights/
+*.pt
+*.pth
+*.ckpt
+*.zip
+
+# CUDA / CMake 构建产物
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+Makefile
+*.a
+*.la
+*.o
+*.obj
+*.log
+*.dll
+*.exe
+
+# 子模块内部可能的构建产物（源代码本身不要忽略）
+thirdparty/**/build/
+thirdparty/**/dist/
+thirdparty/**/pip-wheel-metadata/
