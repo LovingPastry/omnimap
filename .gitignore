@@ -44,8 +44,6 @@ tensorboard/
 
 # 数据 / 模型（按需保留）
 data/
-!data/coco
-!data/texts
 datasets/
 checkpoints/
 weights/
