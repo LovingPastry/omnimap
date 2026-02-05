@@ -41,14 +41,24 @@ pip install ./thirdparty/simple-knn --no-build-isolation
 pip install ./thirdparty/diff-gaussian-rasterization --no-build-isolation
 
 # 克隆 thirdparty 子模块
-git submodule update --init --recursive
-git submodule add https://github.com/AILab-CVC/YOLO-World.git thirdparty/YOLO-World
+git submodule add https://github.com/AILab-CVC/YOLO-World.git thirdparty/YOLO-World 
 git submodule add https://github.com/baaivision/tokenize-anything.git thirdparty/TAP
 git submodule add https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2 thirdparty/all-MiniLM-L6-v2
+git submodule update --init --recursive
 ```
 
 ###  Install YOLO-World Model
 Follow the [instructions](https://github.com/AILab-CVC/YOLO-World#1-installation) to install the YOLO-World model and download the pretrained weights [YOLO-Worldv2-L (CLIP-Large)](https://huggingface.co/wondervictor/YOLO-World/blob/main/yolo_world_v2_l_clip_large_o365v1_goldg_pretrain_800ft-9df82e55.pth).
+
+注意：在安装 mmcv 时需要本地构建，请参考 [mmcv 安装文档](https://mmcv.readthedocs.io/en/latest/get_started/installation.html) 进行安装。
+
+本地构建需要完整的CUDA环境以及以及c++17的支持。
+```
+git submodule add  https://github.com/open-mmlab/mmcv.git thirdparty/mmcv
+cd thirdparty/mmcv
+git checkout  v2.0.0rc4
+python setup.py install 
+```
 
 ###  Install TAP Model
 Follow the [instructions](https://github.com/baaivision/tokenize-anything?tab=readme-ov-file#installation) to install the TAP model and download the pretrained weights [here](https://github.com/baaivision/tokenize-anything?tab=readme-ov-file#models).

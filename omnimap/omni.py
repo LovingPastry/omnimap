@@ -12,6 +12,7 @@ import warnings
 warnings.filterwarnings("ignore")
 import torch.nn.functional as F
 from torchvision import transforms
+from visual_module import timeit
 
 
 class OMNI:
@@ -118,7 +119,7 @@ class OMNI:
             self.iteration_count = 0
         
     
-    
+    @timeit
     def terminate(self):
         self.gs.eval_fast(self.images, self.poses,  depth_scale=self.depth_scale)
         self.gs.finalize()

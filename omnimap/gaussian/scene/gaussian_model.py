@@ -106,6 +106,36 @@ class GaussianModel:
             self.get_scaling, scaling_modifier, self._rotation
         )
 
+    def get_covariance_matrices(self) -> torch.Tensor:
+        """获取完整的3x3协方差矩阵
+        Returns:
+            torch.Tensor: [N, 3, 3] 完整的对称协方差矩阵
+        """
+        # 1. 获取激活后的缩放和旋转参数
+        scaling = self.get_scaling  # [N, 3] 或 [N, 1]
+        rotation = self.get_rotation    # [N, 4] 四元数
+        # 2. 构建 L = R @ S
+        L = build_scaling_rotation(scaling, rotation)  # [N, 3, 3]
+        # 3. 计算 Σ = L @ L^T
+        covariance = L @ L.transpose(1, 2)  # [N, 3, 3]
+        return covariance
+
+    def get_all_parameters(self) -> torch.Tensor:
+        """
+        返回扁平化的 14N 参数向量
+        """
+        return torch.cat([
+            self.get_xyz.flatten(),
+            self.get_scaling.flatten(),
+            self.get_rotation.flatten(),
+            self.get_features.flatten(),
+            self.get_opacity.flatten()
+        ])
+    
+    def parameters(self):
+        """返回所有可训练参数"""
+        return [self.get_xyz, self.get_scaling, self.get_rotation, self.get_features, self.get_opacity]
+
     def oneupSHdegree(self):
         if self.active_sh_degree < self.max_sh_degree:
             self.active_sh_degree += 1
@@ -118,47 +148,110 @@ class GaussianModel:
     def extend_from_pcd(
         self, fused_point_cloud, features, scales, rots, opacities, kf_id=None
     ):
+        """从点云数据扩展3D高斯模型，添加新的高斯点到现有模型中
+        
+        Args:
+            fused_point_cloud: 新增点的3D坐标 [N, 3]
+            features: 球谐函数特征 [N, 3, (max_sh_degree+1)^2]
+            scales: 高斯点的尺度参数 [N, 3] 或 [N, 1]
+            rots: 高斯点的旋转参数(四元数) [N, 4]
+            opacities: 高斯点的不透明度 [N, 1]
+            kf_id: 关键帧ID，用于跟踪高斯点的来源
+        """
+        # 1. 创建3D坐标参数，启用梯度计算
         new_xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
+        
+        # 2. 处理球谐函数特征 - 分为DC(直流)分量和AC(交流)分量
+        # DC分量(0阶球谐): 表示基础颜色
         new_features_dc = nn.Parameter(
             features[:, :, 0:1].transpose(1, 2).contiguous().requires_grad_(True)
         )
+        # AC分量(高阶球谐): 表示视角相关的颜色变化
         new_features_rest = nn.Parameter(
             features[:, :, 1:].transpose(1, 2).contiguous().requires_grad_(True)
         )
-        new_scaling = nn.Parameter(scales.requires_grad_(True))
-        new_rotation = nn.Parameter(rots.requires_grad_(True))
-        new_opacity = nn.Parameter(opacities.requires_grad_(True))
-        new_unique_kfIDs = None
-        new_n_obs = None
+        
+        # 3. 创建高斯点的几何参数
+        new_scaling = nn.Parameter(scales.requires_grad_(True))  # 尺度参数
+        new_rotation = nn.Parameter(rots.requires_grad_(True))    # 旋转参数
+        new_opacity = nn.Parameter(opacities.requires_grad_(True))  # 不透明度参数
+        
+        # 4. 初始化跟踪信息
+        new_unique_kfIDs = None  # 关键帧ID列表
+        new_n_obs = None          # 观测次数列表
+        
+        # 5. 如果提供了关键帧ID，设置跟踪信息
         if kf_id is not None:
+            # 为每个新点分配相同的关键帧ID
             new_unique_kfIDs = torch.ones((new_xyz.shape[0])).int() * kf_id
+            # 初始化观测次数为0
             new_n_obs = torch.zeros((new_xyz.shape[0])).int()
+        
+        # 6. 调用后处理函数，将新参数添加到现有模型中
         self.densification_postfix(
-            new_xyz,
-            new_features_dc,
-            new_features_rest,
-            new_opacity,
-            new_scaling,
-            new_rotation,
-            new_kf_ids=new_unique_kfIDs,
-            new_n_obs=new_n_obs,
+            new_xyz,           # 新增点的3D坐标
+            new_features_dc,    # 新增点的DC颜色特征
+            new_features_rest,  # 新增点的AC颜色特征
+            new_opacity,        # 新增点的不透明度
+            new_scaling,        # 新增点的尺度
+            new_rotation,       # 新增点的旋转
+            new_kf_ids=new_unique_kfIDs,  # 关键帧ID跟踪信息
+            new_n_obs=new_n_obs,          # 观测次数信息
         )
         
     
     def create_pcd_from_tsdfs(self, points, colors, scale=0.20):
+        """从TSDF体素数据创建3D高斯点云
+        
+        Args:
+            points: TSDF体素中心的3D坐标 [N, 3]
+            colors: 对应的RGB颜色值 [N, 3]
+            scale: 高斯点的初始尺度(默认0.20)
+            
+        Returns:
+            points: 3D坐标
+            features: 球谐函数特征
+            scales: 尺度参数
+            rots: 旋转参数
+            opacities: 不透明度参数
+        """
+        # 1. 将RGB颜色转换为球谐函数格式
         colors = RGB2SH(colors)
+        
+        # 2. 初始化球谐函数特征张量
+        # 维度: [点数, 3(颜色通道), 球谐系数数量]
         features = (
             torch.zeros((colors.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
         )
+        
+        # 3. 设置球谐函数特征
+        # DC分量(0阶): 存储基础颜色信息
         features[:, :3, 0] = colors
+        # AC分量(高阶): 初始化为0，后续通过优化学习
         features[:, 3:, 1:] = 0.0
+        
+        # 4. 初始化尺度参数
+        # 创建与点数相同的尺度张量
         scales = torch.full((colors.shape[0],), scale, dtype=torch.float32).cuda()
+        # 转换为对数空间(优化更稳定)
         scales = torch.log(scales)[..., None]
+        
+        # 5. 根据各向同性设置调整尺度维度
         if not self.isotropic:
+            # 各向异性: 每个维度独立尺度
             scales = scales.repeat(1, 3)
+        # 否则保持各向同性: 单一尺度值
+        
+        # 6. 初始化旋转参数(四元数)
         rots = torch.zeros((points.shape[0], 4), device="cuda")
+        # 设置为单位四元数(w=1, x=y=z=0)，表示无旋转
         rots[:, 0] = 1
-        opacities = inverse_sigmoid( 0.5 * torch.ones( (points.shape[0], 1), dtype=torch.float, device="cuda" ))
+        
+        # 7. 初始化不透明度参数
+        # 使用反sigmoid函数将0.5映射到优化空间
+        opacities = inverse_sigmoid(0.5 * torch.ones((points.shape[0], 1), dtype=torch.float, device="cuda"))
+        
+        # 8. 返回所有高斯参数
         return points, features, scales, rots, opacities
     
     def extend_from_tsdfs(self, points, colors, scale):

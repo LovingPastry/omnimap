@@ -1,0 +1,55 @@
+Training:
+  init_itr_num: 1000          # 原 1500
+  init_gaussian_update: 60    # 原 100
+  init_gaussian_reset: 300    # 原 500
+  init_gaussian_th: 0.003     # 原 0.005
+  init_gaussian_extent: 5     # 原 8（你已经从 30 改到 8 了）
+  gaussian_extent: 0.3        # 原 1.0
+  gaussian_update_every: 15   # 原 21
+  gaussian_reset: 25          # 原 31
+  gaussian_th: 0.4            # 原 0.7
+  size_threshold: 2           # 原 5
+  rgb_boundary_threshold: 0.005  # 原 0.01
+  max_keyframe_skip: 0        # 原 1
+  window_size: 32             # 原 24
+  frame_itr: 2                # 原 1
+  alpha: 0.9                  # 保持
+  use_ssim: true              # 保持
+  ssim_weight: 0.3            # 原 0.25，略加强结构
+  use_omni_normal: false      # 保持（优先细节）
+  normal_weight: 0.05         # 保持
+  compensate_exposure: false  # 视情况
+  deblur: false               # 视情况
+
+
+opt_params:
+  pose_lr: 0.00015              # 原 0.0001
+  position_lr_init: 0.00025     # 原 0.00016
+  position_lr_final: 0.0000025  # 原 0.0000016
+  feature_lr: 0.003             # 原 0.0025
+  opacity_lr: 0.08              # 原 0.05
+  scaling_lr: 0.008             # 原 0.005
+  rotation_lr: 0.001            # 保持
+  percent_dense: 0.02           # 原 0.01
+  densify_grad_threshold: 0.0001  # 原 0.0003
+  exposure_lr: 0.02             # 保持
+  post_refine: true             # 保持
+  post_itr: 800                 # 原 500
+  deblur_trans: 0.001           # 保持
+  deblur_weight: 0.01           # 保持
+
+
+tsdf:
+  voxel_size: 0.002             # 原 0.003
+  block_resolution: 8           # 保持
+  block_count: 30000            # 保持
+  unregistered_threshold: 0.05  # 保持
+
+  
+instance:
+  instance_skip: 1   # 保持
+  pro_thre: 0.40     # 保持
+  ins_min_count: 1   # 保持
+  vox_min_count: 1   # 保持
+  ins_min_voxel: 3   # 原 5
+  fill_dis: 0.03     # 保持

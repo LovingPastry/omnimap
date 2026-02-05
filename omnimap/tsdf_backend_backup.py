@@ -1,41 +1,23 @@
 
 import torch
-import os
+import os,sys
 import warnings
 warnings.filterwarnings('ignore')
-import time
-import argparse
-import os
-import os.path as osp
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
-# yolo-world
-from mmengine.config import Config, DictAction
-from mmengine.dataset import Compose
-from mmdet.apis import init_detector
-from mmdet.utils import get_test_pipeline_cfg
 
 from scipy.spatial import KDTree
 import distinctipy
-import cv2
+
 import open3d as o3d
 import open3d.core as o3c
 from util.utils import Log
 import numpy as np
 import torch
-# from inst_class import InstFrame
-import spacy
-from torch.autograd import grad
 
-# tap
-from tokenize_anything import model_registry
-from tokenize_anything.utils.image import im_rescale
-from tokenize_anything.utils.image import im_vstack
-
-# sbert
-from sentence_transformers import SentenceTransformer, util
-
-from visual_module import timeit
+from .visual_module import VisualModule
 
 class TSDFBackEnd():
     def __init__(self, config, save_dir, vis_gui):
@@ -139,33 +121,8 @@ class TSDFBackEnd():
             
         
     def load_models(self): 
-        # yolo-world model
-        config = self.config['path']['yolo_config']
-        
-        cfg = Config.fromfile(config)
-        cfg.work_dir = osp.join('./work_dirs', osp.splitext(osp.basename(config))[0])
-        checkpoint = self.config['path']['yolo_cp'] 
-        self.yolo_world = init_detector(cfg, checkpoint=checkpoint, device="cuda")
-        test_pipeline_cfg = get_test_pipeline_cfg(cfg=cfg)
-        test_pipeline_cfg[0].type = 'mmdet.LoadImageFromNDArray'
-        self.yolo_world_test_pipeline = Compose(test_pipeline_cfg)
-        with open("pretrained_models/yolo_labels.txt") as f:
-            lines = f.readlines()
-        self.yolo_texts = [[t.rstrip('\r\n')] for t in lines] + [[' ']]
-        self.yolo_world.reparameterize(self.yolo_texts)
-        self.yolo_score = 0.1
-        self.yolo_max_dets = 100
-
-        # tap model 
-        model_type = "tap_vit_l"
-        checkpoint = self.config['path']['tap_cp1']
-        concept_weights = self.config['path']['tap_cp2']
-        self.nlp = spacy.load("en_core_web_sm")
-        self.tap_model = model_registry[model_type](checkpoint=checkpoint)
-        self.tap_model.concept_projector.reset_weights(concept_weights)
-        self.tap_model.text_decoder.reset_cache(max_batch_size=1000)
-        # SBERT model
-        self.sbert_model = SentenceTransformer(self.config['path']['sbert_cp'])
+        # 初始化视觉模块，封装了YOLO-World、TAP和SBERT模型
+        self.visual_module = VisualModule(self.config)
         
     def get_mesh(self, legacy=True):
         mesh = self.world.extract_triangle_mesh()
@@ -245,11 +202,7 @@ class TSDFBackEnd():
         return cube_indices, local_voxel_indices, max_index, valid_mask
     
     
-    def erode_mask(self, mask, kernel_size=5):
-        kernel = torch.ones(1, 1, kernel_size, kernel_size).to(mask.device)
-        eroded_mask = F.conv2d(mask.unsqueeze(0).unsqueeze(0).float(), kernel, padding=kernel_size//2)
-        eroded_mask = eroded_mask.squeeze(0).squeeze(0) >= kernel_size*kernel_size
-        return eroded_mask
+
 
             
     def integrate(self, color_im, depth_im, cam_intr, cam_pose, tstamp, obs_weight=1.0):
@@ -309,100 +262,17 @@ class TSDFBackEnd():
             return
         
         img = color_im.cpu().numpy()[:,:,::-1]
-        '''[1] yolo-world'''
-        data_info = dict(img=img, img_id=0, texts=self.yolo_texts)
-        data_info = self.yolo_world_test_pipeline(data_info)
-        data_batch = dict(inputs=data_info['inputs'].unsqueeze(0), data_samples=[data_info['data_samples']])
-        with torch.no_grad():
-            output = self.yolo_world.test_step(data_batch)[0]
-        pred_instances = output.pred_instances
-        # score thresholding: only keep the instances with scores higher than the threshold
-        pred_instances = pred_instances[pred_instances.scores.float() > self.yolo_score]
-        # max detections: if the number of instances is more than the maximum allowed, keep the top-yolo_max_dets instances
-        if len(pred_instances.scores) > self.yolo_max_dets:
-            indices = pred_instances.scores.float().topk(self.yolo_max_dets)[1]
-            pred_instances = pred_instances[indices]
-        # bboxes
-        min_rects = pred_instances['bboxes']
-        min_rects = torch.unique(min_rects, dim=0).cpu().numpy() # min_rects are final detections
-        # no object
-        if len(min_rects) == 0:
+        
+        # 使用视觉模块进行目标检测和分割
+        final_masks, caption_fts, last_mask_image = self.visual_module.detect(img, vis_gui=self.vis_gui)
+        
+        # 如果没有检测到物体，返回
+        if len(final_masks) == 0:
             return
         
-        '''[2] tap'''
-        img_list, img_scales = im_rescale(img, scales=[1024], max_size=1024)
-        input_size, original_size = img_list[0].shape, img.shape[:2]
-        img_batch = im_vstack(img_list, fill_value=self.tap_model.pixel_mean_value, size=(1024, 1024))
-        inputs = self.tap_model.get_inputs({"img": img_batch})
-        inputs.update(self.tap_model.get_features(inputs))
-        batch_points = np.zeros((len(min_rects), 2, 3), dtype=np.float32)
-        batch_points[:, 0, 0] = min_rects[:, 0]  # min x
-        batch_points[:, 0, 1] = min_rects[:, 1]  # min y
-        batch_points[:, 0, 2] = 2
-        batch_points[:, 1, 0] = min_rects[:, 2]  # max x
-        batch_points[:, 1, 1] = min_rects[:, 3]  # max y
-        batch_points[:, 1, 2] = 3 
-        inputs["points"] = batch_points
-        inputs["points"][:, :, :2] *= np.array(img_scales, dtype="float32")
-        outputs = self.tap_model.get_outputs(inputs)
-        iou_score, mask_pred = outputs["iou_pred"], outputs["mask_pred"]
-        iou_score[:, 1:] -= 1000.0  # Penalize the score of loose points.
-        mask_index = torch.arange(iou_score.shape[0]), iou_score.argmax(1)
-        
-        iou_scores, masks = iou_score[mask_index], mask_pred[mask_index]
-        masks = self.tap_model.upscale_masks(masks[:, None], img_batch.shape[1:-1])
-        masks = masks[..., : input_size[0], : input_size[1]]
-        masks = self.tap_model.upscale_masks(masks, original_size).gt(0).squeeze(1)
-        # print("detect the object number is ", len(masks))
-        
-        # sorted by mask area
-        mask_areas = torch.tensor([mask.sum().item() for mask in masks])
-        sorted_indices = torch.argsort(mask_areas, descending=True)
-        sorted_masks = masks[sorted_indices]
-        mask_id = torch.zeros(sorted_masks[0].shape)
-        # smalls cover bigs
-        ok_area_mask = []
-        final_masks = []
-        for i, mask in enumerate(sorted_masks):
-            mask_id[mask] = i+1
-        for new_id in range(len(sorted_masks)):
-            new_mask = mask_id == new_id+1
-            new_mask = self.erode_mask(new_mask)
-            if torch.sum(new_mask) < 100:
-                continue
-            final_masks.append(new_mask)
-            ok_area_mask.append(new_id)
-        ok_area_mask = torch.tensor(np.stack(ok_area_mask)).long()
-        final_masks = torch.stack(final_masks).cuda()
-        
-        if self.vis_gui:
-            mask_image = np.ones(img.shape)*255*0.2
-            for i in range(len(final_masks)):
-                mask = final_masks[i].cpu().numpy()  
-                color = np.random.random(3)*255
-                mask_colored = np.stack([mask * color[0], mask * color[1], mask * color[2]], axis=-1)  
-                mask_image = np.maximum(mask_image, mask_colored)  
-            self.last_mask_image = mask_image
-        
-        sem_tokens = outputs["sem_tokens"][mask_index].unsqueeze_(1)
-        captions = self.tap_model.generate_text(sem_tokens)
-        captions = captions[sorted_indices][ok_area_mask]
-        new_captions = []
-        for sentence in captions:
-            doc = self.nlp(str(sentence))
-            subject = ""
-            for npp in doc.noun_chunks:
-                if sentence.startswith(str(npp)):
-                    subject = str(npp)
-                    break
-            if not subject:
-                subject = sentence
-            new_captions.append(subject)
-        
-        # print(len(captions))
-        '''[3] sbert'''
-        caption_fts = self.sbert_model.encode(new_captions, convert_to_tensor=True, device="cuda").detach()
-        caption_fts = caption_fts / caption_fts.norm(dim=-1, keepdim=True)
+        # 更新可视化图像
+        if self.vis_gui and last_mask_image is not None:
+            self.last_mask_image = last_mask_image
         
         '''[4] get 3D voxels'''
         
@@ -553,84 +423,43 @@ class TSDFBackEnd():
     
     
     def initializing_check(self):
-        """检查初始化的体素坐标和颜色，并判断是否需要创建关键帧
-        
-        Returns:
-            points: 新增点的3D坐标
-            colors: 对应的RGB颜色
-            is_keyframe: 是否需要创建关键帧
-        """
-        # 1. 获取当前帧中所有有效体素的唯一索引
+        '''check the initialized voxels coors and colors'''
         unique_indices = torch.unique(self.combined_indices[self.all_vaild], dim=0)
-        
-        # 2. 识别新体素：检查哪些体素是首次被观测到
         new_voxels_mask = self.new_voxel[unique_indices[:,0],unique_indices[:,2],unique_indices[:,3],unique_indices[:,4]]
         
-        # 3. 筛选出新体素的索引
         combined_indices_init = unique_indices[new_voxels_mask]
-        
-        # 4. 从TSDF网格中提取新体素的颜色信息
-        # 使用dlpack进行高效的跨库数据转换
         colors = torch.utils.dlpack.from_dlpack(self.world.attribute("color").to_dlpack())[combined_indices_init[:,0],combined_indices_init[:,2],
                                                                                                  combined_indices_init[:,3],combined_indices_init[:,4]]/255.0
-        
-        # 5. 获取新体素的3D坐标
         points = self.voxel_coords_ok[combined_indices_init[:,1],combined_indices_init[:,2], combined_indices_init[:,3],combined_indices_init[:,4]]
-        
-        # 6. 颜色边界检测：过滤掉颜色过于暗淡的体素
-        # 通过RGB三通道和值判断是否为有效表面点
         colors_ok = colors.sum(dim=1) > self.config["Training"]["rgb_boundary_threshold"]
-        
-        # 7. 获取通过颜色检测的体素索引
         full_indices = unique_indices[new_voxels_mask][colors_ok]
-        
-        # 8. 将已处理的体素标记为旧体素（避免重复处理）
         self.new_voxel[full_indices[:,0],full_indices[:,2],full_indices[:,3],full_indices[:,4]] = False
-        
-        # 9. 提取最终有效的点和颜色
         points = points[colors_ok]
         colors = colors[colors_ok]
 
-        # 10. 调试部分：点云去噪和可视化
+        # debug
         if len(points)>0:
-            # 创建点云对象
             pc = o3d.geometry.PointCloud()
             pc.points = o3d.utility.Vector3dVector(points.cpu().numpy())
             pc.colors = o3d.utility.Vector3dVector(colors.cpu().numpy())
-            
-            # 移除半径离群点：提高点云质量
             cl, ind = pc.remove_radius_outlier(nb_points=5, radius=0.3)
             points = points.cpu().numpy()[ind]
             colors = colors.cpu().numpy()[ind]
-            
-            # 创建去噪后的点云
             pc_new = o3d.geometry.PointCloud()
             pc_new.points = o3d.utility.Vector3dVector(points)
             pc_new.colors = o3d.utility.Vector3dVector(colors)
-            
-            # 可选：实时可视化点云（调试用）
             # o3d.visualization.draw_geometries([pc_new])
-            
-            # 累积所有点云用于整体可视化
             self.all_pc = self.all_pc + pc_new
 
-        # 11. 关键帧判断：基于未注册体素比例
-        # 11.1 将当前帧的体素标记为已观测
+        # check for keyframe
         self.unregistered_mask[combined_indices_init[:,1],combined_indices_init[:,2],combined_indices_init[:,3],combined_indices_init[:,4]] = True
-        
-        # 11.2 计算当前帧中未注册体素的比例
         # this frame_unregistered
         this_un = self.unregistered_mask[unique_indices[:,1],unique_indices[:,2],unique_indices[:,3],unique_indices[:,4]]
-        
-        # 11.3 根据未注册体素比例判断是否需要关键帧
         if this_un.sum()/len(unique_indices) >= self.unregistered_threshold:
             is_keyframe = True
-            # 重置未注册掩码，为下一帧做准备
             self.unregistered_mask.fill_(False)
         else:
             is_keyframe = False
-            
-        # 12. 返回处理后的点云数据和关键帧标志
         return torch.tensor(points).cuda(), torch.tensor(colors).cuda(), is_keyframe
     
     def reset_unregistered(self):
@@ -719,13 +548,6 @@ class TSDFBackEnd():
         
     def get_instance_ids(self, points):
         voxels, _, ins_colors, voxels_id, _, _, _ = self.get_all_voxels()
-        
-        if voxels.shape[0] == 0:
-            instance_ids = torch.full((len(points),), -1, device=self.device, dtype=torch.long)
-            # Return black color (or any default color)
-            colors = torch.zeros((len(points), 3), device=self.device, dtype=torch.float32)
-            return instance_ids, colors
-
         kdtree = KDTree(voxels.cpu().numpy())
         instance_ids = torch.zeros((len(points))).to(self.device).long()
         for i in range(len(points)):
@@ -759,7 +581,6 @@ class TSDFBackEnd():
     
     
         
-    @timeit
     def finalize(self):
         mesh = self.get_mesh()
         o3d.io.write_triangle_mesh(f'{self.save_dir}/tsdf_mesh.ply', mesh)

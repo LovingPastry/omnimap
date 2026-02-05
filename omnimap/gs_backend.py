@@ -25,6 +25,7 @@ from gaussian.utils.eval_utils import eval_rendering, eval_rendering_kf, eval_fa
 # from gaussian.gui import gui_utils, slam_gui
 import warnings
 warnings.filterwarnings('ignore')
+from visual_module import timeit
 
 class GSBackEnd(mp.Process):
     def __init__(self, config, tsdfs, save_dir, vis_gui):
@@ -219,7 +220,8 @@ class GSBackEnd(mp.Process):
                     self.exposure_optimizers.zero_grad(set_to_none=True)
             pbar.set_description(f"Global GS Refinement lr {lr:.3E} loss {loss.item():.3f}")
                 
-        
+    
+    @timeit
     def finalize(self):
         if self.use_post_refine:
             self.post_refine()
@@ -227,6 +229,7 @@ class GSBackEnd(mp.Process):
         return
 
     @torch.no_grad()
+    @timeit
     def eval_fast(self, gtimages, traj, depth_scale=1000.0):
         self.cam_params = set_all_camera_deblur(gtimages, self.keyframe_stamps,  self.keyviewpoints, self.save_dir)
         eval_fast(gtimages, traj, self.gaussians, self.background,
@@ -234,6 +237,7 @@ class GSBackEnd(mp.Process):
         eval_rendering_kf(self.keyviewpoints, self.gaussians, self.background)
         
     @torch.no_grad()
+    @timeit
     def eval_rendering(self, gtimages, gtdepths, traj, depth_scale=1000.0):
         eval_rendering(gtimages, gtdepths, traj, self.gaussians,self.save_dir, self.background,
             self.projection_matrix, self.K, self.tsdfs, iteration="after_opt", depth_scale=depth_scale, cam_params = self.cam_params)
@@ -341,6 +345,18 @@ class GSBackEnd(mp.Process):
 
             ## Deinsifying / Pruning Gaussians
             with torch.no_grad():
+                # --- 新增：周期性 densify/prune + reset_opacity（像 initialize_map 那样）---
+                if self.iteration_count % self.gaussian_update_every == 0:
+                    self.gaussians.densify_and_prune(
+                        self.opt_params.densify_grad_threshold,
+                        self.gaussian_th,
+                        self.gaussian_extent,
+                        None
+                    )
+
+                if self.iteration_count % self.gaussian_reset == 0:
+                    self.gaussians.reset_opacity()
+                    
                 self.gaussians.optimizer.step()
                 self.gaussians.optimizer.zero_grad(set_to_none=True)
             # loss_for_blur.backward()
@@ -351,20 +367,33 @@ class GSBackEnd(mp.Process):
                 
                 
     def process_track_data(self, packet, hz):
+        """处理跟踪数据的核心函数，负责将每一帧数据集成到3D高斯地图中
+        
+        Args:
+            packet: 包含当前帧所有数据的字典
+            hz: 当前处理频率，用于自适应参数调整
+        """
+        # 1. 初始化投影矩阵（仅在首次调用时执行）
         if not hasattr(self, "projection_matrix"):
             H, W = packet["images"].shape[-2:]
             self.K = K = list(packet["intrinsics"]) + [W, H]
             self.projection_matrix = getProjectionMatrix2(znear=0.01, zfar=100.0, fx=K[0], fy=K[1], cx=K[2], cy=K[3], W=W, H=H).transpose(0, 1).cuda()
+        # 2. 从数据包中提取当前帧信息
         w2c = SE3(packet["poses"]).matrix().cuda()
         tstamp = packet['tstamp']
         idx = int(tstamp)
-        viewpoint = Camera.init_from_tracking(packet["images"]/255.0, packet["depths"], w2c, idx, self.projection_matrix, self.K, tstamp, \
-                       normal=packet["normals"], bg=self.background)
+        
+        # 3. 创建当前帧的相机视点对象
+        viewpoint = Camera.init_from_tracking(
+            packet["images"]/255.0, packet["depths"], w2c, idx, self.projection_matrix, 
+            self.K, tstamp, normal=packet["normals"], bg=self.background
+        )
 
-        # add viewpoint to the dict
+        # 4. 初始化阶段处理（仅在首次调用时执行）
         if not self.initialized:
             self.reset()
             new_points, new_coplors, is_keyframe = self.tsdfs.initializing_check()
+            # 将TSDF中的几何信息转换为3D高斯点（使用较小的初始尺度）
             self.gaussians.extend_from_tsdfs(new_points, new_coplors, self.tsdfs.voxel_size/5)
             # initialize map for a large amount of iterations
             self.initialize_map(0, viewpoint)
@@ -374,16 +403,30 @@ class GSBackEnd(mp.Process):
                 self.set_gui()
         # new image needs initialize for viewpoint and gs
         else:
+            # 非初始化阶段，检查是否需要添加新的几何点
             new_points, new_coplors, is_keyframe = self.tsdfs.initializing_check()
+            # 将TSDF中的新几何点转换为3D高斯点（使用较大的尺度）
             self.gaussians.extend_from_tsdfs(new_points, new_coplors, self.tsdfs.voxel_size/2)
+
+        # # --- 新增：只在 keyframe 才扩展新高斯（初始化阶段已做过）---
+        # if self.initialized and is_keyframe:
+        #     if new_points is not None and hasattr(new_points, "numel") and new_points.numel() > 0:
+        #         self.gaussians.extend_from_tsdfs(new_points, new_coplors, self.tsdfs.voxel_size/2)
+                
+        # 5. 关键帧判断逻辑
+        # 5.1 如果设置了等待最新关键帧标志，强制当前帧为关键帧
         if self.wait_latest_keyframe:
             is_keyframe = True
             self.wait_latest_keyframe = False
+            
+        # 5.2 非关键帧计数器递增
         if not is_keyframe:
             self.no_key_count += 1
-            # at least a keyframe per 1 frames
+            # 如果连续非关键帧数超过阈值，强制设为关键帧
         if self.no_key_count >= self.max_keyframe_skip:
                 is_keyframe = True
+                
+        # 5.3 如果与上一个关键帧间隔太小，不设为关键帧
         if len(self.keyframe_stamps)>0 and (idx-self.keyframe_stamps[-1])<3:
             is_keyframe = False
         # self.allviewpoints.append(viewpoint)
@@ -393,19 +436,27 @@ class GSBackEnd(mp.Process):
             self.no_key_count = 0
             # tell the tsdf to reset
             self.tsdfs.reset_unregistered()
+        # 7. 运动模糊处理（可选功能）
         if self.deblur:
+            # 7.1 首次初始化优化器
             if self.camera_optimizer is None:
                 opt_params = []
+                # 添加当前帧权重参数
                 opt_params.append({"params": [viewpoint.weight_this], "lr": self.config["opt_params"]["deblur_weight"], 
                                                 "name": "weight_this_{}".format(viewpoint.uid)})
+                # 添加模糊权重参数
                 opt_params.append({"params": [viewpoint.weight_blur], "lr": self.config["opt_params"]["deblur_weight"], 
                                                 "name": "weight_blur_{}".format(viewpoint.uid)})
+                # 添加模糊X方向平移参数
                 opt_params.append({"params": [viewpoint.blur_tran_x], "lr": self.config["opt_params"]["deblur_trans"], 
                                                 "name": "blur_tran_x_{}".format(viewpoint.uid)})
+                # 添加模糊Y方向平移参数
                 opt_params.append({"params": [viewpoint.blur_tran_y], "lr": self.config["opt_params"]["deblur_trans"], 
                                                 "name": "blur_tran_y_{}".format(viewpoint.uid)})
+                # 创建Adam优化器
                 self.camera_optimizer = torch.optim.Adam(opt_params)
             else:
+                # 7.2 为现有优化器添加新参数
                 new_params = []
                 new_params.append({"params": [viewpoint.weight_this], "lr": self.config["opt_params"]["deblur_weight"], 
                                                 "name": "weight_this_{}".format(viewpoint.uid)})
@@ -418,9 +469,11 @@ class GSBackEnd(mp.Process):
                 for param_group in new_params:
                     self.camera_optimizer.add_param_group(param_group)
         
+        # 8. 构建优化窗口：随机选择历史关键帧 + 当前帧
+        use_indices = torch.randperm(len(self.keyframe_stamps))[:self.window_size]  # 随机选择指定数量的关键帧索引
+        viewpoints = [viewpoint] + [self.keyviewpoints[random_id] for random_id in use_indices]  # 构建优化视点列表
         
-        use_indices = torch.randperm(len(self.keyframe_stamps))[:self.window_size]
-        viewpoints = [viewpoint] + [self.keyviewpoints[random_id] for random_id in use_indices] 
+        # 9. 执行地图优化：使用选定的视点窗口优化3D高斯参数
         self.map(viewpoints, self.frame_itr, idx, is_keyframe)
         
         if self.vis_gui:
@@ -439,7 +492,7 @@ class GSBackEnd(mp.Process):
                 self.add_camera(pose)
                 self.update_gs_pc()
             
-            
+    @timeit
     def gs_instance(self, vis=False):
         '''assiocate the instance id to gs'''
         gs_xyz = self.gaussians.get_xyz.clone().detach()
@@ -455,4 +508,3 @@ class GSBackEnd(mp.Process):
         if vis:
             o3d.visualization.draw_geometries([pc])
         o3d.io.write_point_cloud(f"{self.save_dir}/instance_gs.ply", pc)
-        

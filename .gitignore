@@ -3,6 +3,7 @@
 Thumbs.db
 .vscode/
 .idea/
+.marscode/
 
 # Python / Conda
 __pycache__/
@@ -46,6 +47,7 @@ data/
 datasets/
 checkpoints/
 weights/
+replica/
 *.pt
 *.pth
 *.ckpt
