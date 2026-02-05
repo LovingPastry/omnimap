@@ -56,9 +56,12 @@ instance:
   fill_dis: 0.05
   
 path:
-  data_path: /data/dyn/ScanNet/scans
-  yolo_config: /code1/dyn/codes/OpenWorld/YOLO-World/configs/pretrain/yolo_world_v2_l_clip_large_vlpan_bn_2e-3_100e_4x8gpus_obj365v1_goldg_train_800ft_lvis_minival.py
-  yolo_cp: /data/dyn/weights/yolo-world/yolo_world_v2_l_clip_large_o365v1_goldg_pretrain_800ft-9df82e55.pth
-  tap_cp1: /home/dyn/outdoor/tokenize-anything/weights/tap_vit_l_03f8ec.pkl
-  tap_cp2: /home/dyn/outdoor/tokenize-anything/weights/merged_2560.pkl
-  sbert_cp: /home/dyn/multimodal/SBERT/pretrained/model/all-MiniLM-L6-v2
+  # Dataset path - UPDATE THIS to your ScanNet dataset location
+  data_path: /path/to/scannet/scans
+  
+  # Model weights and configs (relative to this config file's directory)
+  yolo_config: ./yolo-world/yolo_world_v2_l_clip_large_vlpan_bn_2e-3_100e_4x8gpus_obj365v1_goldg_train_800ft_lvis_minival.py
+  yolo_cp: ../weights/yolo-world/yolo_world_v2_l_clip_large_o365v1_goldg_pretrain_800ft-9df82e55.pth
+  tap_cp1: ../weights/tokenize-anything/tap_vit_l_v1_1.pkl
+  tap_cp2: ../weights/tokenize-anything/merged_2560.pkl
+  sbert_cp: ../weights/sbert/all-MiniLM-L6-v2

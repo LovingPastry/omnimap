@@ -384,7 +384,7 @@ class TSDFBackEnd():
                 mask_image = np.maximum(mask_image, mask_colored)  
             self.last_mask_image = mask_image
         
-        sem_tokens = outputs["sem_tokens"][mask_index].unsqueeze_(1)
+        sem_tokens = outputs["sem_tokens"][mask_index]
         captions = self.tap_model.generate_text(sem_tokens)
         captions = captions[sorted_indices][ok_area_mask]
         new_captions = []

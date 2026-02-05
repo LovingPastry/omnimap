@@ -3,6 +3,7 @@ import numpy as np
 import rich
 import copy
 import torch
+import os
 from matplotlib import cm
 
 
@@ -25,6 +26,25 @@ def Log(*args, tag="GaussianSplatting"):
     rich.print(f"[{style}]{tag}:[/{style}]", *args)
 
 
+def _resolve_paths(cfg, config_dir):
+    """
+    Resolve relative paths in the 'path' section of config.
+    Paths starting with './' or '../' are resolved relative to config_dir.
+    Absolute paths (starting with '/') are left unchanged.
+    
+    Args:
+        cfg (dict): config dictionary.
+        config_dir (str): directory where the config file is located.
+    """
+    if 'path' not in cfg:
+        return
+    
+    for key, value in cfg['path'].items():
+        if isinstance(value, str) and not os.path.isabs(value):
+            # Relative path - resolve it relative to config directory
+            cfg['path'][key] = os.path.normpath(os.path.join(config_dir, value))
+
+
 def load_config(path, default_path=None):
     """
     Loads config file.
@@ -37,6 +57,9 @@ def load_config(path, default_path=None):
         cfg (dict): config dict.
 
     """
+    # Get the directory where config file is located (for resolving relative paths)
+    config_dir = os.path.dirname(os.path.abspath(path))
+    
     # load configuration from per scene/dataset cfg.
     with open(path, "r") as f:
         cfg_special = yaml.full_load(f)
@@ -53,6 +76,9 @@ def load_config(path, default_path=None):
 
     # merge per dataset cfg. and main cfg.
     update_recursive(cfg, cfg_special)
+    
+    # Resolve relative paths in the 'path' section
+    _resolve_paths(cfg, config_dir)
 
     return cfg
 

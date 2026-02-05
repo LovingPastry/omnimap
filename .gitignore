@@ -70,3 +70,31 @@ Makefile
 thirdparty/**/build/
 thirdparty/**/dist/
 thirdparty/**/pip-wheel-metadata/
+# Outputs and weights
+outputs/
+weights/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.eggs/
+
+# Build
+build/
+dist/
+*.so
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
