@@ -14,6 +14,11 @@ import os
 import numpy as np
 import open3d as o3d
 import torch
+import torch.nn.functional as F
+from typing import Tuple, Dict, Optional, List
+import numpy as np
+from tqdm import tqdm
+import math
 from plyfile import PlyData, PlyElement
 from simple_knn._C import distCUDA2
 from torch import nn
@@ -28,7 +33,9 @@ from gaussian.utils.general_utils import (
 )
 from gaussian.utils.graphics_utils import BasicPointCloud, getWorld2View2
 from gaussian.utils.sh_utils import RGB2SH
-
+from gaussian.utils.camera_utils import Camera
+from visual_module import timeit
+import copy
 
 class GaussianModel:
     def __init__(self, sh_degree: int, config=None):
@@ -63,6 +70,11 @@ class GaussianModel:
         self.ply_input = None
 
         self.isotropic = False
+        
+        self.uncertainty_scores = None  # 存储每个高斯点的不确定度分数
+        self.cam_height = None  # 相机高度（从配置或数据中获取）
+        self.frontier_gaussian = {}  # 前沿区域的高斯点
+        
 
     def build_covariance_from_scaling_rotation(
         self, scaling, scaling_modifier, rotation
@@ -135,7 +147,21 @@ class GaussianModel:
     def parameters(self):
         """返回所有可训练参数"""
         return [self.get_xyz, self.get_scaling, self.get_rotation, self.get_features, self.get_opacity]
-
+    def capture(self):
+        return (
+            self.active_sh_degree,
+            self._xyz,
+            self._features_dc,
+            self._features_rest,
+            self._scaling,
+            self._rotation,
+            self._opacity,
+            self.max_radii2D,
+            self.xyz_gradient_accum,
+            self.denom,
+            self.optimizer.state_dict(),
+            self.spatial_lr_scale,
+        )
     def oneupSHdegree(self):
         if self.active_sh_degree < self.max_sh_degree:
             self.active_sh_degree += 1
@@ -690,11 +716,58 @@ class GaussianModel:
         
 
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
-        self.xyz_gradient_accum[update_filter] += torch.norm(
-            viewspace_point_tensor.grad[update_filter, :2], dim=-1, keepdim=True
-        )
+        """添加高斯点的稠密化统计信息，用于自适应调整高斯分布
+        Args:
+            viewspace_point_tensor: 视空间中的高斯点张量，包含梯度信息
+            update_filter: 布尔掩码，指示哪些高斯点需要更新统计信息
+        功能说明:
+            1. 累积梯度信息：用于判断哪些区域需要更多高斯点
+            2. 更新观测计数：用于计算平均梯度值
+            3. 为后续的稠密化和修剪操作提供数据支持
+        """
+        # 1. 累积指定高斯点的梯度范数
+        # 只使用前两个维度的梯度(x,y)，忽略深度方向的梯度
+        # 梯度范数反映了该点对渲染结果的影响程度
+        self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter, :2], dim=-1, keepdim=True)
+        # 2. 增加指定高斯点的观测计数
+        # 用于计算平均梯度值，避免单次梯度波动影响判断
         self.denom[update_filter] += 1
         
         
     def set_instance_coloor(self, colors):
         self.instance_color = RGB2SH(colors)
+
+    # @timeit
+    @torch.enable_grad()
+    def cal_cur_hessian(
+        self,
+        cam: Camera,
+        return_per_point: bool = True) -> torch.Tensor:
+        """
+        return_points:
+            if True, then the Hessian matrix is returned in shape (N, C), 
+            else, it is flatten in 1-D.
+        """
+        torch.cuda.synchronize()
+
+        from gaussian.renderer import modified_render
+        params = [self.capture()[1],self.capture()[6]]  # 只计算xyz和opacity的梯度
+        # params = [p for i, p in enumerate(params) if i not in self.filter_out_idx]
+        rendered_image = modified_render(viewpoint_camera=cam, pc=self, bg_color=cam.bg)["render"]
+
+        # 5. 反向传播
+        # rendered_image.sum().backward()
+        rendered_image.backward(gradient=torch.ones_like(rendered_image)*1e-6)
+        
+        # 6. 提取梯度
+        if return_per_point:
+            num_points = self.get_xyz.shape[0]
+            grads = [p.grad for p in params if p.grad is not None]
+            hessian = torch.cat([g.detach().reshape(num_points, -1) for g in grads], dim=1) \
+                if grads else torch.zeros((num_points, 0), device="cuda")
+        else:
+            grads = [p.grad for p in params if p.grad is not None]
+            hessian = torch.cat([g.detach().reshape(-1) for g in grads], dim=0) \
+                if grads else torch.zeros((0,), device="cuda")
+        torch.cuda.synchronize()
+        return hessian

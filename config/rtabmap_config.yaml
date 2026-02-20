@@ -43,8 +43,11 @@ opt_params:
 tsdf:
   voxel_size: 0.006
   block_resolution: 8
-  block_count: 10000
+  block_count: 30000
   unregistered_threshold: 0.005
+  # use_spatial_bounds: true
+  spatial_bounds: [-1.0, -0.2, -0.4, 0.4, -0.3, 0.5]  
+  # spatial_bounds: [-5.0, 5.0, -5.0, 5.0, -5.0, 5.0]  
   
 instance:
   instance_skip: 1

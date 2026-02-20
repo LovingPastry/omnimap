@@ -3,13 +3,14 @@ import time
 import numpy as np
 import torch
 import torch.multiprocessing as mp
-from tqdm import trange
+from tqdm import trange, tqdm
 from munch import munchify
 from lietorch import SE3, SO3
 import open3d as o3d
 import cv2
 from collections import defaultdict
 import os
+import copy
 import matplotlib.pyplot as plt
 from PIL import Image, ImageDraw, ImageFont
 from util.utils import Log, clone_obj
@@ -17,18 +18,23 @@ from util.vis_utils import draw_camera, create_camera_trajectory_line, update_ca
 from gaussian.renderer import render
 from gaussian.utils.loss_utils import l1_loss, ssim
 from gaussian.scene.gaussian_model import GaussianModel
+from gaussian.renderer.fisher_grandient import NextBestViewOptimizer
 from gaussian.utils.graphics_utils import getProjectionMatrix2
 from gaussian.utils.sh_utils import SH2RGB
-from gaussian.utils.mapping_utils import to_se3_vec, get_loss_normal, get_loss_mapping_rgbd, get_loss_depth_normal
-from gaussian.utils.camera_utils import Camera
+from gaussian.utils.mapping_utils import to_se3_vec, get_loss_normal, get_loss_mapping_rgbd, get_loss_depth_normal,SE3_exp
+from gaussian.utils.camera_utils import Camera,HemisphereCamera
 from gaussian.utils.eval_utils import eval_rendering, eval_rendering_kf, eval_fast, eval_rendering_all, set_all_camera_deblur, eval_rendering_blur
 # from gaussian.gui import gui_utils, slam_gui
 import warnings
 warnings.filterwarnings('ignore')
 from visual_module import timeit
+import math
+from typing import Tuple, Dict, Optional, List
+from tsdf_backend import TSDFBackEnd
+
 
 class GSBackEnd(mp.Process):
-    def __init__(self, config, tsdfs, save_dir, vis_gui):
+    def __init__(self, config, tsdfs: TSDFBackEnd, save_dir:str, vis_gui: bool = False):
         super().__init__()
         self.config = config
         
@@ -56,6 +62,8 @@ class GSBackEnd(mp.Process):
         self.key_camera_centers = [] 
         self.key_center_rays = []
         self.key_graph = {}
+        
+        self.sence_center = None
 
     def set_gui(self):
         # OpenCV window name
@@ -393,6 +401,7 @@ class GSBackEnd(mp.Process):
         if not self.initialized:
             self.reset()
             new_points, new_coplors, is_keyframe = self.tsdfs.initializing_check()
+            
             # 将TSDF中的几何信息转换为3D高斯点（使用较小的初始尺度）
             self.gaussians.extend_from_tsdfs(new_points, new_coplors, self.tsdfs.voxel_size/5)
             # initialize map for a large amount of iterations
@@ -476,6 +485,23 @@ class GSBackEnd(mp.Process):
         # 9. 执行地图优化：使用选定的视点窗口优化3D高斯参数
         self.map(viewpoints, self.frame_itr, idx, is_keyframe)
         
+        # 10. 视角规划
+        if self.sence_center is None:
+            self.sence_center = self.tsdfs.get_pointcloud_center()
+            # Log(f"Scene center initialized at {self.sence_center.cpu().numpy()}", tag="NextBestView")
+        else:
+            Log(f"Scene center initialized at {self.sence_center.cpu().numpy()}", tag="NextBestView")
+            hemisphere_viewpoint = HemisphereCamera.from_camera(viewpoint, self.sence_center)
+            torch.cuda.synchronize()
+
+            history_hessian = self.cal_history_hessian(keyframe_viewpoints=self.keyviewpoints)
+            # history_hessian = torch.zeros((), device='cuda')
+            fisher = self.cal_fisher_info(hemisphere_viewpoint, history_hessian)
+            Log(f"history_hessian at frame {idx}: {fisher}", tag="NextBestView")
+            self.get_fisher_grad(hemisphere_viewpoint, history_hessian)
+
+            torch.cuda.synchronize()
+
         if self.vis_gui:
             gt_image = packet["images"].permute(1,2,0).clone()
             self.images[0] = torch.clamp(gt_image, 0, 255).cpu().numpy()[:, :, ::-1] 
@@ -508,3 +534,64 @@ class GSBackEnd(mp.Process):
         if vis:
             o3d.visualization.draw_geometries([pc])
         o3d.io.write_point_cloud(f"{self.save_dir}/instance_gs.ply", pc)
+
+
+    def cal_history_hessian(
+        self,
+        keyframe_viewpoints: List[Camera] = None
+    ) -> torch.Tensor:
+        """计算历史关键帧的 Fisher 信息量
+        Args:
+            keyframe_viewpoints: 关键帧视点列表
+        Returns:
+            history_hessian: 历史关键帧的 Fisher 信息量综合
+        """
+        if keyframe_viewpoints is None:
+            keyframe_viewpoints = self.keyviewpoints
+        history_hessian = None
+        for keyframe in keyframe_viewpoints:
+            keyframe_hessian = self.gaussians.cal_cur_hessian(cam=keyframe, return_per_point=True)
+            if history_hessian is None:
+                history_hessian = torch.zeros_like(keyframe_hessian)
+            history_hessian += keyframe_hessian
+        return history_hessian
+
+    def cal_fisher_info(self, cam: Camera, history_hessian: torch.Tensor):
+        """计算当前视点的 Fisher 信息量
+        Args:
+            cam: Camera 对象
+            history_hessian: 历史关键帧的 Fisher 信息量综合
+        Returns:
+            fisher: 当前视点的 Fisher 信息量
+        """
+        cur_hessian = self.gaussians.cal_cur_hessian(cam=cam, return_per_point=True)
+        fisher = torch.sum(cur_hessian * torch.reciprocal(history_hessian + 0.1))
+        return fisher
+
+    @timeit
+    def get_fisher_grad(self, viewpoint:HemisphereCamera, history_hessian: torch.Tensor, eps=1e-3):
+        """
+        使用中心差分近似 Fisher 信息量对 theta/phi 的梯度
+        返回: torch.Tensor([dF/dtheta, dF/dphi])
+        不会修改传入的 viewpoint
+        """
+        base_theta = float(viewpoint.theta.item())
+        base_phi = float(viewpoint.phi.item())
+        device = viewpoint.theta.device
+
+        def fisher_at(theta_val, phi_val):
+            temp_cam = copy.deepcopy(viewpoint)
+            fisher = self.cal_fisher_info(temp_cam,history_hessian)
+            Log(f"Fisher at (theta={theta_val:.3f}, phi={phi_val:.3f}): {fisher.item():.6f}", tag="NextBestView")
+            return fisher
+
+        f_theta_plus = fisher_at(base_theta + eps, base_phi)
+        f_theta_minus = fisher_at(base_theta - eps, base_phi)
+        dF_dtheta = (f_theta_plus - f_theta_minus) / (2.0 * eps)
+
+        f_phi_plus = fisher_at(base_theta, base_phi + eps)
+        f_phi_minus = fisher_at(base_theta, base_phi - eps)
+        dF_dphi = (f_phi_plus - f_phi_minus) / (2.0 * eps)
+        Log(f"Fisher gradient: dF/dtheta={dF_dtheta:.6f}, dF/dphi={dF_dphi:.6f}", tag="NextBestView")
+
+        return torch.stack([dF_dtheta, dF_dphi]).to(device)

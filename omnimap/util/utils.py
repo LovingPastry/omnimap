@@ -12,6 +12,7 @@ _log_styles = {
     "GaussianSplatting": "bold magenta",
     "Open-Instance": "bold yellow",
     "Eval": "bold red",
+    "NextBestView": "bold blue",
 }
 
 

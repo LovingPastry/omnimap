@@ -29,6 +29,7 @@ from scipy.spatial.transform import Rotation as R
 
 import rospy
 from sensor_msgs.msg import Image, CameraInfo
+from geometry_msgs.msg import PoseStamped
 from message_filters import ApproximateTimeSynchronizer, Subscriber
 from cv_bridge import CvBridge
 import tf2_ros
@@ -128,6 +129,8 @@ class OmniROSNode:
             [self.rgb_sub, self.depth_sub], queue_size=10, slop=0.1
         )
         self.tsync.registerCallback(self.image_callback)
+        self.target_pose_pub = rospy.Publisher("/omnimap/target_pose", PoseStamped, queue_size=1)
+        self.target_frame_id = "world"
         
         rospy.loginfo("OmniROSNode initialized, waiting for images and TF...")
 
@@ -212,8 +215,34 @@ class OmniROSNode:
             is_last=False,
             pose_44=pose_4x4_tensor[None],
         )
+        self.publish_target_from_gs()
         self.index += 1
 
+    def publish_target_from_gs(self):
+        if not hasattr(self.omni.gs, "next_viewpoint"):
+            return
+        vp = self.omni.gs.next_viewpoint
+        if vp is None:
+            return
+
+        # c2w = (world_view_transform.T).inverse()
+        c2w = (vp.world_view_transform.T).inverse().cpu().numpy()
+        pos = c2w[:3, 3]
+        quat = R.from_matrix(c2w[:3, :3]).as_quat()  # [x, y, z, w]
+
+        msg = PoseStamped()
+        msg.header.stamp = rospy.Time.now()
+        msg.header.frame_id = self.target_frame_id
+        msg.pose.position.x = float(pos[0])
+        msg.pose.position.y = float(pos[1])
+        msg.pose.position.z = float(pos[2])
+        msg.pose.orientation.x = float(quat[0])
+        msg.pose.orientation.y = float(quat[1])
+        msg.pose.orientation.z = float(quat[2])
+        msg.pose.orientation.w = float(quat[3])
+
+        self.target_pose_pub.publish(msg)
+        
     def terminate(self):
         if self.output != "None":
             save_trajectory(self.omni, self.all_inputs, self.output)

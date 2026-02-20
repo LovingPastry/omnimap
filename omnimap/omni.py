@@ -53,9 +53,7 @@ class OMNI:
         normal = F.interpolate(normal, input_size, mode='bicubic')
         normal = normal.float().squeeze()
         return normal
-    
 
-    
     def sharpness(self, image):
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
@@ -67,11 +65,8 @@ class OMNI:
         
         if self.intrinsics is None:
             self.intrinsics = intrinsics[0]
-            
-        # for tsdf
-        # start_time = time.time()
+
         self.tsdf_fusion.integrate(image[0].permute(1,2,0).clone(), depth[0].clone(), intrinsics[0].clone(), pose_44[0].clone(), tstamp)
-        # print("integrate time", time.time()-start_time)
         
         with torch.no_grad():
             self.images[tstamp] = image
@@ -84,21 +79,16 @@ class OMNI:
             inputs = inputs.sub_(self.MEAN).div_(self.STDV)
             normal = self.prior_extractor(inputs[0])
         
-        # if blur?
-        # skip = False
-        # if self.config["Training"]["deblur"]:
-        #     sharp = self.sharpness(image[0].permute(1,2,0).cpu().numpy())
-        #     skip = sharp<90
-        data = { 'tstamp':   tstamp,
+        data = { 
+                'tstamp':   tstamp,
                 'poses':    pose[0],
                 'images':   image[0],
                 'depths':   depth[0],
                 'intrinsics':   intrinsics[0],
-                'normals': normal if self.config["Training"]["use_omni_normal"] else None}
+                'normals': normal if self.config["Training"]["use_omni_normal"] else None
+                }
         
-        # start_time = time.time()
         self.gs.process_track_data(data, self.hz)
-        # print("gs all time", time.time()-start_time)
             
         if tstamp % update_rate == 0:
             loss_dict = {

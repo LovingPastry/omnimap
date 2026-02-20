@@ -49,6 +49,15 @@ class TSDFBackEnd():
         self.block_resolution = self.config["tsdf"]["block_resolution"]
         self.block_count = self.config["tsdf"]["block_count"]
         self.unregistered_threshold = self.config["tsdf"]["unregistered_threshold"]
+        self.use_spatial_bounds = self.config["tsdf"].get("use_spatial_bounds", False)
+        if self.use_spatial_bounds:
+            # 读取边界框配置 [x_min, x_max, y_min, y_max, z_min, z_max]
+            bounds = self.config["tsdf"].get("spatial_bounds", None)
+            if bounds is not None:
+                self.spatial_bounds = torch.tensor(bounds, device=self.device, dtype=torch.float32)
+            else:
+                self.use_spatial_bounds = False
+        
         self.world = o3d.t.geometry.VoxelBlockGrid(
             ('tsdf', 'weight', 'color'),
             (o3c.float32, o3c.float32, o3c.float32),
@@ -94,15 +103,50 @@ class TSDFBackEnd():
         if self.vis_gui:
             self.o3d_window = None
         
+    def visualize_spatial_bounds(self) -> o3d.geometry.LineSet:
+        """创建边界框的可视化线集
+        Returns:
+            lineset: Open3D 线集对象
+        """
+        if not self.use_spatial_bounds:
+            return None
+        
+        bounds = self.spatial_bounds.cpu().numpy()
+        x_min, x_max, y_min, y_max, z_min, z_max = bounds
+        points = [
+            [x_min, y_min, z_min], [x_max, y_min, z_min],
+            [x_max, y_max, z_min], [x_min, y_max, z_min],
+            [x_min, y_min, z_max], [x_max, y_min, z_max],
+            [x_max, y_max, z_max], [x_min, y_max, z_max]
+        ]   # 定义8个顶点
+        lines = [
+            [0, 1], [1, 2], [2, 3], [3, 0],  # 底面
+            [4, 5], [5, 6], [6, 7], [7, 4],  # 顶面
+            [0, 4], [1, 5], [2, 6], [3, 7]   # 竖边
+        ]   # 定义12条边
+        
+        lineset = o3d.geometry.LineSet()
+        lineset.points = o3d.utility.Vector3dVector(points)
+        lineset.lines = o3d.utility.Vector2iVector(lines)
+        lineset.colors = o3d.utility.Vector3dVector([[1, 0, 0] for _ in range(len(lines))])  # 红色
+        return lineset
+    
+    # 在 update_vis() 中添加边界框可视化
     def update_vis(self):
         if self.o3d_window is None:
             self.o3d_window = o3d.visualization.VisualizerWithKeyCallback()
             self.o3d_window.create_window(window_name="Instance Viewer", width=860, height=540)
             self.instance_vis = None
+            self.bounds_vis = None
         if self.instance_vis is not None:
             self.o3d_window.remove_geometry(self.instance_vis)
         self.instance_vis = self.vis_instance()
         self.o3d_window.add_geometry(self.instance_vis)
+        if self.use_spatial_bounds:
+            if self.bounds_vis is not None:
+                self.o3d_window.remove_geometry(self.bounds_vis)
+            self.bounds_vis = self.visualize_spatial_bounds()
+            self.o3d_window.add_geometry(self.bounds_vis)
         self.o3d_window.poll_events()
         self.o3d_window.update_renderer()
         
@@ -251,6 +295,31 @@ class TSDFBackEnd():
         eroded_mask = eroded_mask.squeeze(0).squeeze(0) >= kernel_size*kernel_size
         return eroded_mask
 
+
+    def filter_points_by_bounds(self, points: torch.Tensor) -> torch.Tensor:
+        """根据空间范围过滤点
+        Args:
+            points: [N, 3] 点云坐标
+            
+        Returns:
+            mask: [N] 布尔掩码，True 表示点在范围内
+        """
+        if not self.use_spatial_bounds:
+            return torch.ones(points.shape[0], dtype=torch.bool, device=self.device)
+        
+        # 解析边界 [x_min, x_max, y_min, y_max, z_min, z_max]
+        x_min, x_max = self.spatial_bounds[0], self.spatial_bounds[1]
+        y_min, y_max = self.spatial_bounds[2], self.spatial_bounds[3]
+        z_min, z_max = self.spatial_bounds[4], self.spatial_bounds[5]
+        
+        # 检查每个维度是否在范围内
+        mask = (
+            (points[:, 0] >= x_min) & (points[:, 0] <= x_max) &
+            (points[:, 1] >= y_min) & (points[:, 1] <= y_max) &
+            (points[:, 2] >= z_min) & (points[:, 2] <= z_max)
+        )
+        
+        return mask
             
     def integrate(self, color_im, depth_im, cam_intr, cam_pose, tstamp, obs_weight=1.0):
         self.depth_im = depth_im.cuda()
@@ -266,6 +335,38 @@ class TSDFBackEnd():
             cam_intr = cam_intr.cpu().numpy()
             intrinsic_np =  np.array([cam_intr[0], 0.0, cam_intr[2], 0.0, cam_intr[1], cam_intr[3], 0.0, 0.0, 1.0]).reshape(3,3)
             self.intrinsic = o3c.Tensor.from_numpy(intrinsic_np)
+            
+        if self.use_spatial_bounds:
+            # 1. 将深度图转换为点云
+            if self.height is None:
+                self.height, self.width = depth_im.shape[:2]
+            
+            temp_coords, temp_valid = self.depth_to_point_cloud(
+                depth_im.cpu().numpy(), 
+                extrinsic, 
+                self.intrinsic, 
+                self.width, 
+                self.height, 
+                1000.0
+            )
+            
+            # 2. 过滤超出范围的点
+            bounds_mask = self.filter_points_by_bounds(temp_coords)
+            
+            # 3. 将无效点的深度设为 0（不参与 TSDF 融合）
+            if bounds_mask.sum() < temp_valid.sum():
+                # 将掩码映射回深度图
+                depth_mask = torch.zeros_like(depth_im, dtype=torch.bool).cuda()
+                depth_mask = depth_mask.permute(1, 0).reshape(-1)
+                depth_mask[temp_valid] = bounds_mask[temp_valid]
+                depth_mask = depth_mask.reshape(self.width, self.height).permute(1, 0)
+                
+                # 修改深度图
+                depth_im_filtered = depth_im.clone()
+                depth_im_filtered[~depth_mask] = 0
+                depth = o3d.t.geometry.Image(np.ascontiguousarray(depth_im_filtered.cpu().numpy())).to(o3c.uint16).to(self.o3c_device)
+                
+        
         # max_depth have been valued
         frustum_block_coords = self.world.compute_unique_block_coordinates(depth, self.intrinsic, extrinsic, 1000.0, 20.0)
         self.world.integrate(frustum_block_coords, depth, color, self.intrinsic, extrinsic, 1000.0, 20.0)
@@ -290,6 +391,9 @@ class TSDFBackEnd():
         # (N, 3)       (N,)
         self.obs_coords, depth_valid = self.depth_to_point_cloud(depth_im.cpu().numpy(), extrinsic, self.intrinsic, self.width, self.height, 1000.0)
         
+        if self.use_spatial_bounds:
+            bounds_mask = self.filter_points_by_bounds(self.obs_coords)
+            depth_valid = depth_valid & bounds_mask
 
         # (N,)            (N,3)                        (N,)                             (N,)
         cube_indices, local_voxel_indices, cube_indices_indices, block_valid = self.find_buf_indices_from_coord(
@@ -307,6 +411,12 @@ class TSDFBackEnd():
         self.tstamp = tstamp
         if tstamp%self.instance_skip != 0:
             return
+        
+        if self.use_spatial_bounds and tstamp % 10 == 0:  # 每10帧输出一次
+            total_points = depth_valid.sum().item()
+            filtered_points = self.all_vaild.sum().item()
+            filter_ratio = (total_points - filtered_points) / total_points * 100 if total_points > 0 else 0
+            Log(f"Frame {tstamp}: Filtered {filter_ratio:.1f}% points outside bounds", tag="TSDF")
         
         img = color_im.cpu().numpy()[:,:,::-1]
         '''[1] yolo-world'''
@@ -700,6 +810,17 @@ class TSDFBackEnd():
         ins_colors = torch.index_select(self.instance_colors, 0, max_pro_instance_id)/255.0
         return points, pc_colors, ins_colors, max_pro_instance_id, confidence_colors, unique_labels, labels_to_remove
 
+    def get_pointcloud_center(self) -> torch.Tensor:
+        """计算当前点云的几何中心
+        Returns:
+            center: [3] 点云中心坐标
+        """
+        points, _, _, _, _, _, _ = self.get_all_voxels(if_confidence=False)
+        if points.shape[0] == 0:
+            # 如果没有点，返回原点
+            return None
+        # 计算几何中心（均值）
+        return points.mean(dim=0)
 
     def vis_ply_final(self, vis=False):        
         points, pc_colors, ins_colors, max_pro_instance_id, confidence_colors, unique_labels, labels_to_remove = self.get_all_voxels(if_confidence=True)

@@ -141,7 +141,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description=(
             "Usage: \n"
-            "python demo.py --dataset rtabmap --scene replica_cup --start 0 --length 1000 --vis_gui"
+            "CUDA_LAUNCH_BLOCKING=1 python demo.py --dataset rtabmap --scene replica_cup --start 0 --length 1000 --vis_gui"
         ),
         formatter_class=argparse.RawTextHelpFormatter
     )
@@ -185,6 +185,7 @@ if __name__ == "__main__":
         pose = f"{dataset_dir}/{args.scene}/imap/00/traj_w_c.txt"
         args.calib = f"calib/{args.dataset}.txt"
     elif args.dataset == "scannet":
+        raise NotImplementedError("Scannet dataset is not supported yet.")
         rgbdir = f"{dataset_dir}/{args.scene}/color"
         depthdir = f"{dataset_dir}/{args.scene}/depth"
         pose = f"{dataset_dir}/{args.scene}/traj_w_c.txt"  # Converted from pose/
