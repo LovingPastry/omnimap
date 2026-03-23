@@ -90,15 +90,17 @@ class NextBestViewSelector:
         center_pos = center_camera.camera_center  # [3]
         
         for _ in range(num_samples):
-            # 随机位置
-            theta = np.random.uniform(0, 2*np.pi)
-            phi = np.random.uniform(0, np.pi)
+            # 随机位置（Z-up 角度语义）
+            # theta: 绕 z 轴方位角 [0, 2pi)
+            # phi: 相对 XY 平面的仰角 [0, pi/2]（仅采样上半球）
+            theta = np.random.uniform(0.0, 2.0 * np.pi)
+            phi = np.random.uniform(0.0, 0.5 * np.pi)
             r = np.random.uniform(0.5 * radius, radius)
             
             offset = torch.tensor([
-                r * np.sin(phi) * np.cos(theta),
-                r * np.sin(phi) * np.sin(theta),
-                r * np.cos(phi)
+                r * np.cos(phi) * np.cos(theta),
+                r * np.cos(phi) * np.sin(theta),
+                r * np.sin(phi),
             ], device=device)
             
             new_pos = center_pos + offset

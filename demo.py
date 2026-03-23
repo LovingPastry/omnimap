@@ -5,6 +5,7 @@ os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
 import sys  # nopep8
+
 sys.path.append(os.path.join(os.path.dirname(__file__), "omnimap"))  # nopep8
 import time
 import torch
@@ -143,7 +144,7 @@ if __name__ == "__main__":
             "Usage: \n"
             "CUDA_LAUNCH_BLOCKING=1 python demo.py --dataset rtabmap --scene replica_cup --start 0 --length 1000 --vis_gui"
         ),
-        formatter_class=argparse.RawTextHelpFormatter
+        formatter_class=argparse.RawTextHelpFormatter,
     )
     parser.add_argument("--dataset", type=str, default="replica", help="dataset name")
     parser.add_argument("--scene", type=str, default="room_0", help="scene name")
@@ -246,7 +247,7 @@ if __name__ == "__main__":
             pose_44=pose_44,
         )
     progress_bar.close()
-    
+
     omni.terminate()
     save_trajectory(omni, all_inputs, args.output)
     print(f"Done, results saved to {args.output}")
