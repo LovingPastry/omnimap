@@ -1,7 +1,5 @@
 import random
 import time
-import math
-import copy
 import numpy as np
 import torch
 import cv2
@@ -23,7 +21,13 @@ from util.vis_utils import (
 from gaussian.renderer import render
 from gaussian.utils.loss_utils import l1_loss, ssim
 from gaussian.scene.gaussian_model import GaussianModel
-from gaussian.renderer.fisher_grandient import NextBestViewOptimizer
+
+# from gaussian.renderer.nbv.legacy_fisher import LegacyFisherEvaluator as FisherEvaluator
+# from gaussian.renderer.nbv.diag_fisher import DiagFisherEvaluator, LogFisherEvaluator, LogSquareFisherEvaluator as FisherEvaluator
+from gaussian.renderer.nbv.diag_fisher import LogFisherEvaluator as FisherEvaluator
+
+from gaussian.renderer.nbv.visualization import FisherVisualizer
+
 from gaussian.utils.graphics_utils import getProjectionMatrix2
 from gaussian.utils.sh_utils import SH2RGB
 from gaussian.utils.mapping_utils import (
@@ -33,7 +37,7 @@ from gaussian.utils.mapping_utils import (
     get_loss_depth_normal,
     SE3_exp,
 )
-from gaussian.utils.camera_utils import Camera, HemisphereCamera
+from gaussian.utils.camera_utils import Camera
 from gaussian.utils.eval_utils import (
     eval_rendering,
     eval_rendering_kf,
@@ -48,7 +52,6 @@ import warnings
 
 warnings.filterwarnings("ignore")
 from visual_module import timeit
-import math
 from typing import Tuple, Dict, Optional, List
 from tsdf_backend import TSDFBackEnd
 
@@ -92,6 +95,11 @@ class GSBackEnd(mp.Process):
         self._last_gs_colors = None
         self._last_fisher_points = None
         self._last_fisher_colors = None
+        self._fisher_visgui_notice_logged = False
+        self.fisher_eval = FisherEvaluator(self.gaussians, self.config)
+        self.fisher_visualizer = FisherVisualizer(
+            self.gaussians, self.config, self.save_dir, self.vis_gui
+        )
 
     def set_gui(self):
         # OpenCV window name
@@ -121,6 +129,7 @@ class GSBackEnd(mp.Process):
         self.o3d_window.create_window(
             window_name="3DGS Point Viewer", width=860, height=540
         )
+        self.fisher_visualizer.attach_window(self.o3d_window)
         self.gs_pc_geometries, self.cam_lines, self.cam_plan = None, None, None
         self.cam_traj = create_camera_trajectory_line()
         self.fisher_hemi_geometry = None
@@ -152,6 +161,9 @@ class GSBackEnd(mp.Process):
         pc.colors = o3d.utility.Vector3dVector(rgbs[mask])
         self._last_gs_points = np.asarray(pc.points).copy()
         self._last_gs_colors = np.asarray(pc.colors).copy()
+        self.fisher_visualizer.update_gaussian_cache(
+            self._last_gs_points, self._last_gs_colors
+        )
         if self.config["scene"] == "room_0":
             bbox = o3d.geometry.AxisAlignedBoundingBox(
                 min_bound=(-np.inf, -np.inf, -np.inf), max_bound=(np.inf, np.inf, 0.7)
@@ -686,24 +698,6 @@ class GSBackEnd(mp.Process):
                     tag="NextBestView",
                 )
 
-        if self.sence_center is not None:
-            hemisphere_viewpoint = HemisphereCamera.from_camera(
-                viewpoint, self.sence_center
-            )
-            torch.cuda.synchronize()
-
-            history_hessian = self.cal_history_hessian(
-                keyframe_viewpoints=self.keyviewpoints
-            )
-            fisher = self.cal_fisher_info(hemisphere_viewpoint, history_hessian)
-            Log(
-                f"history_hessian at frame {idx}: {history_hessian}"
-                f"fisher at frame {idx}: {fisher}",
-                tag="NextBestView",
-            )
-            self.get_fisher_grad(hemisphere_viewpoint, history_hessian)
-            torch.cuda.synchronize()
-
         if self.vis_gui:
             gt_image = packet["images"].permute(1, 2, 0).clone()
             self.images[0] = torch.clamp(gt_image, 0, 255).cpu().numpy()[:, :, ::-1]
@@ -716,7 +710,7 @@ class GSBackEnd(mp.Process):
             self.update_images(tstamp, hz)
             pose = np.linalg.inv(w2c.cpu().numpy())
             self.cam_traj = update_camera_trajectory(self.cam_traj, [pose[:3, 3]])
-            if idx % 10 == 0:
+            if idx % 1 == 0:
                 self.add_camera(pose)
                 self.update_gs_pc()
                 self.update_fisher_hemisphere_pc(
@@ -753,145 +747,18 @@ class GSBackEnd(mp.Process):
             o3d.visualization.draw_geometries([pc])
         o3d.io.write_point_cloud(f"{self.save_dir}/instance_gs.ply", pc)
 
-    def cal_history_hessian(
-        self, keyframe_viewpoints: List[Camera] = None
-    ) -> torch.Tensor:
-        """累计历史视角 Fisher 对角近似: H_train = Σ cur_H"""
-        if keyframe_viewpoints is None:
-            keyframe_viewpoints = self.keyviewpoints
-
-        # 保持与 gaussians.cal_cur_hessian 的参数选择一致（xyz + opacity）
-        params = [self.gaussians.capture()[1], self.gaussians.capture()[6]]
-        history_hessian = torch.zeros(
-            sum(p.numel() for p in params),
-            device=params[0].device,
-            dtype=params[0].dtype,
-        )
-
-        for keyframe in keyframe_viewpoints:
-            keyframe_hessian = self.gaussians.cal_cur_hessian(
-                cam=keyframe, return_per_point=False
-            )
-            history_hessian += keyframe_hessian
-
-        return history_hessian
-
-    def cal_fisher_info(self, cam: Camera, history_hessian: torch.Tensor):
-        cur_hessian = self.gaussians.cal_cur_hessian(cam=cam, return_per_point=False)
-
-        reg_lambda = float(self.config.get("fisher_reg_lambda", 0.1))
-        i_train = torch.reciprocal(history_hessian + reg_lambda)
-        fisher = torch.sum(cur_hessian * i_train)
-        return fisher
-
-    @timeit
-    def get_fisher_grad(
-        self, viewpoint: HemisphereCamera, history_hessian: torch.Tensor, eps=0.01
-    ):
-        """
-        使用有限差分近似 Fisher 信息量对 theta/phi 的梯度。
-        对 phi 采用边界策略：靠近 [0, pi/2] 边界时自动退化为单边差分，避免 clamp 导致伪零梯度。
-        返回: torch.Tensor([dF/dtheta, dF/dphi])
-        不会修改传入的 viewpoint
-        """
-        base_theta = float(viewpoint.theta.item())
-        base_phi = float(viewpoint.phi.item())
-        device = viewpoint.theta.device
-
-        def fisher_at(theta_val, phi_val):
-            temp_cam = copy.deepcopy(viewpoint)
-            temp_cam.set_angles(theta_val, phi_val)
-            fisher = self.cal_fisher_info(temp_cam, history_hessian)
-            Log(
-                f"Fisher at (theta={theta_val:.3f}, phi={phi_val:.3f}): {fisher.item():.6f}",
-                tag="NextBestView",
-            )
-            return fisher
-
-        f_theta_plus = fisher_at(base_theta + eps, base_phi)
-        f_theta_minus = fisher_at(base_theta - eps, base_phi)
-        dF_dtheta = (f_theta_plus - f_theta_minus) / (2.0 * eps)
-
-        phi_min, phi_max = 0.0, math.pi / 2.0
-        phi_step_plus = min(eps, max(phi_max - base_phi, 0.0))
-        phi_step_minus = min(eps, max(base_phi - phi_min, 0.0))
-
-        if phi_step_plus > 0.0 and phi_step_minus > 0.0:
-            f_phi_plus = fisher_at(base_theta, base_phi + phi_step_plus)
-            f_phi_minus = fisher_at(base_theta, base_phi - phi_step_minus)
-            dF_dphi = (f_phi_plus - f_phi_minus) / (phi_step_plus + phi_step_minus)
-        elif phi_step_plus > 0.0:
-            f_phi_base = fisher_at(base_theta, base_phi)
-            f_phi_plus = fisher_at(base_theta, base_phi + phi_step_plus)
-            dF_dphi = (f_phi_plus - f_phi_base) / phi_step_plus
-        elif phi_step_minus > 0.0:
-            f_phi_base = fisher_at(base_theta, base_phi)
-            f_phi_minus = fisher_at(base_theta, base_phi - phi_step_minus)
-            dF_dphi = (f_phi_base - f_phi_minus) / phi_step_minus
-        else:
-            dF_dphi = torch.zeros_like(dF_dtheta)
-
-        Log(
-            f"Fisher gradient: dF/dtheta={dF_dtheta:.6f}, dF/dphi={dF_dphi:.6f}",
-            tag="NextBestView",
-        )
-
-        return torch.stack([dF_dtheta, dF_dphi]).to(device)
-
-    def _fibonacci_hemisphere_dirs(self, n: int, device: torch.device):
-        # 均匀采样 Z-up 上半球单位方向 (z >= 0)
-        i = torch.arange(n, device=device, dtype=torch.float32) + 0.5
-        z = i / n  # [0, 1]
-        golden = (1.0 + 5.0**0.5) / 2.0
-        az = (2.0 * math.pi * i / golden) % (2.0 * math.pi)
-        r = torch.sqrt(torch.clamp(1.0 - z * z, min=0.0))
-        x = r * torch.cos(az)
-        y = r * torch.sin(az)
-        dirs = torch.stack([x, y, z], dim=-1)  # [n, 3]
-        return dirs
-
-    def _scalarize_fisher(self, fisher_tensor):
-        f = torch.as_tensor(fisher_tensor).detach().float()
-        f = torch.nan_to_num(f, nan=0.0, posinf=0.0, neginf=0.0)
-        return float(f.mean().item())
-
-    def _idw_on_sphere(self, sample_dirs, sample_vals, query_dirs, power=2.0):
-        dots = torch.clamp(query_dirs @ sample_dirs.T, -1.0, 1.0)
-        d = 1.0 - dots
-        wgt = 1.0 / (torch.pow(d, power) + 1e-6)
-        wgt = wgt / (wgt.sum(dim=1, keepdim=True) + 1e-8)
-        return (wgt * sample_vals[None, :]).sum(dim=1)
-
-    def _fisher_values_to_colors(self, fisher_vals: torch.Tensor):
-        fisher_vals = fisher_vals.detach().float()
-        lo = torch.quantile(fisher_vals, 0.05)
-        hi = torch.quantile(fisher_vals, 0.95)
-        denom = torch.clamp(hi - lo, min=1e-8)
-        fisher_norm = torch.clamp((fisher_vals - lo) / denom, 0.0, 1.0)
-        fisher_u8 = (fisher_norm * 255.0).to(torch.uint8).cpu().numpy()
-        fisher_img = fisher_u8.reshape(-1, 1)
-        bgr = cv2.applyColorMap(fisher_img, cv2.COLORMAP_TURBO).reshape(-1, 3)
-        rgb = bgr[:, ::-1].astype(np.float32) / 255.0
-        return rgb, fisher_norm
-
-    def _compute_history_hessian_for_fisher(self):
-        if len(self.keyviewpoints) > 0:
-            return self.cal_history_hessian(keyframe_viewpoints=self.keyviewpoints)
-        params = [self.gaussians.capture()[1], self.gaussians.capture()[6]]
-        return torch.zeros(
-            sum(p.numel() for p in params),
-            device=params[0].device,
-            dtype=params[0].dtype,
-        )
-
     def update_fisher_hemisphere_pc(
         self,
         viewpoint,
         idx: int,
-        num_samples: int = 32,
+        num_samples: int = 64,
         num_dense_points: int = 2048,
         power: float = 2.0,
     ):
+        Log(
+            f"Enter update_fisher_hemisphere_pc(frame={idx})",
+            tag="NextBestView",
+        )
         if self.sence_center is None:
             self.sence_center = self.tsdfs.get_pointcloud_center()
         if self.sence_center is None:
@@ -900,73 +767,30 @@ class GSBackEnd(mp.Process):
                 tag="NextBestView",
             )
             return
-
-        base_hemi = HemisphereCamera.from_camera(viewpoint, self.sence_center)
-        history_hessian = self._compute_history_hessian_for_fisher()
-
-        sample_dirs = self._fibonacci_hemisphere_dirs(num_samples, self.sence_center.device)
-        fisher_vals = []
-        for k in range(num_samples):
-            d = sample_dirs[k]
-            theta = torch.atan2(d[1], d[0])
-            phi = torch.asin(torch.clamp(d[2], 0.0, 1.0))
-            hc = copy.deepcopy(base_hemi)
-            hc.set_angles(theta=float(theta.item()), phi=float(phi.item()))
-            fisher_vals.append(
-                self._scalarize_fisher(self.cal_fisher_info(hc, history_hessian))
-            )
-
-        sample_vals = torch.tensor(
-            fisher_vals, device=self.sence_center.device, dtype=torch.float32
+        self.fisher_eval.keyviewpoints = self.keyviewpoints
+        field_result = self.fisher_eval.build_hemisphere_field(
+            viewpoint=viewpoint,
+            scene_center=self.sence_center,
+            idx=idx,
+            num_samples=num_samples,
+            num_dense_points=num_dense_points,
+            power=power,
         )
-        dense_dirs = self._fibonacci_hemisphere_dirs(
-            num_dense_points, self.sence_center.device
-        )
-        dense_vals = self._idw_on_sphere(
-            sample_dirs, sample_vals, dense_dirs, power=power
-        )
-        dense_colors, _ = self._fisher_values_to_colors(dense_vals)
-
-        center = self.sence_center.detach().float()
-        radius = float(base_hemi.radius)
-        dense_points = center[None, :] + radius * dense_dirs
-
-        hemi_pc = o3d.geometry.PointCloud()
-        hemi_pc.points = o3d.utility.Vector3dVector(dense_points.detach().cpu().numpy())
-        hemi_pc.colors = o3d.utility.Vector3dVector(dense_colors)
-
-        if self.vis_gui and hasattr(self, "o3d_window") and self.o3d_window is not None:
-            if self.fisher_hemi_geometry is not None:
-                self.o3d_window.remove_geometry(
-                    self.fisher_hemi_geometry, reset_bounding_box=False
-                )
-            self.fisher_hemi_geometry = hemi_pc
-            self.o3d_window.add_geometry(
-                self.fisher_hemi_geometry, reset_bounding_box=False
-            )
-            self.o3d_window.poll_events()
-            self.o3d_window.update_renderer()
-
-        self._last_fisher_points = np.asarray(hemi_pc.points).copy()
-        self._last_fisher_colors = np.asarray(hemi_pc.colors).copy()
-
-        if self._last_gs_points is None or self._last_gs_colors is None:
-            opacity = self.gaussians.get_opacity.detach().squeeze().cpu().numpy()
-            mask = opacity > 0.3
-            gs_points = self.gaussians.get_xyz.detach().cpu().numpy()[mask]
-            gs_colors = SH2RGB(self.gaussians.get_features.detach()).squeeze().cpu().numpy()[mask]
-            if self.config.get("scene") == "room_0":
-                z_mask = gs_points[:, 2] <= 0.7
-                gs_points = gs_points[z_mask]
-                gs_colors = gs_colors[z_mask]
-            self._last_gs_points = gs_points
-            self._last_gs_colors = gs_colors
+        for message in field_result.debug_stats.get("messages", []):
+            Log(message, tag="NextBestView")
+        self.fisher_visualizer.apply_field_result(field_result)
+        self.fisher_hemi_geometry = self.fisher_visualizer.fisher_hemi_geometry
+        self._last_fisher_points = self.fisher_visualizer.last_fisher_points
+        self._last_fisher_colors = self.fisher_visualizer.last_fisher_colors
+        self._last_gs_points = self.fisher_visualizer.last_gs_points
+        self._last_gs_colors = self.fisher_visualizer.last_gs_colors
 
         Log(
             (
                 f"Fisher hemisphere updated at frame {idx}: "
                 f"samples={num_samples}, dense={num_dense_points}, "
-                f"min={sample_vals.min().item():.6f}, max={sample_vals.max().item():.6f}"
+                f"min={field_result.sample_vals.min().item():.6f}, "
+                f"max={field_result.sample_vals.max().item():.6f}"
             ),
             tag="NextBestView",
         )
@@ -974,33 +798,5 @@ class GSBackEnd(mp.Process):
         self.export_frame0_fisher_artifacts_if_needed(idx)
 
     def export_frame0_fisher_artifacts_if_needed(self, idx: int):
-        if idx != 0 or self.fisher_frame0_exported:
-            return
-        if self._last_gs_points is None or self._last_fisher_points is None:
-            return
-
-        out_dir = os.path.join(self.save_dir, "nbv_vis")
-        os.makedirs(out_dir, exist_ok=True)
-
-        merged_points = np.vstack([self._last_gs_points, self._last_fisher_points])
-        merged_colors = np.vstack([self._last_gs_colors, self._last_fisher_colors])
-
-        merged_pc = o3d.geometry.PointCloud()
-        merged_pc.points = o3d.utility.Vector3dVector(merged_points)
-        merged_pc.colors = o3d.utility.Vector3dVector(merged_colors)
-
-        ply_path = os.path.join(out_dir, "frame0_gs_plus_fisher_hemi.ply")
-        png_path = os.path.join(out_dir, "frame0_gs_plus_fisher_hemi.png")
-
-        o3d.io.write_point_cloud(ply_path, merged_pc)
-        if self.vis_gui and hasattr(self, "o3d_window") and self.o3d_window is not None:
-            self.o3d_window.capture_screen_image(png_path, do_render=True)
-            save_msg = f"Saved frame-0 Fisher artifacts: {ply_path}, {png_path}"
-        else:
-            save_msg = f"Saved frame-0 Fisher artifacts (without screenshot): {ply_path}"
-
-        self.fisher_frame0_exported = True
-        Log(
-            save_msg,
-            tag="NextBestView",
-        )
+        self.fisher_visualizer.export_frame0_artifacts_if_needed(idx)
+        self.fisher_frame0_exported = self.fisher_visualizer.fisher_frame0_exported

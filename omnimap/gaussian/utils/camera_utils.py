@@ -415,10 +415,11 @@ class HemisphereCamera(Camera):
         right = torch.nn.functional.normalize(right_unnorm, dim=0)
         up = torch.cross(forward, right, dim=0)
 
-        # 构造世界到相机的 R/T
-        # 这里采用列向量为相机坐标轴的约定
-        R = torch.stack([right, up, forward], dim=1)  # 3x3
-        T = cam_pos
+        # 先构造 camera-to-world 旋转，再转换成当前工程一致使用的
+        # world-to-camera 外参表示：X_cam = R_w2c * X_world + T_w2c。
+        R_c2w = torch.stack([right, up, forward], dim=1)  # 3x3
+        R = R_c2w.transpose(0, 1)
+        T = -R @ cam_pos
 
         self.update_RT(R, T)
 

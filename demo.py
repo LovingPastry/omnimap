@@ -140,11 +140,11 @@ def rgbd_stream(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description=(
-            "Usage: \n"
-            "CUDA_LAUNCH_BLOCKING=1 python demo.py --dataset rtabmap --scene replica_cup --start 0 --length 1000 --vis_gui"
-        ),
+        description=("demo for omnimap"),
         formatter_class=argparse.RawTextHelpFormatter,
+        epilog="""Usage: \n
+        CUDA_LAUNCH_BLOCKING=1 python demo.py --dataset rtabmap --scene replica_cup --start 0 --length 1000 --vis_gui
+        """,
     )
     parser.add_argument("--dataset", type=str, default="replica", help="dataset name")
     parser.add_argument("--scene", type=str, default="room_0", help="scene name")
