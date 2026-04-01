@@ -24,6 +24,45 @@ class FisherVisualizer:
         self.last_fisher_points = None
         self.last_fisher_colors = None
 
+        self.velocity_geometry = None
+
+    @staticmethod
+    def _build_arrow_mesh(start: np.ndarray, direction: np.ndarray, arrow_len: float):
+        direction = np.asarray(direction, dtype=np.float64)
+        norm = np.linalg.norm(direction)
+        if norm < 1e-12:
+            return None
+
+        unit_dir = direction / norm
+        cone_height = arrow_len * 0.35
+        cylinder_height = max(arrow_len - cone_height, 1e-6)
+        arrow = o3d.geometry.TriangleMesh.create_arrow(
+            cylinder_radius=arrow_len * 0.04,
+            cone_radius=arrow_len * 0.08,
+            cylinder_height=cylinder_height,
+            cone_height=cone_height,
+        )
+        arrow.paint_uniform_color([1.0, 0.0, 0.0])
+
+        z_axis = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        cross = np.cross(z_axis, unit_dir)
+        cross_norm = np.linalg.norm(cross)
+        dot = float(np.clip(np.dot(z_axis, unit_dir), -1.0, 1.0))
+
+        if cross_norm > 1e-12:
+            axis = cross / cross_norm
+            angle = np.arccos(dot)
+            rot = o3d.geometry.get_rotation_matrix_from_axis_angle(axis * angle)
+            arrow.rotate(rot, center=np.zeros(3, dtype=np.float64))
+        elif dot < 0.0:
+            rot = o3d.geometry.get_rotation_matrix_from_axis_angle(
+                np.array([1.0, 0.0, 0.0], dtype=np.float64) * np.pi
+            )
+            arrow.rotate(rot, center=np.zeros(3, dtype=np.float64))
+
+        arrow.translate(np.asarray(start, dtype=np.float64))
+        return arrow
+
     def attach_window(self, o3d_window):
         self.o3d_window = o3d_window
 
@@ -51,11 +90,39 @@ class FisherVisualizer:
         radius = float(field_result.base_hemi.radius)
         dense_points = center[None, :] + radius * field_result.dense_dirs
 
+        show_velocity_field = bool(self.config.get("show_velocity_field", False))
+
         hemi_pc = o3d.geometry.PointCloud()
         hemi_pc.points = o3d.utility.Vector3dVector(dense_points.detach().cpu().numpy())
         hemi_pc.colors = o3d.utility.Vector3dVector(
             field_result.dense_colors.cpu().numpy()
         )
+
+        # --- Velocity field visualization (optional) ---
+        vel_mesh = None
+        if show_velocity_field and getattr(field_result, "sample_vel_dirs", None) is not None:
+            sample_points = (
+                center[None, :] + radius * field_result.sample_dirs
+            ).detach().cpu().numpy()
+            vel_dirs = field_result.sample_vel_dirs.detach().cpu().numpy()
+
+            # Fixed-length red arrows, same length for all samples.
+            arrow_len = float(self.config.get("velocity_arrow_length", 0.07))
+            # If user does not specify, interpret as relative to hemisphere radius when <=1.
+            if arrow_len <= 1.0:
+                arrow_len = arrow_len * radius
+
+            arrow_meshes = []
+            for start, direction in zip(sample_points, vel_dirs):
+                arrow = self._build_arrow_mesh(start, direction, arrow_len)
+                if arrow is not None:
+                    arrow_meshes.append(arrow)
+
+            if len(arrow_meshes) > 0:
+                vel_mesh = arrow_meshes[0]
+                for arrow in arrow_meshes[1:]:
+                    vel_mesh += arrow
+                vel_mesh.compute_vertex_normals()
 
         if self.vis_gui and self.o3d_window is not None:
             if self.fisher_hemi_geometry is not None:
@@ -66,6 +133,19 @@ class FisherVisualizer:
             self.o3d_window.add_geometry(
                 self.fisher_hemi_geometry, reset_bounding_box=False
             )
+
+            if self.velocity_geometry is not None:
+                self.o3d_window.remove_geometry(
+                    self.velocity_geometry, reset_bounding_box=False
+                )
+                self.velocity_geometry = None
+
+            if show_velocity_field and vel_mesh is not None:
+                self.velocity_geometry = vel_mesh
+                self.o3d_window.add_geometry(
+                    self.velocity_geometry, reset_bounding_box=False
+                )
+
             self.o3d_window.poll_events()
             self.o3d_window.update_renderer()
 

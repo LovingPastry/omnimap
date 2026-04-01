@@ -99,10 +99,11 @@ class LegacyFisherEvaluator:
             temp_cam = copy.deepcopy(hemisphere_cam)
             temp_cam.set_angles(theta_val, phi_val)
             fisher = self.compute_view_score(temp_cam, history_stat).score
-            Log(
-                f"Fisher at (theta={theta_val:.3f}, phi={phi_val:.3f}): {fisher:.6f}",
-                tag="NextBestView",
-            )
+            if bool(self.config.get("velocity_debug_log", False)):
+                Log(
+                    f"Fisher at (theta={theta_val:.3f}, phi={phi_val:.3f}): {fisher:.6f}",
+                    tag="NextBestView",
+                )
             return fisher
 
         f_theta_plus = fisher_at(base_theta + eps, base_phi)
@@ -128,10 +129,11 @@ class LegacyFisherEvaluator:
         else:
             dphi = 0.0
 
-        Log(
-            f"Fisher gradient: dF/dtheta={dtheta:.6f}, dF/dphi={dphi:.6f}",
-            tag="NextBestView",
-        )
+        if bool(self.config.get("velocity_debug_log", False)):
+            Log(
+                f"Fisher gradient: dF/dtheta={dtheta:.6f}, dF/dphi={dphi:.6f}",
+                tag="NextBestView",
+            )
         return torch.tensor([dtheta, dphi], device=device, dtype=torch.float32)
 
     def build_hemisphere_field(
@@ -148,18 +150,50 @@ class LegacyFisherEvaluator:
 
         sample_dirs = fibonacci_hemisphere_dirs(num_samples, scene_center.device)
         fisher_vals = []
+        enable_velocity_field = bool(self.config.get("enable_velocity_field", False))
+        sample_vel_dirs = [] if enable_velocity_field else None
+
         for direction in sample_dirs:
             theta = torch.atan2(direction[1], direction[0])
             phi = torch.asin(torch.clamp(direction[2], 0.0, 1.0))
             hc = copy.deepcopy(base_hemi)
             hc.set_angles(theta=float(theta.item()), phi=float(phi.item()))
+
             fisher_vals.append(
                 scalarize_value(self.compute_view_score(hc, history_stat).score)
             )
 
+            if enable_velocity_field:
+                # Velocity field (gradient) at this sample, via central difference.
+                # Returns [dF/dtheta, dF/dphi] in angle space.
+                grad_theta_phi = self.compute_view_gradient(hc, history_stat)
+                dtheta = float(grad_theta_phi[0].item())
+                dphi = float(grad_theta_phi[1].item())
+
+                # Convert angle-gradient to a 3D tangent direction on the hemisphere.
+                # Parameterization (unit sphere):
+                # x = cos(phi) * cos(theta)
+                # y = cos(phi) * sin(theta)
+                # z = sin(phi)
+                ct = float(torch.cos(theta).item())
+                st = float(torch.sin(theta).item())
+                cp = float(torch.cos(phi).item())
+                sp = float(torch.sin(phi).item())
+                e_theta = torch.tensor(
+                    [-cp * st, cp * ct, 0.0], device=scene_center.device
+                )
+                e_phi = torch.tensor(
+                    [-sp * ct, -sp * st, cp], device=scene_center.device
+                )
+                v = dtheta * e_theta + dphi * e_phi
+                v_norm = torch.linalg.norm(v).clamp(min=1e-12)
+                sample_vel_dirs.append((v / v_norm).to(torch.float32))
+
         sample_vals = torch.tensor(
             fisher_vals, device=scene_center.device, dtype=torch.float32
         )
+        if enable_velocity_field and len(sample_vel_dirs) > 0:
+            sample_vel_dirs = torch.stack(sample_vel_dirs, dim=0)
         dense_dirs = fibonacci_hemisphere_dirs(num_dense_points, scene_center.device)
         dense_vals = idw_on_sphere(sample_dirs, sample_vals, dense_dirs, power=power)
         dense_colors, fisher_norm, color_stats = fisher_values_to_colors(dense_vals)
@@ -183,6 +217,7 @@ class LegacyFisherEvaluator:
             history_stat=history_stat,
             sample_dirs=sample_dirs,
             sample_vals=sample_vals,
+            sample_vel_dirs=sample_vel_dirs,
             dense_dirs=dense_dirs,
             dense_vals=dense_vals,
             dense_colors=torch.from_numpy(dense_colors),

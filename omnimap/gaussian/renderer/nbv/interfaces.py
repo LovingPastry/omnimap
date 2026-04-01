@@ -23,11 +23,15 @@ class HemisphereFieldResult:
     history_stat: torch.Tensor
     sample_dirs: torch.Tensor
     sample_vals: torch.Tensor
-    dense_dirs: torch.Tensor
-    dense_vals: torch.Tensor
-    dense_colors: torch.Tensor
-    fisher_norm: torch.Tensor
-    color_stats: Dict[str, float]
+    # Optional: per-sample 3D velocity directions (tangent to hemisphere surface).
+    # Shape: [num_samples, 3].
+    sample_vel_dirs: Optional[torch.Tensor] = None
+
+    dense_dirs: torch.Tensor = None
+    dense_vals: torch.Tensor = None
+    dense_colors: torch.Tensor = None
+    fisher_norm: torch.Tensor = None
+    color_stats: Dict[str, float] = field(default_factory=dict)
     debug_stats: Dict[str, object] = field(default_factory=dict)
 
 

@@ -778,6 +778,15 @@ class GSBackEnd(mp.Process):
         )
         for message in field_result.debug_stats.get("messages", []):
             Log(message, tag="NextBestView")
+
+        if bool(self.config.get("show_velocity_field", False)) and not bool(
+            self.config.get("enable_velocity_field", False)
+        ):
+            Log(
+                "show_velocity_field=True but enable_velocity_field=False; velocity arrows are skipped.",
+                tag="NextBestView",
+            )
+
         self.fisher_visualizer.apply_field_result(field_result)
         self.fisher_hemi_geometry = self.fisher_visualizer.fisher_hemi_geometry
         self._last_fisher_points = self.fisher_visualizer.last_fisher_points
