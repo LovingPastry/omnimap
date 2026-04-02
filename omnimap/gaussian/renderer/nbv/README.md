@@ -2,12 +2,29 @@
 
 这个目录放的是 3DGS 的 Next-Best-View（NBV）相关逻辑，当前主要包含：
 
-- `legacy_fisher.py`：基于历史梯度统计的 Fisher / 信息势能场评估与采样
-- `diag_fisher.py`：对角 Fisher 版本
+- `legacy_fisher.py`：基础 Fisher / 信息势能场评估器，包含半球采样、视角打分、中心差分梯度、半球场构建等主体逻辑
+- `diag_fisher.py`：在 `legacy_fisher.py` 基础上派生出的不同统计形式实现（`DiagFisherEvaluator` / `LogFisherEvaluator` / `LogSquareFisherEvaluator`）
 - `hemisphere_field.py`：半球采样、插值、颜色映射
 - `visualization.py`：Open3D 可视化与导出
 - `interfaces.py`：共享数据结构与接口协议
 - `debug.py`：调试信息拼装
+
+## 当前真实调用链
+
+当前仓库运行时，`gs_backend.py` 中实际使用的是：
+
+```python
+from gaussian.renderer.nbv.diag_fisher import LogFisherEvaluator as FisherEvaluator
+```
+
+也就是说：
+
+- **运行入口类**：`diag_fisher.py::LogFisherEvaluator`
+- **主体实现来源**：`LogFisherEvaluator` 继承自 `legacy_fisher.py::LegacyFisherEvaluator`
+- **可视化入口**：`visualization.py::FisherVisualizer`
+
+因此，文档中提到 `legacy_fisher.py` 时，表示的是“主体逻辑所在文件”；
+而在追踪真实运行链路时，应以 `LogFisherEvaluator -> LegacyFisherEvaluator` 这条继承链为准。
 
 ## 当前信息场可视化链路
 
@@ -33,7 +50,9 @@
 
 ### 计算方式
 
-在 `legacy_fisher.py` 中：
+在当前真实调用链中，运行时实例是 `diag_fisher.py` 里的 `LogFisherEvaluator`，但速度场相关主体逻辑实现在其父类 `legacy_fisher.py` 中。
+
+也就是说，在 `legacy_fisher.py` 中：
 
 - 每个半球采样点先计算该点的 Fisher 分数
 - 当 `enable_velocity_field=True` 时，再调用仓库已有的中心差分函数：
@@ -127,14 +146,22 @@ config["velocity_debug_log"]
 
 ## 当前涉及的关键文件
 
-### `legacy_fisher.py`
+### `diag_fisher.py` + `legacy_fisher.py`
 
-新增 / 保留的关键逻辑：
+当前真实调用方式是：
 
-- `compute_view_gradient(...)`：中心差分计算梯度
-- `build_hemisphere_field(...)`：
-  - 生成 `sample_vals`
-  - 在开关打开时生成 `sample_vel_dirs`
+- `gs_backend.py` 实例化 `diag_fisher.py::LogFisherEvaluator`
+- `LogFisherEvaluator` 继承 `legacy_fisher.py::LegacyFisherEvaluator`
+
+因此关键逻辑分层如下：
+
+- `diag_fisher.py`
+  - 决定当前使用哪种统计形式（当前默认是 `LogFisherEvaluator`）
+- `legacy_fisher.py`
+  - `compute_view_gradient(...)`：中心差分计算梯度
+  - `build_hemisphere_field(...)`：
+    - 生成 `sample_vals`
+    - 在开关打开时生成 `sample_vel_dirs`
 
 ### `interfaces.py`
 
