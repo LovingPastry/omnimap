@@ -1,3 +1,11 @@
+"""场景模拟器模块。
+
+本模块基于 Open3D 的离屏渲染能力，提供静态场景的 RGBD 采样功能。
+核心类 `SceneSimulator` 负责管理点云与辅助几何体、维护相机内参，
+并在给定相机位姿时输出颜色图与深度图。该模块主要用于闭环仿真
+第一阶段的数据输入，强调接口清晰、坐标约定明确与调试可观测性。
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -12,11 +20,11 @@ from sim.assets import create_coordinate_frame, create_ground_plane
 
 @dataclass
 class RenderResult:
-    """RGBD render output from the simulator.
+    """模拟器输出的 RGBD 渲染结果。
 
-    Attributes:
-        rgb: RGB image with shape [H, W, 3], dtype uint8.
-        depth: Depth image with shape [H, W], dtype float32, unit meters.
+    属性:
+        rgb: 形状为 [H, W, 3] 的 RGB 图像，类型为 uint8。
+        depth: 形状为 [H, W] 的深度图，类型为 float32，单位为米。
     """
 
     rgb: np.ndarray
@@ -24,17 +32,16 @@ class RenderResult:
 
 
 class SceneSimulator:
-    """Open3D-based static scene simulator for RGBD rendering.
+    """基于 Open3D 的静态场景 RGBD 渲染模拟器。
 
-    This class is the Phase-1 input source of the closed-loop simulation:
-    it manages a static scene (point cloud + optional ground + debug geometries)
-    and renders RGBD images from a given camera pose.
+    该类是闭环仿真 Phase-1 的输入源：
+    它管理静态场景（点云 + 可选地面 + 调试几何体），并根据给定相机位姿渲染 RGBD 图像。
 
-    Coordinate convention used by the public API:
-    - input pose is ``c2w`` (camera-to-world), shape [4, 4]
-    - internal Open3D renderer camera setup uses ``w2c`` (world-to-camera)
+    对外 API 的坐标约定：
+    - 输入位姿为 ``c2w``（camera-to-world），形状 [4, 4]
+    - 内部 Open3D 渲染器相机设置使用 ``w2c``（world-to-camera）
 
-    The conversion is handled internally. Callers should always provide ``c2w``.
+    两者转换在类内部完成，调用方始终提供 ``c2w`` 即可。
     """
 
     def __init__(self, width: int = 640, height: int = 480, background=(0.0, 0.0, 0.0, 1.0)):
@@ -72,10 +79,10 @@ class SceneSimulator:
         self._ground_material.shader = "defaultLit"
 
     # ---------------------------------------------------------------------
-    # Geometry management
+    # 几何体管理
     # ---------------------------------------------------------------------
     def clear_scene(self) -> None:
-        """Remove all geometries from the renderer scene."""
+        """从渲染场景中移除所有几何体。"""
         for name in list(self._geometry_names):
             self.renderer.scene.remove_geometry(name)
         self._geometry_names.clear()
@@ -93,14 +100,14 @@ class SceneSimulator:
         self._geometry_names.add(name)
 
     def load_pointcloud(self, path: str, voxel_size: Optional[float] = None) -> o3d.geometry.PointCloud:
-        """Load a point cloud and add it to the rendering scene.
+        """加载点云并将其加入渲染场景。
 
-        Args:
-            path: Path to a `.ply` or `.pcd` point cloud.
-            voxel_size: Optional downsample voxel size in world units.
+        参数:
+            path: `.ply` 或 `.pcd` 点云文件路径。
+            voxel_size: 可选的体素下采样尺寸，单位为世界坐标单位。
 
-        Returns:
-            The cleaned Open3D point cloud instance stored in the simulator.
+        返回:
+            清洗后的 Open3D 点云对象，同时会保存到模拟器内部状态中。
         """
         path_obj = Path(path)
         if not path_obj.exists():
@@ -152,29 +159,29 @@ class SceneSimulator:
         return clean_pcd
 
     def add_ground(self, size: float = 4.0, z: float = 0.0, color=(0.5, 0.5, 0.5), thickness: float = 0.01):
-        """Add a simple ground plane into the scene.
+        """向场景添加一个简易地面平面。
 
-        Args:
-            size: Side length of the square ground plane.
-            z: World z value of the *top* face of the ground.
-            color: Ground RGB color in [0, 1].
-            thickness: Thickness of the supporting thin box.
+        参数:
+            size: 正方形地面的边长。
+            z: 地面顶面的世界坐标 z 值。
+            color: 地面 RGB 颜色，取值范围 [0, 1]。
+            thickness: 支撑薄盒体的厚度。
         """
         self.ground = create_ground_plane(size=size, z=z, color=color, thickness=thickness)
         self._add_geometry("ground_plane", self.ground, self._ground_material)
         return self.ground
 
     def add_coordinate_frame(self, size: float = 0.2):
-        """Add a coordinate frame for debugging scene/world directions."""
+        """添加坐标轴，用于调试场景/世界方向。"""
         self.coord_frame = create_coordinate_frame(size=size)
         self._add_geometry("coord_frame", self.coord_frame, self._ground_material)
         return self.coord_frame
 
     # ---------------------------------------------------------------------
-    # Camera and rendering
+    # 相机与渲染
     # ---------------------------------------------------------------------
     def set_intrinsics(self, fx: float, fy: float, cx: float, cy: float) -> None:
-        """Set pinhole camera intrinsics used by the renderer."""
+        """设置渲染器使用的针孔相机内参。"""
         for name, value in {"fx": fx, "fy": fy, "cx": cx, "cy": cy}.items():
             if not np.isfinite(value):
                 raise ValueError(f"{name} must be finite, got {value}")
@@ -201,20 +208,19 @@ class SceneSimulator:
         return c2w
 
     def render(self, c2w: np.ndarray) -> RenderResult:
-        """Render RGBD from a camera pose.
+        """根据相机位姿渲染 RGBD。
 
-        Args:
-            c2w: Camera-to-world transform, shape [4, 4].
+        参数:
+            c2w: camera-to-world 变换矩阵，形状 [4, 4]。
 
-        Returns:
-            RenderResult with:
-            - rgb: uint8 RGB image of shape [H, W, 3]
-            - depth: float32 depth image in meters of shape [H, W]
+        返回:
+            RenderResult，包含：
+            - rgb: 形状 [H, W, 3] 的 uint8 RGB 图像
+            - depth: 形状 [H, W]、单位为米的 float32 深度图
 
-        Notes:
-            Open3D OffscreenRenderer expects the extrinsic matrix in world-to-camera
-            convention. This method therefore converts the caller-provided ``c2w``
-            into ``w2c`` internally.
+        说明:
+            Open3D OffscreenRenderer 需要 world-to-camera 约定下的外参矩阵。
+            因此本方法会将调用方传入的 ``c2w`` 在内部转换为 ``w2c``。
         """
         self._assert_ready_to_render()
         c2w = self._ensure_c2w(c2w)
@@ -245,10 +251,10 @@ class SceneSimulator:
         return RenderResult(rgb=color, depth=depth)
 
     # ---------------------------------------------------------------------
-    # Debug helpers
+    # 调试辅助
     # ---------------------------------------------------------------------
     def get_scene_stats(self) -> Dict[str, object]:
-        """Return lightweight scene statistics for logging/debugging."""
+        """返回轻量级场景统计信息，用于日志与调试。"""
         stats: Dict[str, object] = {
             "width": self.width,
             "height": self.height,
@@ -267,7 +273,7 @@ class SceneSimulator:
 
     @staticmethod
     def depth_to_vis(depth: np.ndarray, min_depth: Optional[float] = None, max_depth: Optional[float] = None) -> np.ndarray:
-        """Convert metric depth to a uint8 visualization image."""
+        """将米制深度图转换为 uint8 可视化图像。"""
         depth = np.asarray(depth, dtype=np.float32)
         if depth.ndim != 2:
             raise ValueError(f"depth must have shape [H, W], got {depth.shape}")
