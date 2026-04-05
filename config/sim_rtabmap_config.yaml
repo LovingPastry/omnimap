@@ -1,0 +1,85 @@
+Training:
+  init_itr_num: 1000
+  init_gaussian_update: 100
+  init_gaussian_reset: 500
+  init_gaussian_th: 0.005
+  init_gaussian_extent: 30
+  gaussian_extent: 1.0
+  gaussian_update_every: 201
+  gaussian_reset: 301
+  gaussian_th: 0.7
+  size_threshold: 20
+  rgb_boundary_threshold: 0.01
+  max_keyframe_skip: 20
+  window_size: 19
+  frame_itr: 1
+  alpha: 0.9
+  use_ssim: true
+  ssim_weight: 0.25
+  use_omni_normal: false
+  normal_weight: 0.05
+  compensate_exposure: false
+  deblur: false
+
+
+opt_params:
+  pose_lr: 0.0001
+  position_lr_init: 0.00016
+  position_lr_final: 0.0000016
+  feature_lr: 0.0025
+  opacity_lr: 0.05
+  scaling_lr: 0.001
+  rotation_lr: 0.001
+  percent_dense: 0.01
+  lambda_dssim: 0.2
+  densify_grad_threshold: 0.0002
+  exposure_lr: 0.02
+  post_refine: true
+  post_itr: 500
+  deblur_trans: 0.001
+  deblur_weight: 0.01
+
+
+tsdf:
+  voxel_size: 0.006
+  block_resolution: 8
+  block_count: 30000
+  unregistered_threshold: 0.005
+  depth_scale: 1000.0
+  depth_max: 2000.0
+  spatial_bounds: [-1.0, -0.2, -0.4, 0.4, -0.3, 0.5]
+
+
+instance:
+  instance_skip: 1
+  pro_thre: 0.40
+  ins_min_count: 3
+  vox_min_count: 3
+  ins_min_voxel: 15
+  fill_dis: 0.05
+
+
+path:
+  # Dedicated config for simulation-driven Phase 2/3 experiments.
+  # Keep weights pointed at the locations that actually exist in this repo.
+  data_path: /home/fuyx/lanzc/omnimap/replica/input
+  yolo_config: /home/fuyx/lanzc/omnimap/thirdparty/YOLO-World/configs/pretrain/yolo_world_v2_l_clip_large_vlpan_bn_2e-3_100e_4x8gpus_obj365v1_goldg_train_800ft_lvis_minival.py
+  yolo_cp: /home/fuyx/lanzc/omnimap/thirdparty/YOLO-World/weights/yolo_world_v2_l_clip_large_o365v1_goldg_pretrain_800ft-9df82e55.pth
+  tap_cp1: /home/fuyx/lanzc/omnimap/thirdparty/TAP/weights/tap_vit_l_v1_1.pkl
+  tap_cp2: /home/fuyx/lanzc/omnimap/thirdparty/TAP/weights/merged_2560.pkl
+  sbert_cp: /home/fuyx/lanzc/omnimap/thirdparty/all-MiniLM-L6-v2
+
+# Fisher / NBV debug defaults for the simulation toolchain.
+enable_velocity_field: true
+show_velocity_field: true
+show_fisher_heatmap: true
+velocity_arrow_length: 0.07
+velocity_debug_log: false
+fisher_window_mode: combined
+fisher_heatmap_window_name: Fisher Heatmap Viewer
+fisher_velocity_window_name: Fisher Velocity Viewer
+fisher_num_samples: 64
+fisher_num_dense_points: 4096
+fisher_idw_power: 2.0
+fisher_display_radius_scale: 0.92
+fisher_arrow_radius_scale: 0.90

@@ -15,7 +15,11 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 import open3d as o3d
 
-from sim.assets import create_coordinate_frame, create_ground_plane
+try:
+    from .assets import create_coordinate_frame, create_ground_plane
+except ImportError:
+    # Allow direct script-style imports when `sim` is not imported as a package.
+    from assets import create_coordinate_frame, create_ground_plane
 
 
 @dataclass
@@ -99,12 +103,18 @@ class SceneSimulator:
         self.renderer.scene.add_geometry(name, geometry, material)
         self._geometry_names.add(name)
 
-    def load_pointcloud(self, path: str, voxel_size: Optional[float] = None) -> o3d.geometry.PointCloud:
+    def load_pointcloud(
+        self,
+        path: str,
+        voxel_size: Optional[float] = None,
+        scale: float = 1.0,
+    ) -> o3d.geometry.PointCloud:
         """加载点云并将其加入渲染场景。
 
         参数:
             path: `.ply` 或 `.pcd` 点云文件路径。
             voxel_size: 可选的体素下采样尺寸，单位为世界坐标单位。
+            scale: 对点云坐标应用的全局缩放因子。
 
         返回:
             清洗后的 Open3D 点云对象，同时会保存到模拟器内部状态中。
@@ -118,6 +128,8 @@ class SceneSimulator:
         pcd = o3d.io.read_point_cloud(str(path_obj))
         if pcd.is_empty():
             raise ValueError(f"Loaded point cloud is empty: {path}")
+        if not np.isfinite(scale) or scale <= 0:
+            raise ValueError(f"scale must be a positive finite value, got {scale}")
 
         points = np.asarray(pcd.points)
         colors = np.asarray(pcd.colors)
@@ -130,6 +142,9 @@ class SceneSimulator:
 
         if points.shape[0] == 0:
             raise ValueError(f"No valid finite points remain after cleaning: {path}")
+
+        if scale != 1.0:
+            points = points * float(scale)
 
         clean_pcd = o3d.geometry.PointCloud()
         clean_pcd.points = o3d.utility.Vector3dVector(points.astype(np.float64))

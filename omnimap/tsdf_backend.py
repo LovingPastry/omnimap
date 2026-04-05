@@ -49,6 +49,8 @@ class TSDFBackEnd():
         self.block_resolution = self.config["tsdf"]["block_resolution"]
         self.block_count = self.config["tsdf"]["block_count"]
         self.unregistered_threshold = self.config["tsdf"]["unregistered_threshold"]
+        self.depth_scale = float(self.config["tsdf"].get("depth_scale", 1000.0))
+        self.depth_max = float(self.config["tsdf"].get("depth_max", 20.0))
         self.use_spatial_bounds = self.config["tsdf"].get("use_spatial_bounds", False)
         if self.use_spatial_bounds:
             # 读取边界框配置 [x_min, x_max, y_min, y_max, z_min, z_max]
@@ -324,16 +326,16 @@ class TSDFBackEnd():
     def integrate(self, color_im, depth_im, cam_intr, cam_pose, tstamp, obs_weight=1.0):
         self.depth_im = depth_im.cuda()
         color = o3d.t.geometry.Image(np.ascontiguousarray(color_im.cpu().numpy())).to(o3c.uint8).to(self.o3c_device)
-        depth_im = depth_im * 1000.0
+        depth_im = depth_im * self.depth_scale
         depth = o3d.t.geometry.Image(np.ascontiguousarray(depth_im.cpu().numpy())).to(o3c.uint16).to(self.o3c_device)
         self.cam_pose = torch.inverse(cam_pose).to(self.device)
-        cam_pose = np.linalg.inv(cam_pose.cpu().numpy())
+        cam_pose = np.linalg.inv(cam_pose.detach().cpu().numpy().astype(np.float64, copy=False))
         extrinsic = o3c.Tensor.from_numpy(cam_pose)
         # Get active frustum block coordinates from input
         if self.intrinsic is None:
-            self.intrinsic_raw = torch.tensor([cam_intr[0], 0.0, cam_intr[2], 0.0, cam_intr[1], cam_intr[3], 0.0, 0.0, 1.0]).to(self.device).reshape(3,3)
-            cam_intr = cam_intr.cpu().numpy()
-            intrinsic_np =  np.array([cam_intr[0], 0.0, cam_intr[2], 0.0, cam_intr[1], cam_intr[3], 0.0, 0.0, 1.0]).reshape(3,3)
+            self.intrinsic_raw = torch.tensor([cam_intr[0], 0.0, cam_intr[2], 0.0, cam_intr[1], cam_intr[3], 0.0, 0.0, 1.0], dtype=torch.float64).to(self.device).reshape(3,3)
+            cam_intr = cam_intr.detach().cpu().numpy().astype(np.float64, copy=False)
+            intrinsic_np =  np.array([cam_intr[0], 0.0, cam_intr[2], 0.0, cam_intr[1], cam_intr[3], 0.0, 0.0, 1.0], dtype=np.float64).reshape(3,3)
             self.intrinsic = o3c.Tensor.from_numpy(intrinsic_np)
             
         if self.use_spatial_bounds:
@@ -347,7 +349,7 @@ class TSDFBackEnd():
                 self.intrinsic, 
                 self.width, 
                 self.height, 
-                1000.0
+                self.depth_scale
             )
             
             # 2. 过滤超出范围的点
@@ -368,8 +370,12 @@ class TSDFBackEnd():
                 
         
         # max_depth have been valued
-        frustum_block_coords = self.world.compute_unique_block_coordinates(depth, self.intrinsic, extrinsic, 1000.0, 20.0)
-        self.world.integrate(frustum_block_coords, depth, color, self.intrinsic, extrinsic, 1000.0, 20.0)
+        frustum_block_coords = self.world.compute_unique_block_coordinates(
+            depth, self.intrinsic, extrinsic, self.depth_scale, self.depth_max
+        )
+        self.world.integrate(
+            frustum_block_coords, depth, color, self.intrinsic, extrinsic, self.depth_scale, self.depth_max
+        )
         
         
         self.adjust_embed_capacity()
@@ -389,7 +395,9 @@ class TSDFBackEnd():
         if self.height is None:
             self.height, self.width = depth_im.shape[:2]
         # (N, 3)       (N,)
-        self.obs_coords, depth_valid = self.depth_to_point_cloud(depth_im.cpu().numpy(), extrinsic, self.intrinsic, self.width, self.height, 1000.0)
+        self.obs_coords, depth_valid = self.depth_to_point_cloud(
+            depth_im.cpu().numpy(), extrinsic, self.intrinsic, self.width, self.height, self.depth_scale
+        )
         
         if self.use_spatial_bounds:
             bounds_mask = self.filter_points_by_bounds(self.obs_coords)

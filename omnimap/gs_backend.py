@@ -100,6 +100,66 @@ class GSBackEnd(mp.Process):
         self.fisher_visualizer = FisherVisualizer(
             self.gaussians, self.config, self.save_dir, self.vis_gui
         )
+        self.last_camera_pose = None
+
+    @staticmethod
+    def _fallback_center_from_gaussians(gaussians) -> Optional[torch.Tensor]:
+        """Estimate a scene center from the active Gaussian cloud when TSDF is empty."""
+        xyz = getattr(gaussians, "get_xyz", None)
+        if xyz is None:
+            return None
+        xyz = xyz.detach()
+        if xyz.numel() == 0:
+            return None
+        xyz = xyz.reshape(-1, 3)
+        finite_mask = torch.isfinite(xyz).all(dim=1)
+        if not torch.any(finite_mask):
+            return None
+        return xyz[finite_mask].mean(dim=0).detach().float()
+
+    def _fallback_center_from_keyviews(self) -> Optional[torch.Tensor]:
+        """Estimate a scene center from existing keyframe camera centers."""
+        if not self.keyviewpoints:
+            return None
+        centers = []
+        for viewpoint in self.keyviewpoints:
+            center = getattr(viewpoint, "camera_center", None)
+            if center is None:
+                continue
+            center = center.detach().reshape(3)
+            if torch.isfinite(center).all():
+                centers.append(center.float())
+        if not centers:
+            return None
+        return torch.stack(centers, dim=0).mean(dim=0)
+
+    def _resolve_fisher_scene_center(self) -> Optional[torch.Tensor]:
+        """Resolve the best scene center currently available for Fisher visualization."""
+        center = self.sence_center
+        if center is None:
+            center = self.tsdfs.get_pointcloud_center()
+        if center is None:
+            center = self._fallback_center_from_gaussians(self.gaussians)
+            if center is not None:
+                Log(
+                    f"Fisher scene center fallback: using Gaussian mean {center.detach().cpu().numpy().tolist()}",
+                    tag="NextBestView",
+                )
+        if center is None:
+            center = self._fallback_center_from_keyviews()
+            if center is not None:
+                Log(
+                    f"Fisher scene center fallback: using keyframe camera mean {center.detach().cpu().numpy().tolist()}",
+                    tag="NextBestView",
+                )
+        if center is not None:
+            self.sence_center = center
+        return center
+
+    def _create_o3d_window(self, window_name: str, width: int, height: int):
+        window = o3d.visualization.VisualizerWithKeyCallback()
+        window.create_window(window_name=window_name, width=width, height=height)
+        return window
 
     def set_gui(self):
         # OpenCV window name
@@ -125,29 +185,60 @@ class GSBackEnd(mp.Process):
                 "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Bold.ttf", 42
             )
 
-        self.o3d_window = o3d.visualization.VisualizerWithKeyCallback()
-        self.o3d_window.create_window(
-            window_name="3DGS Point Viewer", width=860, height=540
+        fisher_window_mode = str(self.config.get("fisher_window_mode", "combined"))
+        heatmap_window_name = str(
+            self.config.get("fisher_heatmap_window_name", "Fisher Heatmap Viewer")
         )
-        self.fisher_visualizer.attach_window(self.o3d_window)
+        velocity_window_name = str(
+            self.config.get("fisher_velocity_window_name", "Fisher Velocity Viewer")
+        )
+
+        self.gs_o3d_window = self._create_o3d_window(
+            window_name="3DGS Point Viewer",
+            width=860,
+            height=540,
+        )
+        self.fisher_heatmap_window = None
+        self.fisher_velocity_window = None
+        if fisher_window_mode == "split":
+            if bool(self.config.get("show_fisher_heatmap", True)):
+                self.fisher_heatmap_window = self._create_o3d_window(
+                    window_name=heatmap_window_name,
+                    width=860,
+                    height=540,
+                )
+            if bool(self.config.get("show_velocity_field", False)):
+                self.fisher_velocity_window = self._create_o3d_window(
+                    window_name=velocity_window_name,
+                    width=860,
+                    height=540,
+                )
+        else:
+            self.fisher_heatmap_window = self.gs_o3d_window
+            self.fisher_velocity_window = self.gs_o3d_window
+
+        self.fisher_visualizer.attach_windows(
+            heatmap_window=self.fisher_heatmap_window,
+            velocity_window=self.fisher_velocity_window,
+        )
         self.gs_pc_geometries, self.cam_lines, self.cam_plan = None, None, None
         self.cam_traj = create_camera_trajectory_line()
         self.fisher_hemi_geometry = None
 
     def add_camera(self, pose, size=0.1):
         if self.cam_lines is not None:
-            self.o3d_window.remove_geometry(self.cam_lines)
-            self.o3d_window.remove_geometry(self.cam_plane)
+            self.gs_o3d_window.remove_geometry(self.cam_lines)
+            self.gs_o3d_window.remove_geometry(self.cam_plane)
         self.cam_lines, self.cam_plane = draw_camera(pose)
-        self.o3d_window.add_geometry(self.cam_lines)
-        self.o3d_window.add_geometry(self.cam_plane)
+        self.gs_o3d_window.add_geometry(self.cam_lines)
+        self.gs_o3d_window.add_geometry(self.cam_plane)
 
     def update_gs_pc(self):
         if self.cam_traj is not None:
-            self.o3d_window.remove_geometry(self.cam_traj)
-        self.o3d_window.add_geometry(self.cam_traj)
+            self.gs_o3d_window.remove_geometry(self.cam_traj)
+        self.gs_o3d_window.add_geometry(self.cam_traj)
         if self.gs_pc_geometries is not None:
-            self.o3d_window.remove_geometry(
+            self.gs_o3d_window.remove_geometry(
                 self.gs_pc_geometries, reset_bounding_box=False
             )
 
@@ -172,9 +263,33 @@ class GSBackEnd(mp.Process):
         # debug
         # o3d.visualization.draw_geometries([pc])
         self.gs_pc_geometries = pc
-        self.o3d_window.add_geometry(self.gs_pc_geometries)
-        self.o3d_window.poll_events()
-        self.o3d_window.update_renderer()
+        self.gs_o3d_window.add_geometry(self.gs_pc_geometries)
+        self.gs_o3d_window.poll_events()
+        self.gs_o3d_window.update_renderer()
+
+    def _get_fisher_sampling_params(self) -> tuple[int, int, float]:
+        """Read Fisher hemisphere sampling density from config."""
+        num_samples = int(self.config.get("fisher_num_samples", 32))
+        num_dense_points = int(self.config.get("fisher_num_dense_points", 2048))
+        power = float(self.config.get("fisher_idw_power", 2.0))
+        return num_samples, num_dense_points, power
+
+    def _update_fisher_context_cache(self, pose: np.ndarray) -> None:
+        """Push shared scene context into the Fisher visualizer."""
+        tsdf_points = None
+        tsdf_colors = None
+        if self.tsdfs.all_pc is not None and len(self.tsdfs.all_pc.points) > 0:
+            tsdf_points = np.asarray(self.tsdfs.all_pc.points)
+            tsdf_colors = np.asarray(self.tsdfs.all_pc.colors)
+        traj_points = None
+        if self.cam_traj is not None and len(self.cam_traj.points) > 0:
+            traj_points = np.asarray(self.cam_traj.points)
+        self.fisher_visualizer.update_context(
+            tsdf_points=tsdf_points,
+            tsdf_colors=tsdf_colors,
+            camera_pose=pose,
+            traj_points=traj_points,
+        )
 
     def update_images(self, tstamp, hz):
         # reset the text area
@@ -709,25 +824,29 @@ class GSBackEnd(mp.Process):
             self.images[2] = cv2.applyColorMap(depth_norm, cv2.COLORMAP_JET)
             self.update_images(tstamp, hz)
             pose = np.linalg.inv(w2c.cpu().numpy())
+            self.last_camera_pose = pose
             self.cam_traj = update_camera_trajectory(self.cam_traj, [pose[:3, 3]])
             if idx % 1 == 0:
                 self.add_camera(pose)
                 self.update_gs_pc()
+                self._update_fisher_context_cache(pose)
+                num_samples, num_dense_points, power = self._get_fisher_sampling_params()
                 self.update_fisher_hemisphere_pc(
                     viewpoint=viewpoint,
                     idx=idx,
-                    num_samples=32,
-                    num_dense_points=2048,
-                    power=2.0,
+                    num_samples=num_samples,
+                    num_dense_points=num_dense_points,
+                    power=power,
                 )
 
         if not self.vis_gui and idx == 0:
+            num_samples, num_dense_points, power = self._get_fisher_sampling_params()
             self.update_fisher_hemisphere_pc(
                 viewpoint=viewpoint,
                 idx=idx,
-                num_samples=32,
-                num_dense_points=2048,
-                power=2.0,
+                num_samples=num_samples,
+                num_dense_points=num_dense_points,
+                power=power,
             )
 
     @timeit
@@ -760,7 +879,7 @@ class GSBackEnd(mp.Process):
             tag="NextBestView",
         )
         if self.sence_center is None:
-            self.sence_center = self.tsdfs.get_pointcloud_center()
+            self.sence_center = self._resolve_fisher_scene_center()
         if self.sence_center is None:
             Log(
                 "Skip Fisher hemisphere visualization: scene center is unavailable.",

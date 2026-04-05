@@ -1,110 +1,586 @@
-import os  # nopep8
+from __future__ import annotations
 
-os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-os.environ["HF_HUB_OFFLINE"] = "1"
-os.environ["TRANSFORMERS_OFFLINE"] = "1"
-
-import sys  # nopep8
-
-sys.path.append(os.path.join(os.path.dirname(__file__), "omnimap"))  # nopep8
-import time
-import torch
-import cv2
-import re
-import os
 import argparse
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+import cv2
 import numpy as np
-import lietorch
-import resource
 
-rlimit = resource.getrlimit(resource.RLIMIT_NOFILE)
-resource.setrlimit(resource.RLIMIT_NOFILE, (100000, rlimit[1]))
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
-from omnimap.util.utils import load_config
-from tqdm import tqdm, trange
-from torch.multiprocessing import Process, Queue
-from omni import OMNI
-from natsort import natsorted
-from scipy.spatial.transform import Rotation as R
+repo_root = Path(__file__).resolve().parent
+if str(repo_root) not in sys.path:
+    sys.path.insert(0, str(repo_root))
+
+from sim.motion_policy import FisherMotionPolicy, resolve_step_scales
+from sim.omnimap_runner import (
+    OmniMapRunner,
+    build_fisher_debug_config_overrides,
+)
+from sim.scene_simulator import SceneSimulator
 
 
-class SceneSimulator:
+def look_at_c2w(
+    eye: np.ndarray,
+    target: np.ndarray,
+    up: np.ndarray | None = None,
+) -> np.ndarray:
+    """Build a `c2w` pose whose optical axis points from `eye` to `target`."""
+    eye = np.asarray(eye, dtype=np.float64).reshape(3)
+    target = np.asarray(target, dtype=np.float64).reshape(3)
+    up = (
+        np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        if up is None
+        else np.asarray(up, dtype=np.float64).reshape(3)
+    )
+
+    forward = target - eye
+    forward_norm = np.linalg.norm(forward)
+    if forward_norm < 1e-12:
+        raise ValueError("eye and target are too close; cannot build look-at pose")
+    forward = forward / forward_norm
+
+    right = np.cross(forward, up)
+    right_norm = np.linalg.norm(right)
+    if right_norm < 1e-12:
+        fallback_up = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+        right = np.cross(forward, fallback_up)
+        right_norm = np.linalg.norm(right)
+        if right_norm < 1e-12:
+            raise ValueError("failed to construct a valid right axis for look-at pose")
+    right = right / right_norm
+
+    true_up = np.cross(right, forward)
+    true_up = true_up / max(np.linalg.norm(true_up), 1e-12)
+    down = -true_up
+
+    c2w = np.eye(4, dtype=np.float64)
+    c2w[:3, 0] = right
+    c2w[:3, 1] = down
+    c2w[:3, 2] = forward
+    c2w[:3, 3] = eye
+    return c2w
+
+
+def spherical_c2w(
+    center: np.ndarray,
+    radius: float,
+    theta: float,
+    phi: float,
+) -> np.ndarray:
+    """Convert a hemisphere `(radius, theta, phi)` state into a `c2w` pose."""
+    center = np.asarray(center, dtype=np.float64).reshape(3)
+    x = radius * np.cos(phi) * np.cos(theta)
+    y = radius * np.cos(phi) * np.sin(theta)
+    z = radius * np.sin(phi)
+    eye = center + np.array([x, y, z], dtype=np.float64)
+    return look_at_c2w(eye=eye, target=center)
+
+
+def save_render_artifacts(
+    *,
+    save_dir: Path,
+    idx: int,
+    rgb: np.ndarray,
+    depth: np.ndarray,
+    c2w: np.ndarray,
+) -> None:
+    """Persist one closed-loop step's RGBD render and authoritative pose."""
+    frame_prefix = save_dir / "frames" / f"step_{idx:04d}"
+    frame_prefix.parent.mkdir(parents=True, exist_ok=True)
+
+    rgb_bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    cv2.imwrite(str(frame_prefix.with_name(frame_prefix.name + "_rgb.png")), rgb_bgr)
+    np.save(frame_prefix.with_name(frame_prefix.name + "_depth.npy"), depth)
+    np.save(frame_prefix.with_name(frame_prefix.name + "_c2w.npy"), c2w)
+
+    valid = np.isfinite(depth) & (depth > 0)
+    if np.any(valid):
+        d_min = float(depth[valid].min())
+        d_max = float(depth[valid].max())
+        denom = max(d_max - d_min, 1e-6)
+        norm = np.clip((depth - d_min) / denom, 0.0, 1.0)
+    else:
+        norm = np.zeros_like(depth, dtype=np.float32)
+    vis = (norm * 255.0).astype(np.uint8)
+    cv2.imwrite(
+        str(frame_prefix.with_name(frame_prefix.name + "_depth_vis.png")),
+        vis,
+    )
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse the Phase-4 closed-loop experiment CLI."""
+    parser = argparse.ArgumentParser(
+        description=(
+            "Phase-4 closed-loop Fisher debug entrypoint: render RGBD from a static scene, "
+            "feed frames into OmniMap, query Fisher gradients, and advance the camera "
+            "pose on the upper hemisphere for multiple steps.\n\n"
+            "This script is the main tool for debugging whether the Fisher information "
+            "field, the raw velocity arrows, and the applied next-pose controller stay "
+            "consistent over time."
+        ),
+        epilog="""
+# 最小闭环命令：
+python3 sim_fisher_closed_loop.py \
+    --pcd_path replica/log_pcd_0/对比结果/RoboSeg_geo/Kettle.ply \
+    --point_scale 0.001 \
+    --config config/sim_rtabmap_config.yaml \
+    --num_steps 20 \
+    --save_dir sim/sim_outputs/phase4      
+
+#带 GUI 的调试命令：
+python3 sim_fisher_closed_loop.py \
+    --pcd_path replica/log_pcd_0/对比结果/RoboSeg_geo/Kettle.ply \
+    --point_scale 0.001 \
+    --config config/sim_rtabmap_config.yaml \
+    --num_steps 20 \
+    --save_dir sim/sim_outputs/phase4_gui \
+    --vis_gui \
+    --show_fisher_arrows \
+    --step_delay_sec 0.1 \
+    --hold_gui_sec 2.0
+
+# 双窗口调试命令：
+python3 sim_fisher_closed_loop.py \
+    --pcd_path replica/log_pcd_0/对比结果/RoboSeg_geo/Kettle.ply \
+    --point_scale 0.001 \
+    --config config/sim_rtabmap_config.yaml \
+    --num_steps 20 \
+    --save_dir sim/sim_outputs/phase4_split \
+    --vis_gui \
+    --show_fisher_arrows \
+    --fisher_window_mode split \
+    --step_delay_sec 0.1
+
+# 保存每一步渲染结果：
+python3 sim_fisher_closed_loop.py \
+    --pcd_path replica/log_pcd_0/对比结果/RoboSeg_geo/Kettle.ply \
+    --point_scale 0.001 \
+    --config config/sim_rtabmap_config.yaml \
+    --num_steps 10 \
+    --save_dir sim/sim_outputs/phase4_frames \
+    --save_frames \
+    --vis_gui \
+    --show_fisher_arrows
+""",
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    parser.add_argument(
+        "--pcd_path", required=True, help="Path to a .ply or .pcd point cloud"
+    )
+    parser.add_argument("--config", default="config/sim_rtabmap_config.yaml")
+    parser.add_argument("--save_dir", default="sim/sim_outputs/phase4")
+    parser.add_argument("--width", type=int, default=640)
+    parser.add_argument("--height", type=int, default=480)
+    parser.add_argument("--fx", type=float, default=525.0)
+    parser.add_argument("--fy", type=float, default=525.0)
+    parser.add_argument("--cx", type=float, default=319.5)
+    parser.add_argument("--cy", type=float, default=239.5)
+    parser.add_argument("--voxel_size", type=float, default=None)
+    parser.add_argument("--point_scale", type=float, default=1.0)
+    parser.add_argument("--ground", action="store_true")
+    parser.add_argument("--ground_size", type=float, default=1.0)
+    parser.add_argument("--ground_z", type=float, default=0.0)
+    parser.add_argument("--coord_frame", action="store_true")
+    parser.add_argument("--scene", type=str, default="room_0")
+    parser.add_argument("--depth_scale", type=float, default=1000.0)
+    parser.add_argument("--max_depth", type=float, default=None)
+    parser.add_argument("--num_steps", type=int, default=20)
+    parser.add_argument("--hemi_radius", type=float, default=None)
+    parser.add_argument("--radius_scale", type=float, default=1.5)
+    parser.add_argument("--init_theta", type=float, default=0.0)
+    parser.add_argument("--init_phi", type=float, default=0.35)
+    parser.add_argument(
+        "--fisher_step_scale",
+        type=float,
+        default=0.03,
+        help="Primary Fisher control scale applied to both theta and phi before clipping",
+    )
+    parser.add_argument(
+        "--fisher_step_scale_theta",
+        type=float,
+        default=None,
+        help="Optional theta-only override for the Fisher control scale",
+    )
+    parser.add_argument(
+        "--fisher_step_scale_phi",
+        type=float,
+        default=None,
+        help="Optional phi-only override for the Fisher control scale",
+    )
+    parser.add_argument(
+        "--cartesian",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use Cartesian velocity-field control instead of the legacy angular controller",
+    )
+    parser.add_argument(
+        "--dt",
+        type=float,
+        default=0.1,
+        help="Time step in seconds used by the Cartesian velocity controller",
+    )
+    parser.add_argument(
+        "--radial_gain",
+        type=float,
+        default=2.0,
+        help="Radial correction gain used to pull the camera back toward the reference sphere",
+    )
+    parser.add_argument(
+        "--fisher_arrow_length",
+        type=float,
+        default=0.07,
+        help="Arrow length for Fisher velocity visualization; does not affect control",
+    )
+    parser.add_argument(
+        "--show_fisher_heatmap",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Show or hide the Fisher hemisphere heatmap in the GUI without changing control",
+    )
+    parser.add_argument(
+        "--show_fisher_arrows",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Show or hide the red velocity arrows; also enables/disables arrow computation",
+    )
+    parser.add_argument(
+        "--fisher_debug_log",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Print additional Fisher velocity-field debug logs from the OmniMap side",
+    )
+    parser.add_argument(
+        "--fisher_window_mode",
+        choices=("combined", "split"),
+        default="combined",
+        help="Render Fisher heatmap and arrows in one window or split them into two windows",
+    )
+    parser.add_argument(
+        "--fisher_heatmap_window_name",
+        type=str,
+        default="Fisher Heatmap Viewer",
+        help="Open3D window title used for the Fisher heatmap window in split mode",
+    )
+    parser.add_argument(
+        "--fisher_velocity_window_name",
+        type=str,
+        default="Fisher Velocity Viewer",
+        help="Open3D window title used for the Fisher velocity window in split mode",
+    )
+    parser.add_argument(
+        "--fisher_num_samples",
+        type=int,
+        default=64,
+        help="Number of sparse hemisphere sample points used to compute Fisher values and gradients",
+    )
+    parser.add_argument(
+        "--fisher_num_dense_points",
+        type=int,
+        default=4096,
+        help="Number of dense hemisphere points used to interpolate both the colored Fisher field and the displayed velocity arrows",
+    )
+    parser.add_argument(
+        "--fisher_idw_power",
+        type=float,
+        default=2.0,
+        help="IDW interpolation power used for the dense Fisher heatmap",
+    )
+    parser.add_argument(
+        "--fisher_display_radius_scale",
+        type=float,
+        default=0.92,
+        help="Display radius scale for the dense Fisher heatmap relative to the true hemisphere radius",
+    )
+    parser.add_argument(
+        "--fisher_arrow_radius_scale",
+        type=float,
+        default=0.90,
+        help="Display radius scale for the velocity arrows relative to the true hemisphere radius",
+    )
+    parser.add_argument(
+        "--grad_eps",
+        type=float,
+        default=0.01,
+        help="Advanced: finite-difference epsilon used by the Fisher angle-gradient query",
+    )
+    parser.add_argument(
+        "--max_delta_theta",
+        type=float,
+        default=0.20,
+        help="Advanced: maximum allowed theta update per step in radians",
+    )
+    parser.add_argument(
+        "--max_delta_phi",
+        type=float,
+        default=0.15,
+        help="Advanced: maximum allowed phi update per step in radians",
+    )
+    parser.add_argument(
+        "--fallback_delta_theta",
+        type=float,
+        default=0.03,
+        help="Advanced: fallback theta increment used when the gradient norm is too small",
+    )
+    parser.add_argument(
+        "--fallback_delta_phi",
+        type=float,
+        default=0.0,
+        help="Advanced: fallback phi increment used when the gradient norm is too small",
+    )
+    parser.add_argument("--vis_gui", action="store_true")
+    parser.add_argument(
+        "--save_frames",
+        action="store_true",
+        help="Save per-step RGB / depth / c2w artifacts under save_dir/frames",
+    )
+    parser.add_argument(
+        "--step_delay_sec",
+        type=float,
+        default=0.0,
+        help="Optional delay after each step, useful when watching GUI updates",
+    )
+    parser.add_argument(
+        "--hold_gui_sec",
+        type=float,
+        default=0.0,
+        help="Optional delay before process exit so GUI windows remain visible for a bit",
+    )
+    parser.add_argument("--terminate", action="store_true")
+    return parser.parse_args()
+
+
+def main() -> None:
+    """Run the authoritative Phase-4 loop from render to next-pose update.
+
+    The loop owns the canonical camera state:
+    `current_c2w -> render -> track -> Fisher policy -> next_c2w`.
+    This keeps the closed-loop order explicit and makes each step easy to audit.
     """
-    职责：
-        - 加载静态点云
-        - 按需加载地面
-        - 管理 Open3D 场景
-        - 从给定位姿渲染 RGBD
+    args = parse_args()
 
-    这里要解决的事情：
-        - 点云导入
-        - 地面构造
-        - 用 Open3D 的离屏渲染得到 color/depth
-    """
+    save_dir = Path(args.save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
 
-    def __init__(self, pointcloud_path, ground=True, width=640, height=480): ...
-    def set_camera_intrinsics(self, fx, fy, cx, cy): ...
-    def render(self, c2w):
-        # return rgb, depth
-        ...
+    # 1. Build the static simulated scene once.
+    simulator = SceneSimulator(width=args.width, height=args.height)
+    simulator.load_pointcloud(
+        args.pcd_path,
+        voxel_size=args.voxel_size,
+        scale=args.point_scale,
+    )
+    simulator.set_intrinsics(args.fx, args.fy, args.cx, args.cy)
+    if args.ground:
+        simulator.add_ground(size=args.ground_size, z=args.ground_z)
+    if args.coord_frame:
+        simulator.add_coordinate_frame()
+
+    stats = simulator.get_scene_stats()
+    print("[ClosedLoop] scene stats:")
+    for key, value in stats.items():
+        print(f"  - {key}: {value}")
+
+    if simulator.scene_center is None or simulator.aabb is None:
+        raise RuntimeError("scene_center/aabb unavailable after simulator setup")
+
+    center = np.asarray(simulator.scene_center, dtype=np.float64)
+    extent = np.asarray(simulator.aabb.get_extent(), dtype=np.float64)
+    step_scale_theta, step_scale_phi = resolve_step_scales(
+        args.fisher_step_scale,
+        theta_scale=args.fisher_step_scale_theta,
+        phi_scale=args.fisher_step_scale_phi,
+    )
+    fisher_config_overrides = build_fisher_debug_config_overrides(
+        show_fisher_heatmap=args.show_fisher_heatmap,
+        show_fisher_arrows=args.show_fisher_arrows,
+        fisher_arrow_length=args.fisher_arrow_length,
+        fisher_debug_log=args.fisher_debug_log,
+        fisher_window_mode=args.fisher_window_mode,
+        fisher_heatmap_window_name=args.fisher_heatmap_window_name,
+        fisher_velocity_window_name=args.fisher_velocity_window_name,
+        fisher_num_samples=args.fisher_num_samples,
+        fisher_num_dense_points=args.fisher_num_dense_points,
+        fisher_idw_power=args.fisher_idw_power,
+        fisher_display_radius_scale=args.fisher_display_radius_scale,
+        fisher_arrow_radius_scale=args.fisher_arrow_radius_scale,
+    )
+    base_radius = (
+        float(args.hemi_radius)
+        if args.hemi_radius is not None
+        else max(float(np.linalg.norm(extent)), 1.0) * float(args.radius_scale)
+    )
+    # 2. Initialize the first pose on the upper hemisphere around the scene.
+    current_c2w = spherical_c2w(
+        center=center,
+        radius=base_radius,
+        theta=float(args.init_theta),
+        phi=float(args.init_phi),
+    )
+    intrinsics = np.array([args.fx, args.fy, args.cx, args.cy], dtype=np.float32)
+
+    runner = OmniMapRunner.from_config_path(
+        config_path=args.config,
+        output=str(save_dir),
+        depth_scale=args.depth_scale,
+        vis_gui=args.vis_gui,
+        scene=args.scene,
+        max_depth_m=args.max_depth,
+        config_overrides=fisher_config_overrides,
+        verbose=True,
+    )
+    policy = FisherMotionPolicy(
+        step_gain_theta=step_scale_theta,
+        step_gain_phi=step_scale_phi,
+        cartesian=args.cartesian,
+        dt=args.dt,
+        radial_gain=args.radial_gain,
+        grad_eps=args.grad_eps,
+        max_delta_theta=args.max_delta_theta,
+        max_delta_phi=args.max_delta_phi,
+        fallback_delta_theta=args.fallback_delta_theta,
+        fallback_delta_phi=args.fallback_delta_phi,
+        verbose=True,
+    )
+
+    log_path = save_dir / "loop_log.jsonl"
+    with open(log_path, "w", encoding="utf-8") as log_file:
+        for idx in range(int(args.num_steps)):
+            # 3. Render the current pose into RGBD.
+            render_result = simulator.render(current_c2w)
+            rgb = render_result.rgb
+            depth = render_result.depth
+
+            if args.save_frames:
+                save_render_artifacts(
+                    save_dir=save_dir,
+                    idx=idx,
+                    rgb=rgb,
+                    depth=depth,
+                    c2w=current_c2w,
+                )
+
+            # 4. Push the rendered frame into OmniMap.
+            step_result = runner.step(
+                idx=idx,
+                rgb=rgb,
+                depth_m=depth,
+                c2w=current_c2w,
+                intrinsics_vec=intrinsics,
+                is_last=bool(args.terminate and idx == int(args.num_steps) - 1),
+            )
+
+            # 5. Query Fisher and derive the next pose for the following step.
+            motion_result = policy.next_pose_from_c2w(
+                gs_backend=runner.omni.gs,
+                current_c2w=current_c2w,
+                intrinsics_vec=intrinsics,
+                image_size=(args.height, args.width),
+                idx=idx + 1,
+            )
+
+            # 6. Log enough state to audit both mapping progress and control behavior.
+            log_entry = {
+                "idx": idx,
+                "current_c2w": current_c2w.tolist(),
+                "camera_center": current_c2w[:3, 3].tolist(),
+                "current_theta": motion_result.current_theta,
+                "current_phi": motion_result.current_phi,
+                "next_theta": motion_result.next_theta,
+                "next_phi": motion_result.next_phi,
+                "grad_theta_raw": motion_result.grad_theta_raw,
+                "grad_phi_raw": motion_result.grad_phi_raw,
+                "grad_norm_raw": motion_result.grad_norm_raw,
+                "fisher_current_score": motion_result.fisher_score,
+                "delta_theta_applied": motion_result.delta_theta_applied,
+                "delta_phi_applied": motion_result.delta_phi_applied,
+                "fisher_step_scale": float(args.fisher_step_scale),
+                "cartesian": bool(args.cartesian),
+                "dt": float(args.dt),
+                "radial_gain": float(args.radial_gain),
+                "step_scale_theta": motion_result.step_scale_theta,
+                "step_scale_phi": motion_result.step_scale_phi,
+                "clipped_theta": motion_result.clipped_theta,
+                "clipped_phi": motion_result.clipped_phi,
+                "grad_norm_epsilon": motion_result.grad_norm_epsilon,
+                "num_keyframes": step_result.num_keyframes,
+                "num_gaussians": step_result.num_gaussians,
+                "depth_min_m": step_result.depth_min_m,
+                "depth_max_m": step_result.depth_max_m,
+                "fallback_used": motion_result.fallback_used,
+                "reference_radius": motion_result.reference_radius,
+                "current_radius": motion_result.current_radius,
+                "radial_error": motion_result.radial_error,
+                "vt_world": motion_result.vt_world.tolist(),
+                "vn_world": motion_result.vn_world.tolist(),
+                "velocity_world": motion_result.velocity_world.tolist(),
+                "next_position": motion_result.next_position,
+                "fisher_visualization": {
+                    "show_fisher_heatmap": bool(args.show_fisher_heatmap),
+                    "show_fisher_arrows": bool(args.show_fisher_arrows),
+                    "fisher_arrow_length": float(args.fisher_arrow_length),
+                    "fisher_debug_log": bool(args.fisher_debug_log),
+                    "fisher_window_mode": str(args.fisher_window_mode),
+                    "fisher_heatmap_window_name": str(args.fisher_heatmap_window_name),
+                    "fisher_velocity_window_name": str(
+                        args.fisher_velocity_window_name
+                    ),
+                    "fisher_num_samples": int(args.fisher_num_samples),
+                    "fisher_num_dense_points": int(args.fisher_num_dense_points),
+                    "fisher_idw_power": float(args.fisher_idw_power),
+                    "fisher_display_radius_scale": float(
+                        args.fisher_display_radius_scale
+                    ),
+                    "fisher_arrow_radius_scale": float(
+                        args.fisher_arrow_radius_scale
+                    ),
+                },
+                "next_c2w": motion_result.next_c2w.tolist(),
+            }
+            log_file.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
+            log_file.flush()
+
+            print(
+                (
+                    f"[ClosedLoop] step={idx} mode=cartesian "
+                    f"r={motion_result.current_radius:.4f} "
+                    f"dr={motion_result.radial_error:.6f} "
+                    f"|vt|={np.linalg.norm(motion_result.vt_world):.6f} "
+                    f"|vn|={np.linalg.norm(motion_result.vn_world):.6f} "
+                    f"|v|={np.linalg.norm(motion_result.velocity_world):.6f} "
+                    f"keyframes={step_result.num_keyframes} "
+                    f"gaussians={step_result.num_gaussians}"
+                )
+                if args.cartesian
+                else (
+                    f"[ClosedLoop] step={idx} theta={motion_result.current_theta:.4f} "
+                    f"phi={motion_result.current_phi:.4f} -> next_theta={motion_result.next_theta:.4f} "
+                    f"next_phi={motion_result.next_phi:.4f} "
+                    f"delta=({motion_result.delta_theta_applied:.4f}, {motion_result.delta_phi_applied:.4f}) "
+                    f"keyframes={step_result.num_keyframes} "
+                    f"gaussians={step_result.num_gaussians}"
+                )
+            )
+
+            current_c2w = motion_result.next_c2w
+            if args.step_delay_sec > 0:
+                time.sleep(float(args.step_delay_sec))
+
+    np.save(save_dir / "trajectory_c2w_last.npy", current_c2w)
+    print(f"[ClosedLoop] Saved per-step logs to {log_path}")
+
+    if args.terminate:
+        runner.terminate()
+    if args.vis_gui and args.hold_gui_sec > 0:
+        print(f"[ClosedLoop] Holding GUI for {args.hold_gui_sec:.2f}s before exit")
+        time.sleep(float(args.hold_gui_sec))
 
 
-class OmniMapRunner:
-    """
-    职责：
-        - 初始化 OMNI
-        - 把仿真出来的 RGBD 喂进去
-        - 维持 tstamp / intrinsics / pose 格式兼容
-
-    这里的核心不是创新，是适配数据格式
-    """
-
-    def __init__(self, args, config):
-        self.omni = OMNI(args, config)
-
-    def step(self, idx, rgb, depth, w2c_pose_vec, c2w_44, intrinsics):
-        self.omni.track(...)
-
-
-class FisherMotionPolicy:
-    """
-    职责：
-        - 从当前 viewpoint 出发
-        - 调用现有半球场逻辑
-        - 取速度方向
-        - 更新相机球坐标位置
-
-    这里的关键是：
-        - 你不需要 next_viewpoint
-        - 你直接在主循环里拿当前 viewpoint
-        - 然后自己调用：`build_hemisphere_field(...)` 或复用 `update_fisher_hemisphere_pc(...)` 之后缓存结果
-        - 再从 sample_vel_dirs / 梯度里选下一步
-    """
-
-    def __init__(self, step_theta, step_phi): ...
-    def compute_next_pose(self, gs_backend, current_viewpoint, idx):
-        # 返回下一时刻 c2w
-        ...
-
-
-def main():
-    """主函数
-    职责：
-        - 管状态
-        - 管时间步
-        - 串起仿真、建图、规划、显示
-
-    伪代码：
-    ```
-    pose = init_pose
-    for idx in range(T):
-        rgb, depth = simulator.render(pose.c2w)
-        omni_runner.step(idx, rgb, depth, pose.w2c_vec, pose.c2w_44, intrinsics)
-        pose = motion_policy.compute_next_pose(
-            gs_backend=omni_runner.omni.gs,
-            current_viewpoint=...,
-            idx=idx
-        )
-    ```
-    """
-    pass
+if __name__ == "__main__":
+    main()

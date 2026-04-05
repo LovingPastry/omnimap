@@ -1,0 +1,94 @@
+{
+  "idx": 3,
+  "viewpoint_source": "c2w_matrix",
+  "current_c2w": [
+    [
+      0.5949616591591717,
+      0.39913571587182306,
+      0.6976469960154832,
+      -1.1931334635759867
+    ],
+    [
+      0.8037540842863586,
+      -0.2954516113372287,
+      -0.5164181528258539,
+      0.9059133824314494
+    ],
+    [
+      -4.915950414526697e-09,
+      0.8679856245698775,
+      -0.4965893449433486,
+      0.8692930149649063
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "next_c2w": [
+    [
+      0.42342069472276,
+      0.5623338698824202,
+      0.710278523798551,
+      -1.2152191473745075
+    ],
+    [
+      0.905933218423495,
+      -0.2628271024259784,
+      -0.3319743951478648,
+      0.5834224878473854
+    ],
+    [
+      -7.10099424351556e-09,
+      0.7840297351147598,
+      -0.6207233188685302,
+      1.0863351954409246
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "scene_center": [
+    0.026668056845664978,
+    0.002981562167406082,
+    0.0010309417266398668
+  ],
+  "radius": 1.7484509944915771,
+  "current_theta": 2.5043747425079346,
+  "current_phi": 0.5196649432182312,
+  "next_theta": 2.7043747425079347,
+  "next_phi": 0.6696649432182312,
+  "grad_theta_raw": 44881.25,
+  "grad_phi_raw": 423018.75,
+  "grad_norm_raw": 425392.9823740925,
+  "fisher_score": 398261.0625,
+  "delta_theta_applied": 0.2,
+  "delta_phi_applied": 0.15,
+  "step_scale_theta": 0.03,
+  "step_scale_phi": 0.03,
+  "clipped_theta": true,
+  "clipped_phi": true,
+  "grad_norm_epsilon": 1e-08,
+  "fallback_used": false,
+  "fisher_controller": {
+    "fisher_step_scale": 0.03,
+    "step_scale_theta": 0.03,
+    "step_scale_phi": 0.03,
+    "grad_eps": 0.01,
+    "max_delta_theta": 0.2,
+    "max_delta_phi": 0.15,
+    "fallback_delta_theta": 0.03,
+    "fallback_delta_phi": 0.0
+  },
+  "fisher_visualization": {
+    "show_fisher_heatmap": true,
+    "show_fisher_arrows": true,
+    "fisher_arrow_length": 0.07,
+    "fisher_debug_log": false
+  }
+}
