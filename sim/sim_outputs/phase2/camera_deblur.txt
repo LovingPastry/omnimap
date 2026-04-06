@@ -1,1 +1,0 @@
-Camera id: 000,      weight_this: 0.500,      weight_blur: 0.500,      blur_tran_x: 0.0000,      blur_tran_y: 0.0000

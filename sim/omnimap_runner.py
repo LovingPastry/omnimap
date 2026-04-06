@@ -339,3 +339,11 @@ class OmniMapRunner:
         self.omni.terminate()
         if hasattr(self.progress_bar, "close"):
             self.progress_bar.close()
+
+    def export_final_fisher_artifacts(self, tag: str = "final") -> None:
+        """Persist the latest Fisher heatmap / velocity views and cached geometry."""
+        gs = self.omni.gs
+        export_fn = getattr(gs, "export_final_fisher_artifacts", None)
+        if export_fn is None:
+            return
+        export_fn(tag=tag)

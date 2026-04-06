@@ -179,12 +179,6 @@ def parse_args() -> argparse.Namespace:
         help="Add a coordinate frame for debugging",
     )
     parser.add_argument(
-        "--radius_scale",
-        type=float,
-        default=1.5,
-        help="Scale factor applied to scene extent to place test cameras",
-    )
-    parser.add_argument(
         "--skip_orientation_check",
         action="store_true",
         help="Skip the pre-render self-check for vertical image orientation",
@@ -221,7 +215,7 @@ def main() -> None:
 
     center = simulator.scene_center
     extent = np.asarray(simulator.aabb.get_extent(), dtype=np.float64)
-    base_radius = max(float(np.linalg.norm(extent)), 1.0) * float(args.radius_scale)
+    base_radius = 0.5 * float(np.linalg.norm(extent)) + 0.3
     up = np.array([0.0, 0.0, 1.0], dtype=np.float64)
     orientation_probe_scale = max(float(np.linalg.norm(extent)) * 0.15, 1e-3)
 

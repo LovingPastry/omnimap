@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import sys
@@ -18,7 +19,7 @@ repo_root = Path(__file__).resolve().parent
 if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
 
-from sim.motion_policy import FisherMotionPolicy, resolve_step_scales
+from sim.motion_policy import FisherMotionPolicy
 from sim.omnimap_runner import (
     OmniMapRunner,
     build_fisher_debug_config_overrides,
@@ -115,49 +116,57 @@ def save_render_artifacts(
     )
 
 
+def compute_depth_stats(depth: np.ndarray) -> tuple[float, float, int, int, float]:
+    """Return `(min, max, valid_count, total_count, valid_ratio)` for one rendered depth map."""
+    valid = np.isfinite(depth) & (depth > 0)
+    total = int(depth.size)
+    valid_count = int(valid.sum())
+    valid_ratio = float(valid_count / max(total, 1))
+    if valid_count == 0:
+        return 0.0, 0.0, 0, total, valid_ratio
+    return (
+        float(depth[valid].min()),
+        float(depth[valid].max()),
+        valid_count,
+        total,
+        valid_ratio,
+    )
+
+
 def parse_args() -> argparse.Namespace:
     """Parse the Phase-4 closed-loop experiment CLI."""
     parser = argparse.ArgumentParser(
         description=(
             "Phase-4 closed-loop Fisher debug entrypoint: render RGBD from a static scene, "
             "feed frames into OmniMap, query Fisher gradients, and advance the camera "
-            "pose on the upper hemisphere for multiple steps.\n\n"
-            "This script is the main tool for debugging whether the Fisher information "
-            "field, the raw velocity arrows, and the applied next-pose controller stay "
-            "consistent over time."
+            "for multiple steps.\n\n"
+            "In cartesian mode, this entrypoint now uses the full control chain:\n"
+            "linear velocity integration + angular velocity error -> omega command -> "
+            "rotation integration. This is the authoritative runtime for inspecting "
+            "whether the Fisher field, velocity field, mapping state, and camera "
+            "trajectory remain consistent over time."
         ),
         epilog="""
-# 最小闭环命令：
+# 推荐默认闭环命令：
 python3 sim_fisher_closed_loop.py \
     --pcd_path replica/log_pcd_0/对比结果/RoboSeg_geo/Kettle.ply \
     --point_scale 0.001 \
     --config config/sim_rtabmap_config.yaml \
-    --num_steps 20 \
-    --save_dir sim/sim_outputs/phase4      
-
-#带 GUI 的调试命令：
-python3 sim_fisher_closed_loop.py \
-    --pcd_path replica/log_pcd_0/对比结果/RoboSeg_geo/Kettle.ply \
-    --point_scale 0.001 \
-    --config config/sim_rtabmap_config.yaml \
-    --num_steps 20 \
-    --save_dir sim/sim_outputs/phase4_gui \
-    --vis_gui \
-    --show_fisher_arrows \
-    --step_delay_sec 0.1 \
-    --hold_gui_sec 2.0
-
-# 双窗口调试命令：
-python3 sim_fisher_closed_loop.py \
-    --pcd_path replica/log_pcd_0/对比结果/RoboSeg_geo/Kettle.ply \
-    --point_scale 0.001 \
-    --config config/sim_rtabmap_config.yaml \
-    --num_steps 20 \
-    --save_dir sim/sim_outputs/phase4_split \
+    --num_steps 50 \
+    --save_dir sim/sim_outputs/phase4_dense \
     --vis_gui \
     --show_fisher_arrows \
     --fisher_window_mode split \
-    --step_delay_sec 0.1
+    --fisher_num_samples 128 \
+    --fisher_num_dense_points 1024 \
+    --step_delay_sec 0.1 \
+    --hold_gui_sec 2.0 \
+    --cartesian \
+    --dt 0.1 \
+    --fisher_step_scale 1e-4 \
+    --linear_vel_max 0.5 \
+    --radial_gain 0.2 \
+    --angular_gain 2.0
 
 # 保存每一步渲染结果：
 python3 sim_fisher_closed_loop.py \
@@ -204,18 +213,6 @@ python3 sim_fisher_closed_loop.py \
         help="Primary Fisher control scale applied to both theta and phi before clipping",
     )
     parser.add_argument(
-        "--fisher_step_scale_theta",
-        type=float,
-        default=None,
-        help="Optional theta-only override for the Fisher control scale",
-    )
-    parser.add_argument(
-        "--fisher_step_scale_phi",
-        type=float,
-        default=None,
-        help="Optional phi-only override for the Fisher control scale",
-    )
-    parser.add_argument(
         "--cartesian",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -232,6 +229,24 @@ python3 sim_fisher_closed_loop.py \
         type=float,
         default=2.0,
         help="Radial correction gain used to pull the camera back toward the reference sphere",
+    )
+    parser.add_argument(
+        "--linear_vel_max",
+        type=float,
+        default=0.5,
+        help="Maximum Cartesian linear speed used to clip the final velocity command in cartesian mode",
+    )
+    parser.add_argument(
+        "--angular_gain",
+        type=float,
+        default=2.0,
+        help="Angular gain applied to the pose-error rotvec when cartesian mode computes omega commands",
+    )
+    parser.add_argument(
+        "--enable_angular",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable or disable angular velocity output in cartesian mode",
     )
     parser.add_argument(
         "--fisher_arrow_length",
@@ -312,28 +327,22 @@ python3 sim_fisher_closed_loop.py \
         help="Advanced: finite-difference epsilon used by the Fisher angle-gradient query",
     )
     parser.add_argument(
+        "--spherical_speed_min",
+        type=float,
+        default=1e-4,
+        help="Advanced: minimum spherical-speed norm; below this the controller stops instead of moving",
+    )
+    parser.add_argument(
         "--max_delta_theta",
         type=float,
         default=0.20,
-        help="Advanced: maximum allowed theta update per step in radians",
+        help="Advanced: theta component used to define the spherical-speed clip radius in radians per step",
     )
     parser.add_argument(
         "--max_delta_phi",
         type=float,
         default=0.15,
-        help="Advanced: maximum allowed phi update per step in radians",
-    )
-    parser.add_argument(
-        "--fallback_delta_theta",
-        type=float,
-        default=0.03,
-        help="Advanced: fallback theta increment used when the gradient norm is too small",
-    )
-    parser.add_argument(
-        "--fallback_delta_phi",
-        type=float,
-        default=0.0,
-        help="Advanced: fallback phi increment used when the gradient norm is too small",
+        help="Advanced: phi component used to define the spherical-speed clip radius in radians per step",
     )
     parser.add_argument("--vis_gui", action="store_true")
     parser.add_argument(
@@ -392,11 +401,7 @@ def main() -> None:
 
     center = np.asarray(simulator.scene_center, dtype=np.float64)
     extent = np.asarray(simulator.aabb.get_extent(), dtype=np.float64)
-    step_scale_theta, step_scale_phi = resolve_step_scales(
-        args.fisher_step_scale,
-        theta_scale=args.fisher_step_scale_theta,
-        phi_scale=args.fisher_step_scale_phi,
-    )
+    step_scale = float(args.fisher_step_scale)
     fisher_config_overrides = build_fisher_debug_config_overrides(
         show_fisher_heatmap=args.show_fisher_heatmap,
         show_fisher_arrows=args.show_fisher_arrows,
@@ -414,8 +419,19 @@ def main() -> None:
     base_radius = (
         float(args.hemi_radius)
         if args.hemi_radius is not None
-        else max(float(np.linalg.norm(extent)), 1.0) * float(args.radius_scale)
+        else 0.5 * float(np.linalg.norm(extent)) + 0.3
     )
+    if args.cartesian:
+        displacement_per_step = float(args.linear_vel_max) * float(args.dt)
+        radius_ratio = displacement_per_step / max(base_radius, 1e-9)
+        if radius_ratio > 0.2:
+            print(
+                "[ClosedLoop] Warning: cartesian linear step may be too aggressive for the "
+                "current reference sphere. "
+                f"linear_vel_max*dt={displacement_per_step:.4f}, "
+                f"radius={base_radius:.4f}, ratio={radius_ratio:.4f}. "
+                "If the object leaves the view frustum, reduce --linear_vel_max or --dt."
+            )
     # 2. Initialize the first pose on the upper hemisphere around the scene.
     current_c2w = spherical_c2w(
         center=center,
@@ -436,26 +452,86 @@ def main() -> None:
         verbose=True,
     )
     policy = FisherMotionPolicy(
-        step_gain_theta=step_scale_theta,
-        step_gain_phi=step_scale_phi,
+        step_gain_theta=step_scale,
+        step_gain_phi=step_scale,
         cartesian=args.cartesian,
         dt=args.dt,
         radial_gain=args.radial_gain,
+        linear_vel_max=args.linear_vel_max,
+        angular_gain=args.angular_gain,
+        enable_angular=args.enable_angular,
         grad_eps=args.grad_eps,
+        spherical_speed_min=args.spherical_speed_min,
         max_delta_theta=args.max_delta_theta,
         max_delta_phi=args.max_delta_phi,
-        fallback_delta_theta=args.fallback_delta_theta,
-        fallback_delta_phi=args.fallback_delta_phi,
         verbose=True,
     )
 
     log_path = save_dir / "loop_log.jsonl"
-    with open(log_path, "w", encoding="utf-8") as log_file:
+    csv_path = save_dir / "loop_debug.csv"
+    with (
+        open(log_path, "w", encoding="utf-8") as log_file,
+        open(csv_path, "w", encoding="utf-8", newline="") as csv_file,
+    ):
+        csv_writer = csv.DictWriter(
+            csv_file,
+            fieldnames=[
+                "idx",
+                "controller_mode",
+                "cartesian",
+                "fisher_step_scale",
+                "dt",
+                "radial_gain",
+                "linear_vel_max",
+                "angular_gain",
+                "enable_angular",
+                "grad_theta_raw",
+                "grad_phi_raw",
+                "scaled_theta",
+                "scaled_phi",
+                "delta_theta_applied",
+                "delta_phi_applied",
+                "speed_clipped",
+                "clip_scale_ratio",
+                "grad_norm_raw",
+                "fisher_score",
+                "spherical_speed_raw",
+                "spherical_speed_scaled",
+                "spherical_speed_applied",
+                "spherical_speed_limit",
+                "spherical_speed_min",
+                "reference_radius",
+                "current_radius",
+                "radial_error",
+                "vt_world_norm",
+                "vn_world_norm",
+                "velocity_raw_world_norm",
+                "velocity_world_norm",
+                "linear_speed_raw",
+                "linear_speed_applied",
+                "linear_speed_limit",
+                "angular_speed_raw",
+                "angular_speed_applied",
+                "rotvec_error_norm",
+                "angular_velocity_world_norm",
+                "max_scale_before_clip",
+                "num_keyframes",
+                "num_gaussians",
+                "depth_min_m",
+                "depth_max_m",
+                "should_stop",
+                "stop_reason",
+            ],
+        )
+        csv_writer.writeheader()
         for idx in range(int(args.num_steps)):
             # 3. Render the current pose into RGBD.
             render_result = simulator.render(current_c2w)
             rgb = render_result.rgb
             depth = render_result.depth
+            depth_min, depth_max, valid_count, total_count, valid_ratio = compute_depth_stats(
+                depth
+            )
 
             if args.save_frames:
                 save_render_artifacts(
@@ -465,6 +541,15 @@ def main() -> None:
                     depth=depth,
                     c2w=current_c2w,
                 )
+
+            if valid_count == 0:
+                print(
+                    f"[ClosedLoop] Stop before TSDF integration at step={idx}: "
+                    "rendered depth has no valid pixels. "
+                    f"valid_ratio={valid_ratio:.6f}, "
+                    f"cam_pos={current_c2w[:3, 3].tolist()}"
+                )
+                break
 
             # 4. Push the rendered frame into OmniMap.
             step_result = runner.step(
@@ -498,28 +583,49 @@ def main() -> None:
                 "grad_phi_raw": motion_result.grad_phi_raw,
                 "grad_norm_raw": motion_result.grad_norm_raw,
                 "fisher_current_score": motion_result.fisher_score,
+                "scaled_theta": motion_result.scaled_theta,
+                "scaled_phi": motion_result.scaled_phi,
                 "delta_theta_applied": motion_result.delta_theta_applied,
                 "delta_phi_applied": motion_result.delta_phi_applied,
                 "fisher_step_scale": float(args.fisher_step_scale),
                 "cartesian": bool(args.cartesian),
                 "dt": float(args.dt),
                 "radial_gain": float(args.radial_gain),
+                "linear_vel_max": float(args.linear_vel_max),
+                "angular_gain": float(args.angular_gain),
+                "enable_angular": bool(args.enable_angular),
                 "step_scale_theta": motion_result.step_scale_theta,
                 "step_scale_phi": motion_result.step_scale_phi,
-                "clipped_theta": motion_result.clipped_theta,
-                "clipped_phi": motion_result.clipped_phi,
-                "grad_norm_epsilon": motion_result.grad_norm_epsilon,
+                "speed_clipped": motion_result.speed_clipped,
+                "clip_scale_ratio": motion_result.clip_scale_ratio,
                 "num_keyframes": step_result.num_keyframes,
                 "num_gaussians": step_result.num_gaussians,
                 "depth_min_m": step_result.depth_min_m,
                 "depth_max_m": step_result.depth_max_m,
-                "fallback_used": motion_result.fallback_used,
+                "spherical_speed_raw": motion_result.spherical_speed_raw,
+                "spherical_speed_scaled": motion_result.spherical_speed_scaled,
+                "spherical_speed_applied": motion_result.spherical_speed_applied,
+                "spherical_speed_limit": motion_result.spherical_speed_limit,
+                "spherical_speed_min": motion_result.spherical_speed_min,
+                "should_stop": motion_result.should_stop,
+                "stop_reason": motion_result.stop_reason,
                 "reference_radius": motion_result.reference_radius,
                 "current_radius": motion_result.current_radius,
                 "radial_error": motion_result.radial_error,
+                "velocity_raw_world": motion_result.velocity_raw_world.tolist(),
                 "vt_world": motion_result.vt_world.tolist(),
                 "vn_world": motion_result.vn_world.tolist(),
                 "velocity_world": motion_result.velocity_world.tolist(),
+                "rotvec_error": motion_result.rotvec_error.tolist(),
+                "angular_velocity_world": motion_result.angular_velocity_world.tolist(),
+                "angular_speed_raw": motion_result.angular_speed_raw,
+                "angular_speed_applied": motion_result.angular_speed_applied,
+                "angular_gain": motion_result.angular_gain,
+                "enable_angular": motion_result.enable_angular,
+                "desired_c2w": motion_result.desired_c2w.tolist(),
+                "linear_speed_raw": motion_result.linear_speed_raw,
+                "linear_speed_applied": motion_result.linear_speed_applied,
+                "linear_speed_limit": motion_result.linear_speed_limit,
                 "next_position": motion_result.next_position,
                 "fisher_visualization": {
                     "show_fisher_heatmap": bool(args.show_fisher_heatmap),
@@ -537,14 +643,71 @@ def main() -> None:
                     "fisher_display_radius_scale": float(
                         args.fisher_display_radius_scale
                     ),
-                    "fisher_arrow_radius_scale": float(
-                        args.fisher_arrow_radius_scale
-                    ),
+                    "fisher_arrow_radius_scale": float(args.fisher_arrow_radius_scale),
                 },
                 "next_c2w": motion_result.next_c2w.tolist(),
             }
             log_file.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
             log_file.flush()
+            csv_writer.writerow(
+                {
+                    "idx": idx,
+                    "controller_mode": motion_result.controller_mode,
+                    "cartesian": motion_result.cartesian,
+                    "fisher_step_scale": float(args.fisher_step_scale),
+                    "dt": float(args.dt),
+                    "radial_gain": float(args.radial_gain),
+                    "linear_vel_max": float(args.linear_vel_max),
+                    "angular_gain": float(args.angular_gain),
+                    "enable_angular": bool(args.enable_angular),
+                    "grad_theta_raw": motion_result.grad_theta_raw,
+                    "grad_phi_raw": motion_result.grad_phi_raw,
+                    "scaled_theta": motion_result.scaled_theta,
+                    "scaled_phi": motion_result.scaled_phi,
+                    "delta_theta_applied": motion_result.delta_theta_applied,
+                    "delta_phi_applied": motion_result.delta_phi_applied,
+                    "speed_clipped": motion_result.speed_clipped,
+                    "clip_scale_ratio": motion_result.clip_scale_ratio,
+                    "grad_norm_raw": motion_result.grad_norm_raw,
+                    "fisher_score": motion_result.fisher_score,
+                    "spherical_speed_raw": motion_result.spherical_speed_raw,
+                    "spherical_speed_scaled": motion_result.spherical_speed_scaled,
+                    "spherical_speed_applied": motion_result.spherical_speed_applied,
+                    "spherical_speed_limit": motion_result.spherical_speed_limit,
+                    "spherical_speed_min": motion_result.spherical_speed_min,
+                    "reference_radius": motion_result.reference_radius,
+                    "current_radius": motion_result.current_radius,
+                    "radial_error": motion_result.radial_error,
+                    "vt_world_norm": float(np.linalg.norm(motion_result.vt_world)),
+                    "vn_world_norm": float(np.linalg.norm(motion_result.vn_world)),
+                    "velocity_raw_world_norm": float(np.linalg.norm(motion_result.velocity_raw_world)),
+                    "velocity_world_norm": float(
+                        np.linalg.norm(motion_result.velocity_world)
+                    ),
+                    "linear_speed_raw": motion_result.linear_speed_raw,
+                    "linear_speed_applied": motion_result.linear_speed_applied,
+                    "linear_speed_limit": motion_result.linear_speed_limit,
+                    "angular_speed_raw": motion_result.angular_speed_raw,
+                    "angular_speed_applied": motion_result.angular_speed_applied,
+                    "rotvec_error_norm": float(np.linalg.norm(motion_result.rotvec_error)),
+                    "angular_velocity_world_norm": float(
+                        np.linalg.norm(motion_result.angular_velocity_world)
+                    ),
+                    "max_scale_before_clip": (
+                        float("nan")
+                        if args.cartesian
+                        else float(np.hypot(args.max_delta_theta, args.max_delta_phi))
+                        / max(motion_result.grad_norm_raw, 1e-12)
+                    ),
+                    "num_keyframes": step_result.num_keyframes,
+                    "num_gaussians": step_result.num_gaussians,
+                    "depth_min_m": step_result.depth_min_m,
+                    "depth_max_m": step_result.depth_max_m,
+                    "should_stop": motion_result.should_stop,
+                    "stop_reason": motion_result.stop_reason,
+                }
+            )
+            csv_file.flush()
 
             print(
                 (
@@ -553,7 +716,11 @@ def main() -> None:
                     f"dr={motion_result.radial_error:.6f} "
                     f"|vt|={np.linalg.norm(motion_result.vt_world):.6f} "
                     f"|vn|={np.linalg.norm(motion_result.vn_world):.6f} "
+                    f"|v_raw|={np.linalg.norm(motion_result.velocity_raw_world):.6f} "
                     f"|v|={np.linalg.norm(motion_result.velocity_world):.6f} "
+                    f"|rotvec_err|={motion_result.angular_speed_raw:.6f} "
+                    f"|omega|={motion_result.angular_speed_applied:.6f} "
+                    f"stop={motion_result.should_stop} "
                     f"keyframes={step_result.num_keyframes} "
                     f"gaussians={step_result.num_gaussians}"
                 )
@@ -563,17 +730,27 @@ def main() -> None:
                     f"phi={motion_result.current_phi:.4f} -> next_theta={motion_result.next_theta:.4f} "
                     f"next_phi={motion_result.next_phi:.4f} "
                     f"delta=({motion_result.delta_theta_applied:.4f}, {motion_result.delta_phi_applied:.4f}) "
+                    f"stop={motion_result.should_stop} "
                     f"keyframes={step_result.num_keyframes} "
                     f"gaussians={step_result.num_gaussians}"
                 )
             )
+
+            if motion_result.should_stop:
+                print(
+                    f"[ClosedLoop] Early stop at step={idx}: "
+                    f"|u_scaled|={motion_result.spherical_speed_scaled:.6f} "
+                    f"< min={motion_result.spherical_speed_min:.6f}"
+                )
+                break
 
             current_c2w = motion_result.next_c2w
             if args.step_delay_sec > 0:
                 time.sleep(float(args.step_delay_sec))
 
     np.save(save_dir / "trajectory_c2w_last.npy", current_c2w)
-    print(f"[ClosedLoop] Saved per-step logs to {log_path}")
+    print(f"[ClosedLoop] Saved per-step logs to {log_path} and {csv_path}")
+    runner.export_final_fisher_artifacts(tag="final")
 
     if args.terminate:
         runner.terminate()

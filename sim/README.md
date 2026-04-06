@@ -34,7 +34,7 @@ config/sim_rtabmap_config.yaml
 - [omnimap_runner.py](/home/fuyx/lanzc/omnimap/sim/omnimap_runner.py)
   负责把仿真 RGBD / pose 喂给 `OMNI.track(...)`
 - [motion_policy.py](/home/fuyx/lanzc/omnimap/sim/motion_policy.py)
-  负责读取 Fisher 梯度并计算 `next pose`
+  负责读取 Fisher 梯度并计算下一步相机位姿
 - [test_phase1_scene_simulator.py](/home/fuyx/lanzc/omnimap/sim/test_phase1_scene_simulator.py)
   Phase 1：验证渲染链路
 - [test_phase2_omnimap_runner.py](/home/fuyx/lanzc/omnimap/sim/test_phase2_omnimap_runner.py)
@@ -62,59 +62,127 @@ python3 -c "import open3d as o3d; print(o3d.__version__)"
 python3 -c "import torch, scipy; print('torch/scipy ok')"
 ```
 
-## 一组核心概念
+## 核心控制口径
 
-后面命令里反复出现的 Fisher 参数，先统一解释：
+### angular 模式
+
+`--no-cartesian` 时，控制器走球面角度控制：
+
+1. 计算当前视角的 `dF/dtheta` 和 `dF/dphi`
+2. 乘 `--fisher_step_scale` 得到球坐标速度
+3. 若球坐标速度模长小于 `--spherical_speed_min`，直接停止
+4. 否则按球坐标速度更新 `(theta, phi)`
+5. 再重建 `next_c2w`
+
+这是“球面参数空间里的控制器”。
+
+### cartesian 模式
+
+`--cartesian` 时，控制器走“线速度 + 角速度积分”：
+
+1. 计算当前视角的 `dF/dtheta` 和 `dF/dphi`
+2. 乘 `--fisher_step_scale` 得到球坐标切向速度
+3. 若球坐标速度模长小于 `--spherical_speed_min`，直接停止
+4. 将球坐标切向速度映射成笛卡尔切向速度 `v_t`
+5. 根据当前相机到参考球面的半径误差计算径向修正速度 `v_n`
+6. 合成 `v_raw = v_t + v_n`
+7. 用 `--linear_vel_max` 对最终线速度做一次模长限幅
+8. 位置积分：`p_{t+1} = p_t + dt * v`
+9. 姿态误差：由“当前位置朝向球心”的期望姿态 `R_des` 和当前姿态 `R_cur` 计算 `R_err = R_des R_cur^{-1}`
+10. 角速度命令：`omega = angular_gain * rotvec(R_err)`
+11. 姿态积分：`R_{t+1} = Exp(omega * dt) R_t`
+
+这条链已经取消了“每一步强制 look-at 球心”的老机制。现在是：
+
+- 位置靠线速度积分更新
+- 姿态靠角速度误差积分更新
+
+如果你关闭 `--enable_angular`，则 `omega=0`，只保留位置积分。
+
+## 常用参数说明
+
+下面这些参数在 Phase 3 和 Phase 4 里最常用。
+
+### 场与控制
 
 - `--fisher_step_scale`
-  控制器主缩放。角度模式下把原始梯度映射成 `delta_theta / delta_phi`；笛卡尔模式下把原始梯度映射成切向速度分量
-- `--fisher_step_scale_theta`
-  单独覆盖 theta 方向控制缩放
-- `--fisher_step_scale_phi`
-  单独覆盖 phi 方向控制缩放
+  Fisher 主缩放因子。把原始 `dF/dtheta, dF/dphi` 映射成控制器使用的球坐标速度。
 - `--cartesian`
-  是否启用笛卡尔速度场控制。关闭时维持原有球面角度控制；开启时改用 `v_t + v_n` 的 3D 速度积分
+  开启笛卡尔控制模式。关闭时走球面角度控制；开启时走“线速度 + 角速度积分”。
 - `--dt`
-  笛卡尔速度控制的时间步长，单位秒
-- `--radial_gain`
-  笛卡尔速度控制里的径向回正增益，用来把相机拉回初始参考球面
-- `--fisher_arrow_length`
-  速度场箭头长度，只影响显示，不影响控制
-- `--show_fisher_heatmap`
-  是否显示彩色 Fisher 信息场
-- `--show_fisher_arrows`
-  是否显示球形速度场箭头
-- `--fisher_window_mode`
-  `combined` 表示热力图和箭头叠在一个窗口；`split` 表示分成两个窗口
-- `--fisher_heatmap_window_name`
-  split 模式下热力图窗口标题
-- `--fisher_velocity_window_name`
-  split 模式下速度场窗口标题
-- `--fisher_num_samples`
-  半球采样点数。数值越大，速度场箭头越多，原始 Fisher 采样也越密
-- `--fisher_num_dense_points`
-  半球稠密插值点数。数值越大，彩色 Fisher 场越细腻，速度场箭头也越密
-- `--fisher_idw_power`
-  稠密热力图的球面 IDW 插值幂次
+  控制积分时间步长，单位秒。`cartesian` 模式下同时作用在线速度积分和姿态积分。
+- `--spherical_speed_min`
+  球坐标速度模长的最小阈值。小于这个值时，控制器认为已经收敛并停止，不再继续推进。
 - `--grad_eps`
-  有限差分步长，影响梯度估计
-- `--max_delta_theta`
-  单步 theta 最大允许变化量
-- `--max_delta_phi`
-  单步 phi 最大允许变化量
-- `--fallback_delta_theta`
-  梯度过小时 theta 的回退步长
-- `--fallback_delta_phi`
-  梯度过小时 phi 的回退步长
+  Fisher 梯度有限差分步长，影响 `dF/dtheta, dF/dphi` 的数值稳定性。
 
-重要约定：
+### 线速度与径向回正
 
-- 热力图表示 Fisher 信息场强度
-- 红色箭头表示速度场方向，也就是“缩放前的原始梯度方向”
-- `fisher_step_scale` 调的是控制器
-- `fisher_arrow_length` 调的是显示
-- `cartesian=false` 是旧的角度控制
-- `cartesian=true` 是新的笛卡尔速度场控制
+- `--radial_gain`
+  径向修正增益。只在 `cartesian` 模式下生效，用来把相机拉回参考球面。
+- `--linear_vel_max`
+  笛卡尔模式最终 3D 线速度上限。控制的是 `v_raw` 合成之后的实际执行速度，不是球坐标速度。
+
+### 角速度与姿态积分
+
+- `--angular_gain`
+  角速度增益。把姿态误差 `rotvec(R_err)` 映射成角速度命令 `omega`。
+- `--enable_angular` / `--no-enable_angular`
+  是否输出角速度命令。关闭时只做位置积分，不做姿态积分。
+
+### Fisher 可视化
+
+- `--vis_gui`
+  打开 Open3D / OmniMap GUI。
+- `--show_fisher_heatmap`
+  显示彩色 Fisher 信息场。
+- `--show_fisher_arrows`
+  显示球形速度场箭头。
+- `--fisher_arrow_length`
+  速度场箭头长度，只影响显示，不影响控制。
+- `--fisher_window_mode combined|split`
+  `combined` 表示热力图和速度场叠在一个窗口；`split` 表示分成两个窗口。
+- `--fisher_heatmap_window_name`
+  split 模式下热力图窗口标题。
+- `--fisher_velocity_window_name`
+  split 模式下速度场窗口标题。
+
+### 半球采样与插值
+
+- `--fisher_num_samples`
+  半球原始采样点数。数值越大，原始 Fisher 采样和梯度采样越密。
+- `--fisher_num_dense_points`
+  半球稠密插值点数。数值越大，热力图更细，速度场可视化也更密。
+- `--fisher_idw_power`
+  球面 IDW 插值幂次。
+- `--fisher_display_radius_scale`
+  热力图显示半径缩放，避免球面挡住点云和轨迹。
+- `--fisher_arrow_radius_scale`
+  箭头显示半径缩放，避免箭头挡住点云和轨迹。
+
+### GUI 观察与结果保存
+
+- `--step_delay_sec`
+  Phase 4 每一步推进后的暂停时间，方便观察 GUI。
+- `--hold_gui_sec`
+  脚本结束前额外停留一段时间，避免窗口一闪而过。
+- `--save_frames`
+  保存每一步 `rgb / depth / c2w`。
+- `--terminate`
+  Phase 2/4 结束后调用 `omni.terminate()` 输出最终结果。
+
+### 场景与渲染
+
+- `--pcd_path`
+  输入点云路径。
+- `--point_scale`
+  点云缩放比例。毫米单位点云通常需要 `0.001`。
+- `--config`
+  OmniMap 配置文件。建议用 `config/sim_rtabmap_config.yaml`。
+- `--save_dir` / `--output`
+  脚本输出目录。
+- `--scene`
+  传给 OmniMap GUI 分支的场景名。
 
 ## Phase 1：生成仿真 RGBD
 
@@ -130,26 +198,20 @@ python3 sim/test_phase1_scene_simulator.py \
   --output_dir sim/sim_outputs/phase1_kettle_scaled
 ```
 
-### 参数解释
+### 关键参数
 
 - `--pointcloud`
-  输入点云路径，通常是 `.ply` 或 `.pcd`
+  输入点云路径。
 - `--point_scale 0.001`
-  点云缩放比例。像 `Kettle.ply` 这类毫米单位点云通常需要乘 `0.001`
+  点云缩放比例。`Kettle.ply` 这类毫米单位点云通常需要 `0.001`。
 - `--ground`
-  是否添加地面
+  是否添加地面。
 - `--ground_size 1.0`
-  地面边长，单位是世界坐标
+  地面边长。
 - `--coord_frame`
-  是否添加坐标轴，方便判断方向
+  是否添加坐标轴。
 - `--output_dir`
-  输出目录，保存 RGB、depth 和 `c2w`
-
-### 这一步在测什么
-
-- 点云是否能正确加载
-- `c2w -> Open3D render` 是否方向正确
-- 深度尺度是否合理
+  输出目录，保存 `rgb / depth / c2w`。
 
 ### 期望结果
 
@@ -170,36 +232,73 @@ python3 sim/test_phase2_omnimap_runner.py \
   --terminate
 ```
 
-### 参数解释
+### 关键参数
 
 - `--input_dir`
-  Phase 1 的输出目录，里面需要有 `view_*_rgb.png / *_depth.npy / *_c2w.npy`
+  Phase 1 输出目录。
 - `--config`
-  OmniMap 配置文件，建议使用仿真专用的 `config/sim_rtabmap_config.yaml`
+  OmniMap 配置文件。
 - `--output`
-  Phase 2 输出目录，保存 3DGS、在线可视化等结果
+  输出目录。
 - `--vis_gui`
-  是否打开 OmniMap GUI
+  打开 OmniMap GUI。
 - `--terminate`
-  是否在重放结束后调用 `omni.terminate()` 输出最终结果
-
-### 这一步在测什么
-
-- 仿真 RGBD 是否能被 `OMNI.track(...)` 正确消费
-- `keyframes` 和 `gaussians` 是否开始增长
+  重放结束后执行 `omni.terminate()`。
 
 ### 期望结果
 
 - 控制台连续打印 `[OmniMapRunner] idx=...`
 - `initialized=True`
 - `keyframes` / `gaussians` 不再长期为 0
-- 输出目录里能看到 `3dgs_final.ply`、`online_vis/` 等产物
 
-## Phase 3：单步 Fisher 调试
+## Fisher 调试链（Phase 3 + Phase 4）
 
-这个脚本只做一件事：先 warm-up OmniMap，然后计算一次 `next pose`。
+Phase 3 和 Phase 4 用的是同一套控制器与同一套参数面，区别只在于：
 
-### 最小命令
+- Phase 3：只做一次 `next pose` 计算，适合看单步数值
+- Phase 4：持续闭环推进，适合看轨迹、热力图和速度场随时间变化
+
+如果你已经确认 Phase 1 和 Phase 2 没问题，当前最推荐的默认启动方式是这条 Phase 4 命令：
+
+```bash
+python3 sim_fisher_closed_loop.py \
+  --pcd_path replica/log_pcd_0/对比结果/RoboSeg_geo/Kettle.ply \
+  --point_scale 0.001 \
+  --config config/sim_rtabmap_config.yaml \
+  --num_steps 50 \
+  --save_dir sim/sim_outputs/phase4_dense \
+  --vis_gui \
+  --show_fisher_arrows \
+  --fisher_window_mode split \
+  --fisher_num_samples 128 \
+  --fisher_num_dense_points 1024 \
+  --step_delay_sec 0.1 \
+  --hold_gui_sec 2.0 \
+  --cartesian \
+  --dt 0.1 \
+  --fisher_step_scale 1e-4 \
+  --linear_vel_max 0.5 \
+  --radial_gain 0.2 \
+  --angular_gain 2.0
+```
+
+这组参数的设计意图是：
+
+- 线速度主导仍然来自 Fisher 梯度
+- 径向回正只做轻度约束，不强行把相机锁死在球面上
+- 姿态大致朝向球心，但不再每步硬性强制 look-at
+- split 模式下同时看热力图窗口和速度场窗口
+
+### Phase 3：单步调试
+
+这个脚本会：
+
+1. 用 Phase 1 生成的 RGBD warm-up OmniMap
+2. 计算一次 Fisher 梯度
+3. 执行一次控制器
+4. 写出 `phase3_next_c2w.npy`、`phase3_motion_result.json`、`phase3_debug.csv`
+
+#### 最小命令
 
 ```bash
 python3 sim/test_phase3_motion_policy.py \
@@ -208,58 +307,37 @@ python3 sim/test_phase3_motion_policy.py \
   --output sim/sim_outputs/phase3
 ```
 
-### 参数解释
-
-- `--input_dir`
-  Phase 1 输出目录
-- `--config`
-  OmniMap 仿真配置
-- `--output`
-  Phase 3 输出目录，保存 `phase3_next_c2w.npy` 和 `phase3_motion_result.json`
-
-### 带 GUI 的单窗口命令
+#### 推荐 GUI 命令
 
 ```bash
 python3 sim/test_phase3_motion_policy.py \
   --input_dir sim/sim_outputs/phase1_kettle_scaled \
   --config config/sim_rtabmap_config.yaml \
-  --output sim/sim_outputs/phase3_gui \
-  --vis_gui \
-  --show_fisher_arrows \
-  --fisher_arrow_length 0.07 \
-  --hold_gui_sec 5
-```
-
-### 参数解释
-
-- `--vis_gui`
-  打开 Fisher / OmniMap GUI
-- `--show_fisher_arrows`
-  在热力图上叠加速度场箭头
-- `--fisher_arrow_length 0.07`
-  设置箭头长度
-- `--hold_gui_sec 5`
-  由于 Phase 3 是一次性脚本，结束前额外停留 5 秒，避免看起来像“闪退”
-
-### 双窗口命令
-
-```bash
-python3 sim/test_phase3_motion_policy.py \
-  --input_dir sim/sim_outputs/phase1_kettle_scaled \
-  --config config/sim_rtabmap_config.yaml \
-  --output sim/sim_outputs/phase3_split \
+  --output sim/sim_outputs/phase3_cartesian \
   --vis_gui \
   --show_fisher_arrows \
   --fisher_window_mode split \
+  --fisher_num_samples 128 \
+  --fisher_num_dense_points 1024 \
+  --cartesian \
+  --dt 0.1 \
+  --fisher_step_scale 1e-4 \
+  --linear_vel_max 0.5 \
+  --radial_gain 0.2 \
+  --angular_gain 2.0 \
   --hold_gui_sec 5
 ```
 
-### 参数解释
+参数说明：
 
+- `--vis_gui`
+  打开 GUI。
+- `--show_fisher_arrows`
+  显示速度场箭头。
 - `--fisher_window_mode split`
-  把热力图和速度场拆成两个窗口
+  拆成两个窗口。
 - `--hold_gui_sec 5`
-  保持窗口 5 秒，方便观察
+  让一次性脚本结束前多停 5 秒，避免看起来像“闪退”。
 
 split 模式下两个窗口都会显示：
 
@@ -270,110 +348,63 @@ split 模式下两个窗口都会显示：
 区别只在叠加层：
 
 - A 窗口显示彩色 Fisher 信息场
-- B 窗口显示按梯度大小着色的球形速度场，以及同色箭头
+- B 窗口显示球形速度场
 
-### 更密的场与箭头
-
-```bash
-python3 sim/test_phase3_motion_policy.py \
-  --input_dir sim/sim_outputs/phase1_kettle_scaled \
-  --config config/sim_rtabmap_config.yaml \
-  --output sim/sim_outputs/phase3_dense \
-  --vis_gui \
-  --show_fisher_arrows \
-  --fisher_window_mode split \
-  --fisher_num_samples 128 \
-  --fisher_num_dense_points 8192 \
-  --hold_gui_sec 5
-```
-
-### 参数解释
-
-- `--fisher_num_samples 128`
-  增加半球采样点数量，让速度场箭头更密
-- `--fisher_num_dense_points 8192`
-  增加热力图插值点数量，让 Fisher 彩色场更细
-
-### 更保守的控制步长
-
-```bash
-python3 sim/test_phase3_motion_policy.py \
-  --input_dir sim/sim_outputs/phase1_kettle_scaled \
-  --config config/sim_rtabmap_config.yaml \
-  --output sim/sim_outputs/phase3_small_step \
-  --fisher_step_scale 0.01
-```
-
-### 参数解释
-
-- `--fisher_step_scale 0.01`
-  降低控制缩放，让单步 `next pose` 更保守
-
-### 单步笛卡尔速度场控制
-
-```bash
-python3 sim/test_phase3_motion_policy.py \
-  --input_dir sim/sim_outputs/phase1_kettle_scaled \
-  --config config/sim_rtabmap_config.yaml \
-  --output sim/sim_outputs/phase3_cartesian \
-  --cartesian \
-  --dt 0.1 \
-  --radial_gain 2.0
-```
-
-### 参数解释
+#### 关键参数
 
 - `--cartesian`
-  启用笛卡尔速度场控制
+  开启“线速度 + 角速度积分”控制。
 - `--dt 0.1`
-  用 0.1 秒做一次速度积分
-- `--radial_gain 2.0`
-  按当前半径误差计算径向回正速度
+  控制积分时间步长。
+- `--fisher_step_scale 1e-4`
+  Fisher 主缩放因子。这个值越大，切向控制越激进。
+- `--linear_vel_max 0.5`
+  最终线速度上限。这个值过大时，很容易下一帧直接看不到物体。
+- `--radial_gain 0.2`
+  轻度径向回正。当前推荐值的含义是“允许偏离球面，但不要完全漂走”。
+- `--angular_gain 2.0`
+  姿态误差增益。当前推荐值会让相机大致对准球心，但不再每步强制锁头。
+- `--fisher_num_samples 128`
+  提高原始采样点数量。
+- `--fisher_num_dense_points 1024`
+  提高稠密插值点数量。
 
-### 期望结果
+#### 期望结果
 
 - 输出目录中生成：
   - `phase3_next_c2w.npy`
   - `phase3_motion_result.json`
+  - `phase3_debug.csv`
 - 控制台出现：
   - `[FisherMotionPolicy] ...`
   - `[Phase3] Saved next pose ...`
-- 如果开启 GUI：
-  - `combined` 模式下，热力图和箭头叠在一起
-  - `split` 模式下，两个窗口都带 TSDF 点云和相机上下文
 
 重点看 [phase3_motion_result.json](/home/fuyx/lanzc/omnimap/sim/sim_outputs/phase3/phase3_motion_result.json)：
 
 - `grad_theta_raw`
 - `grad_phi_raw`
-- `grad_norm_raw`
-- `delta_theta_applied`
-- `delta_phi_applied`
-- `step_scale_theta`
-- `step_scale_phi`
-- `clipped_theta`
-- `clipped_phi`
-- `fallback_used`
-- `current_theta`
-- `current_phi`
-- `next_theta`
-- `next_phi`
-- `controller_mode`
-- `reference_radius`
-- `current_radius`
-- `radial_error`
+- `spherical_speed_scaled`
+- `spherical_speed_applied`
+- `should_stop`
 - `vt_world`
 - `vn_world`
+- `velocity_raw_world`
 - `velocity_world`
+- `desired_c2w`
+- `rotvec_error`
+- `angular_velocity_world`
+- `angular_speed_raw`
+- `angular_speed_applied`
 - `next_position`
+- `next_c2w`
 
-## Phase 4：完整闭环主循环
+### Phase 4：完整闭环主循环
 
 这个脚本会持续执行：
 
 `render -> track -> Fisher policy -> next pose -> log`
 
-### 最小闭环命令
+#### 最小闭环命令
 
 ```bash
 python3 sim_fisher_closed_loop.py \
@@ -384,96 +415,60 @@ python3 sim_fisher_closed_loop.py \
   --save_dir sim/sim_outputs/phase4
 ```
 
-### 参数解释
-
-- `--pcd_path`
-  输入点云路径
-- `--point_scale 0.001`
-  点云缩放比例
-- `--config`
-  仿真专用 OmniMap 配置
-- `--num_steps 20`
-  闭环推进步数
-- `--save_dir`
-  闭环输出目录
-
-### 单窗口 GUI 调试命令
+#### 推荐默认闭环命令
 
 ```bash
 python3 sim_fisher_closed_loop.py \
   --pcd_path replica/log_pcd_0/对比结果/RoboSeg_geo/Kettle.ply \
   --point_scale 0.001 \
   --config config/sim_rtabmap_config.yaml \
-  --num_steps 20 \
-  --save_dir sim/sim_outputs/phase4_gui \
-  --vis_gui \
-  --show_fisher_arrows \
-  --step_delay_sec 0.1 \
-  --hold_gui_sec 2.0
-```
-
-### 参数解释
-
-- `--vis_gui`
-  打开 GUI
-- `--show_fisher_arrows`
-  显示速度场箭头
-- `--step_delay_sec 0.1`
-  每一步结束后暂停 0.1 秒，方便观察刷新过程
-- `--hold_gui_sec 2.0`
-  所有步骤结束后再停留 2 秒
-
-### 双窗口 GUI 调试命令
-
-```bash
-python3 sim_fisher_closed_loop.py \
-  --pcd_path replica/log_pcd_0/对比结果/RoboSeg_geo/Kettle.ply \
-  --point_scale 0.001 \
-  --config config/sim_rtabmap_config.yaml \
-  --num_steps 20 \
-  --save_dir sim/sim_outputs/phase4_split \
-  --vis_gui \
-  --show_fisher_arrows \
-  --fisher_window_mode split \
-  --step_delay_sec 0.1 \
-  --hold_gui_sec 2.0
-```
-
-### 参数解释
-
-- `--fisher_window_mode split`
-  把热力图和速度场拆成两个窗口
-- `--step_delay_sec 0.1`
-  让你能看清每次更新
-- `--hold_gui_sec 2.0`
-  闭环结束后保持窗口 2 秒
-
-### 更密的热力图和速度场
-
-```bash
-python3 sim_fisher_closed_loop.py \
-  --pcd_path replica/log_pcd_0/对比结果/RoboSeg_geo/Kettle.ply \
-  --point_scale 0.001 \
-  --config config/sim_rtabmap_config.yaml \
-  --num_steps 20 \
+  --num_steps 50 \
   --save_dir sim/sim_outputs/phase4_dense \
   --vis_gui \
   --show_fisher_arrows \
   --fisher_window_mode split \
   --fisher_num_samples 128 \
-  --fisher_num_dense_points 8192 \
+  --fisher_num_dense_points 1024 \
   --step_delay_sec 0.1 \
-  --hold_gui_sec 2.0
+  --hold_gui_sec 2.0 \
+  --cartesian \
+  --dt 0.1 \
+  --fisher_step_scale 1e-4 \
+  --linear_vel_max 0.5 \
+  --radial_gain 0.2 \
+  --angular_gain 2.0
 ```
 
-### 参数解释
+参数说明：
 
+- `--vis_gui`
+  打开 GUI。
+- `--show_fisher_arrows`
+  显示速度场箭头。
+- `--fisher_window_mode split`
+  拆成两个窗口。
 - `--fisher_num_samples 128`
-  提高半球采样点密度，增加速度场箭头数量
-- `--fisher_num_dense_points 8192`
-  提高 Fisher 彩色场密度
+  提高半球原始采样点数量。
+- `--fisher_num_dense_points 1024`
+  提高半球稠密插值点数量。
+- `--step_delay_sec 0.1`
+  每一步推进后暂停 0.1 秒，方便观察。
+- `--hold_gui_sec 2.0`
+  所有步骤结束后再停 2 秒。
+- `--cartesian`
+  开启“线速度 + 角速度积分”控制。
+- `--dt 0.1`
+  控制积分时间步长。
+- `--fisher_step_scale 1e-4`
+  控制 Fisher 梯度映射出来的球坐标切向速度大小。
+- `--linear_vel_max 0.5`
+  最终线速度上限。当前推荐值属于比较保守、稳定的量级。
+- `--radial_gain 0.2`
+  轻度径向回正，不强制把相机严格锁在球面上。
+- `--angular_gain 2.0`
+  姿态误差增益，让镜头大致跟住球心方向。
 
-### 保存每一步渲染结果
+#### 保存每一步渲染结果
 
 ```bash
 python3 sim_fisher_closed_loop.py \
@@ -487,54 +482,12 @@ python3 sim_fisher_closed_loop.py \
   --show_fisher_arrows
 ```
 
-### 参数解释
+参数说明：
 
 - `--save_frames`
-  把每一步的 `rgb / depth / c2w` 都保存下来
-- `--num_steps 10`
-  这里用 10 步做较快的可视检查
+  保存每一步 `rgb / depth / c2w`。
 
-### 更激进的控制步长
-
-```bash
-python3 sim_fisher_closed_loop.py \
-  --pcd_path replica/log_pcd_0/对比结果/RoboSeg_geo/Kettle.ply \
-  --point_scale 0.001 \
-  --config config/sim_rtabmap_config.yaml \
-  --num_steps 20 \
-  --save_dir sim/sim_outputs/phase4_fast \
-  --fisher_step_scale 0.06
-```
-
-### 参数解释
-
-- `--fisher_step_scale 0.06`
-  增大控制缩放，让相机运动更激进
-
-### 笛卡尔闭环命令
-
-```bash
-python3 sim_fisher_closed_loop.py \
-  --pcd_path replica/log_pcd_0/对比结果/RoboSeg_geo/Kettle.ply \
-  --point_scale 0.001 \
-  --config config/sim_rtabmap_config.yaml \
-  --num_steps 20 \
-  --save_dir sim/sim_outputs/phase4_cartesian \
-  --cartesian \
-  --dt 0.1 \
-  --radial_gain 2.0
-```
-
-### 参数解释
-
-- `--cartesian`
-  启用笛卡尔速度场控制
-- `--dt 0.1`
-  每一步按 0.1 秒做 3D 速度积分
-- `--radial_gain 2.0`
-  用径向误差做回正，尽量维持在初始参考球面附近
-
-### 期望结果
+#### 期望结果
 
 - 控制台连续出现：
   - `[OmniMapRunner] idx=...`
@@ -542,70 +495,60 @@ python3 sim_fisher_closed_loop.py \
   - `[ClosedLoop] step=...`
 - 输出目录至少包含：
   - `loop_log.jsonl`
+  - `loop_debug.csv`
   - `trajectory_c2w_last.npy`
-- 如果开启 `--save_frames`，还会有每一步的 RGBD 和 `c2w`
-- 如果开启 GUI：
-  - `combined` 模式下，在一个窗口里看热力图 + 箭头
-  - `split` 模式下，在两个窗口里分别看热力图和速度场，但都带 TSDF 点云和相机上下文
+- 闭环结束后还会自动导出最后时刻的 Fisher/速度场可视化：
+  - `nbv_vis/final_fisher_heatmap.png`
+  - `nbv_vis/final_fisher_velocity.png`
 
 重点看 [loop_log.jsonl](/home/fuyx/lanzc/omnimap/sim/sim_outputs/phase4/loop_log.jsonl)：
 
 - `grad_theta_raw`
 - `grad_phi_raw`
-- `grad_norm_raw`
-- `delta_theta_applied`
-- `delta_phi_applied`
-- `step_scale_theta`
-- `step_scale_phi`
-- `clipped_theta`
-- `clipped_phi`
-- `fallback_used`
-- `current_theta`
-- `current_phi`
-- `next_theta`
-- `next_phi`
-- `controller_mode`
-- `reference_radius`
-- `current_radius`
-- `radial_error`
+- `spherical_speed_scaled`
 - `vt_world`
 - `vn_world`
+- `velocity_raw_world`
 - `velocity_world`
-- `next_position`
+- `desired_c2w`
+- `rotvec_error`
+- `angular_velocity_world`
+- `angular_speed_raw`
+- `angular_speed_applied`
 - `num_keyframes`
 - `num_gaussians`
 
 ## 调参指南
 
-现象：箭头方向看着对，但相机步子太大  
-处理：先降 `--fisher_step_scale`
+现象：相机步子太大，第二帧就容易看不到物体
+处理：先降 `--linear_vel_max`，再降 `--fisher_step_scale`
 
-现象：热力图有变化，但相机几乎不动  
+现象：热力图有变化，但闭环几乎不动
 处理：提高 `--fisher_step_scale`
 
-现象：速度场箭头太稀  
+现象：姿态转得太慢，画面中心总是跟不上
+处理：提高 `--angular_gain`
+
+现象：只想测位置积分，不想让姿态自动转
+处理：加 `--no-enable_angular`
+
+现象：速度场箭头太稀
 处理：提高 `--fisher_num_samples`
 
-现象：Fisher 彩色场不够细  
+现象：Fisher 彩色场不够细
 处理：提高 `--fisher_num_dense_points`
 
-现象：箭头太长太乱  
-处理：先减小 `--fisher_arrow_length`
+现象：箭头太长太乱
+处理：减小 `--fisher_arrow_length`
 
-现象：日志里总是 `fallback_used=true`  
-处理：查看 `grad_norm_raw` 和 `grad_norm_epsilon`
-
-现象：`clipped_theta` 或 `clipped_phi` 长期为真  
-处理：说明控制量总被裁剪，优先降低 `--fisher_step_scale`
-
-现象：只改箭头长度，轨迹也变了  
-处理：这不符合设计预期。正常情况下 `--fisher_arrow_length` 只能影响显示，不能影响 next pose
+现象：日志里 `should_stop=true`
+处理：说明球坐标速度模长已经低于 `--spherical_speed_min`，控制器认为已经收敛
 
 ## 建议验收顺序
 
 1. 先跑 Phase 1，确认尺度和朝向正确
 2. 再跑 Phase 2，确认 OmniMap 后端真的在长图
-3. 再跑 Phase 3，确认原始梯度、控制量、next pose 三层量都清楚
+3. 再跑 Phase 3，确认原始梯度、线速度、角速度、next pose 都清楚
 4. 最后跑 Phase 4，确认闭环多步推进时热力图、速度场和轨迹一致
 
 不要一上来就闭环。基础链路没过时直接盯 Fisher 轨迹，错误会叠在一起，很难区分到底是场的问题、控制的问题，还是输入的问题。

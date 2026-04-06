@@ -928,3 +928,7 @@ class GSBackEnd(mp.Process):
     def export_frame0_fisher_artifacts_if_needed(self, idx: int):
         self.fisher_visualizer.export_frame0_artifacts_if_needed(idx)
         self.fisher_frame0_exported = self.fisher_visualizer.fisher_frame0_exported
+
+    def export_final_fisher_artifacts(self, tag: str = "final") -> None:
+        """Persist the latest Fisher/velocity windows and cached geometry state."""
+        self.fisher_visualizer.export_current_artifacts(tag=tag)

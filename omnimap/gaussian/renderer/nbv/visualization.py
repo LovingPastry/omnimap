@@ -32,6 +32,8 @@ class FisherVisualizer:
         self.last_tsdf_colors = None
         self.last_camera_pose = None
         self.last_traj_points = None
+        self.last_velocity_points = None
+        self.last_velocity_colors = None
 
         self.velocity_geometry = None
         self.heatmap_context_geometries = []
@@ -313,9 +315,93 @@ class FisherVisualizer:
 
         self.last_fisher_points = np.asarray(hemi_pc.points).copy()
         self.last_fisher_colors = np.asarray(hemi_pc.colors).copy()
+        self.last_velocity_points = (
+            np.asarray(vel_pc.points).copy() if vel_pc is not None else None
+        )
+        self.last_velocity_colors = (
+            np.asarray(vel_pc.colors).copy() if vel_pc is not None else None
+        )
         if self.last_gs_points is None or self.last_gs_colors is None:
             self.update_gaussian_cache()
         return hemi_pc
+
+    def _context_points_and_colors(self):
+        if self.last_tsdf_points is not None and len(self.last_tsdf_points) > 0:
+            return self.last_tsdf_points, self.last_tsdf_colors
+        if self.last_gs_points is not None and len(self.last_gs_points) > 0:
+            return self.last_gs_points, self.last_gs_colors
+        return None, None
+
+    @staticmethod
+    def _write_point_cloud(path: str, points: np.ndarray, colors: np.ndarray) -> None:
+        pc = o3d.geometry.PointCloud()
+        pc.points = o3d.utility.Vector3dVector(np.asarray(points, dtype=np.float64))
+        pc.colors = o3d.utility.Vector3dVector(np.asarray(colors, dtype=np.float64))
+        o3d.io.write_point_cloud(path, pc)
+
+    def export_current_artifacts(self, tag: str = "final") -> None:
+        """Export the currently displayed Fisher heatmap/velocity views and backing geometry."""
+        out_dir = os.path.join(self.save_dir, "nbv_vis")
+        os.makedirs(out_dir, exist_ok=True)
+
+        context_points, context_colors = self._context_points_and_colors()
+
+        if context_points is not None and self.last_fisher_points is not None:
+            merged_points = np.vstack([context_points, self.last_fisher_points])
+            merged_colors = np.vstack([context_colors, self.last_fisher_colors])
+            self._write_point_cloud(
+                os.path.join(out_dir, f"{tag}_mapping_plus_fisher_heatmap.ply"),
+                merged_points,
+                merged_colors,
+            )
+
+        if context_points is not None and self.last_velocity_points is not None:
+            merged_points = np.vstack([context_points, self.last_velocity_points])
+            merged_colors = np.vstack([context_colors, self.last_velocity_colors])
+            self._write_point_cloud(
+                os.path.join(out_dir, f"{tag}_mapping_plus_velocity_surface.ply"),
+                merged_points,
+                merged_colors,
+            )
+
+        if self.velocity_geometry is not None:
+            o3d.io.write_triangle_mesh(
+                os.path.join(out_dir, f"{tag}_velocity_arrows.ply"),
+                self.velocity_geometry,
+            )
+
+        if self.last_camera_pose is not None:
+            np.save(
+                os.path.join(out_dir, f"{tag}_camera_c2w.npy"),
+                self.last_camera_pose,
+            )
+        if self.last_traj_points is not None:
+            np.save(
+                os.path.join(out_dir, f"{tag}_trajectory_points.npy"),
+                self.last_traj_points,
+            )
+
+        if self.vis_gui:
+            if self.heatmap_window is not None:
+                self._refresh_window(self.heatmap_window)
+                self.heatmap_window.capture_screen_image(
+                    os.path.join(out_dir, f"{tag}_fisher_heatmap.png"),
+                    do_render=True,
+                )
+            if self.velocity_window is not None:
+                self._refresh_window(self.velocity_window)
+                self.velocity_window.capture_screen_image(
+                    os.path.join(out_dir, f"{tag}_fisher_velocity.png"),
+                    do_render=True,
+                )
+
+        Log(
+            (
+                f"Saved {tag} Fisher artifacts under {out_dir}: "
+                f"heatmap/velocity screenshots plus geometry snapshots"
+            ),
+            tag="NextBestView",
+        )
 
     def export_frame0_artifacts_if_needed(self, idx: int):
         if idx != 0 or self.fisher_frame0_exported:
