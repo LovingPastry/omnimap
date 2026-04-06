@@ -16,7 +16,7 @@ from sim.omnimap_runner import OmniMapRunner
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse the Phase-2 runner smoke-test CLI options."""
+    """解析 Phase 2 运行器冒烟测试的命令行参数。"""
     parser = argparse.ArgumentParser(
         description=(
             "Phase-2 test for the simulation pipeline: load Phase-1 RGBD outputs "
@@ -70,7 +70,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_phase1_triplets(input_dir: Path) -> list[tuple[int, Path, Path, Path]]:
-    """Collect the RGB/depth/c2w triplets emitted by the Phase-1 script."""
+    """收集 Phase 1 脚本导出的 RGB/depth/c2w 三元组。"""
     triplets: list[tuple[int, Path, Path, Path]] = []
     for rgb_path in sorted(input_dir.glob("view_*_rgb.png")):
         stem = rgb_path.stem.replace("_rgb", "")
@@ -90,7 +90,7 @@ def load_phase1_triplets(input_dir: Path) -> list[tuple[int, Path, Path, Path]]:
 
 
 def load_tsdf_depth_max(config_path: str) -> float:
-    """Read the TSDF depth limit from the OmniMap yaml config."""
+    """从 OmniMap yaml 配置中读取 TSDF 深度上限。"""
     with open(config_path, "r") as f:
         cfg = yaml.safe_load(f)
     return float(cfg.get("tsdf", {}).get("depth_max", 20.0))
@@ -101,7 +101,7 @@ def validate_phase1_inputs(
     *,
     tsdf_depth_max_m: float,
 ) -> None:
-    """Fail fast when a Phase-1 export is clearly stale or scale-mismatched."""
+    """当 Phase 1 导出结果明显过期或尺度不匹配时快速失败。"""
     depth_mins: list[float] = []
     depth_maxs: list[float] = []
     depth_medians: list[float] = []
@@ -146,7 +146,7 @@ def validate_phase1_inputs(
 
 
 def main() -> None:
-    """Replay saved Phase-1 RGBD frames directly into OmniMap."""
+    """将保存的 Phase 1 RGBD 帧直接重放进 OmniMap。"""
     args = parse_args()
     input_dir = Path(args.input_dir)
     intrinsics = np.array([args.fx, args.fy, args.cx, args.cy], dtype=np.float32)
@@ -164,7 +164,7 @@ def main() -> None:
         verbose=True,
     )
 
-    # Replay each saved frame in-order so this script mirrors the intended Phase-2 data flow.
+        # 按顺序重放每一帧，确保本脚本与预期 Phase 2 数据流一致。
     for order, (idx, rgb_path, depth_path, c2w_path) in enumerate(triplets):
         rgb_bgr = cv2.imread(str(rgb_path), cv2.IMREAD_COLOR)
         if rgb_bgr is None:

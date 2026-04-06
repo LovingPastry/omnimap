@@ -1,12 +1,12 @@
-"""Pose conversion helpers for the simulation -> OmniMap bridge.
+"""仿真到 OmniMap 桥接的位姿转换工具。
 
-This module centralizes all pose conversions used by Phase 2 so the
-simulation side does not need to guess about coordinate conventions.
+本模块集中管理 Phase 2 使用的所有位姿转换，
+避免仿真侧反复猜测坐标系约定。
 
-Conventions used here:
-- `c2w`: camera-to-world 4x4 homogeneous transform.
-- `w2c`: world-to-camera 4x4 homogeneous transform.
-- `posevec`: 7D vector `[tx, ty, tz, qx, qy, qz, qw]` describing `w2c`.
+本模块约定：
+- `c2w`：camera-to-world 的 4x4 齐次变换。
+- `w2c`：world-to-camera 的 4x4 齐次变换。
+- `posevec`：描述 `w2c` 的 7 维向量 `[tx, ty, tz, qx, qy, qz, qw]`。
 """
 
 from __future__ import annotations
@@ -36,24 +36,24 @@ def _as_posevec(posevec: np.ndarray, name: str = "posevec") -> np.ndarray:
 
 
 def c2w_to_w2c(c2w: np.ndarray) -> np.ndarray:
-    """Convert camera-to-world to world-to-camera."""
+    """将 camera-to-world 转为 world-to-camera。"""
     return np.linalg.inv(_as_matrix44(c2w, "c2w"))
 
 
 def w2c_to_c2w(w2c: np.ndarray) -> np.ndarray:
-    """Convert world-to-camera to camera-to-world."""
+    """将 world-to-camera 转为 camera-to-world。"""
     return np.linalg.inv(_as_matrix44(w2c, "w2c"))
 
 
 def w2c_to_posevec(w2c: np.ndarray) -> np.ndarray:
-    """Convert a `w2c` matrix into OmniMap's 7D pose vector."""
+    """将 `w2c` 矩阵转换为 OmniMap 的 7 维位姿向量。"""
     w2c = _as_matrix44(w2c, "w2c")
     quat_xyzw = R.from_matrix(w2c[:3, :3]).as_quat()
     return np.concatenate([w2c[:3, 3], quat_xyzw], axis=0)
 
 
 def posevec_to_se3(posevec: np.ndarray) -> np.ndarray:
-    """Convert OmniMap's 7D pose vector into a `w2c` 4x4 matrix."""
+    """将 OmniMap 的 7 维位姿向量转换为 `w2c` 4x4 矩阵。"""
     posevec = _as_posevec(posevec)
     matrix = np.eye(4, dtype=np.float64)
     matrix[:3, :3] = R.from_quat(posevec[3:]).as_matrix()
@@ -62,24 +62,24 @@ def posevec_to_se3(posevec: np.ndarray) -> np.ndarray:
 
 
 def posevec_to_w2c(posevec: np.ndarray) -> np.ndarray:
-    """Alias for `posevec_to_se3` for clearer call sites."""
+    """`posevec_to_se3` 的别名，用于提升调用处可读性。"""
     return posevec_to_se3(posevec)
 
 
 def posevec_to_c2w(posevec: np.ndarray) -> np.ndarray:
-    """Convert OmniMap's pose vector into a `c2w` matrix."""
+    """将 OmniMap 位姿向量转换为 `c2w` 矩阵。"""
     return w2c_to_c2w(posevec_to_w2c(posevec))
 
 
 def c2w_to_posevec(c2w: np.ndarray) -> np.ndarray:
-    """Convert a `c2w` matrix into OmniMap's 7D `w2c` pose vector."""
+    """将 `c2w` 矩阵转换为 OmniMap 的 7 维 `w2c` 位姿向量。"""
     return w2c_to_posevec(c2w_to_w2c(c2w))
 
 
 def validate_pose_roundtrip(c2w: np.ndarray, atol: float = 1e-6) -> Dict[str, float]:
-    """Validate the required Phase-2 conversion chain.
+    """验证 Phase 2 所需的转换链路。
 
-    Validation chain:
+    验证链路：
     `c2w -> w2c -> posevec -> SE3(matrix) -> c2w`
     """
     c2w = _as_matrix44(c2w, "c2w")
@@ -100,7 +100,7 @@ def validate_pose_roundtrip(c2w: np.ndarray, atol: float = 1e-6) -> Dict[str, fl
 
 
 def assert_pose_roundtrip(c2w: np.ndarray, atol: float = 1e-6) -> Dict[str, float]:
-    """Raise if the Phase-2 pose roundtrip deviates beyond tolerance."""
+    """当 Phase 2 位姿往返误差超过容差时抛出异常。"""
     stats = validate_pose_roundtrip(c2w, atol=atol)
     if not bool(stats["valid"]):
         raise ValueError(

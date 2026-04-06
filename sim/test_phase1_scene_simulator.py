@@ -19,17 +19,16 @@ def look_at_c2w(
     target: np.ndarray,
     up: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Build a camera-to-world matrix for a camera looking at ``target``.
+    """构建“相机看向 ``target``”的 camera-to-world 矩阵。
 
-    Convention:
-    - camera looks along its +Z axis in local frame
-    - camera +X points to image right
-    - camera +Y points to image down
-    - returned matrix is `c2w`
+    约定：
+    - 相机在局部坐标中沿 +Z 方向观察
+    - 相机 +X 指向图像右侧
+    - 相机 +Y 指向图像下方
+    - 返回矩阵为 `c2w`
 
-    This matches the pinhole convention used by the Open3D render path in this
-    Phase-1 script, so a world-space +up probe should project above the target
-    in the final image.
+    该约定与本 Phase 1 脚本的 Open3D 渲染针孔模型一致，
+    因此世界坐标中的 +up 探针应投影到目标点上方。
     """
     eye = np.asarray(eye, dtype=np.float64).reshape(3)
     target = np.asarray(target, dtype=np.float64).reshape(3)
@@ -75,7 +74,7 @@ def project_world_to_pixel(
     cx: float,
     cy: float,
 ) -> np.ndarray:
-    """Project a world-space 3D point into image pixel coordinates."""
+    """将世界坐标系中的 3D 点投影到图像像素坐标。"""
     point_world = np.asarray(point_world, dtype=np.float64).reshape(3)
     w2c = np.linalg.inv(np.asarray(c2w, dtype=np.float64))
 
@@ -101,7 +100,7 @@ def run_orientation_self_check(
     cy: float,
     probe_scale: float,
 ) -> dict[str, object]:
-    """Check whether a world-up probe lands above the target in the image."""
+    """检查世界向上探针是否在图像中落在目标点上方。"""
     target = np.asarray(target, dtype=np.float64).reshape(3)
     up = np.asarray(up, dtype=np.float64).reshape(3)
     up_norm = np.linalg.norm(up)
@@ -125,7 +124,7 @@ def run_orientation_self_check(
 
 
 def save_render_result(prefix: Path, rgb: np.ndarray, depth: np.ndarray) -> None:
-    """Persist one RGBD render together with a human-readable depth visualization."""
+    """保存一组 RGBD 渲染结果及可读的深度可视化图。"""
     prefix.parent.mkdir(parents=True, exist_ok=True)
     rgb_bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
     cv2.imwrite(str(prefix.with_suffix(".png")), rgb_bgr)
@@ -145,7 +144,7 @@ def save_render_result(prefix: Path, rgb: np.ndarray, depth: np.ndarray) -> None
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse the Phase-1 smoke-test CLI options."""
+    """解析 Phase 1 冒烟测试命令行参数。"""
     parser = argparse.ArgumentParser(
         description="Phase-1 test for sim.scene_simulator.SceneSimulator"
     )
@@ -187,7 +186,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    """Run the full Phase-1 smoke test from scene setup to RGBD dumps."""
+    """执行完整的 Phase 1 冒烟测试：从场景构建到 RGBD 导出。"""
     args = parse_args()
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -219,8 +218,8 @@ def main() -> None:
     up = np.array([0.0, 0.0, 1.0], dtype=np.float64)
     orientation_probe_scale = max(float(np.linalg.norm(extent)) * 0.15, 1e-3)
 
-    # These three canonical views answer the core Phase-1 question quickly:
-    # does changing `c2w` produce sane RGBD changes?
+        # 这三个典型视角可快速验证 Phase 1 核心问题：
+    # 改变 `c2w` 后，RGBD 是否产生合理变化？
     eyes = [
         center + np.array([base_radius, 0.0, base_radius * 0.35], dtype=np.float64),
         center + np.array([0.0, -base_radius, base_radius * 0.40], dtype=np.float64),
@@ -256,7 +255,7 @@ def main() -> None:
                     "The camera/image vertical convention is likely flipped."
                 )
 
-        # Render and persist every probe view so later phases can reuse the outputs directly.
+                # 渲染并保存每个探测视角，便于后续阶段直接复用这些输出。
         result = simulator.render(c2w)
         prefix = output_dir / f"view_{idx:02d}_rgb"
         save_render_result(prefix, result.rgb, result.depth)

@@ -1,18 +1,17 @@
-"""Phase-3 Fisher motion policy for the simulation loop.
+"""仿真主循环使用的 Phase 3 Fisher 运动策略。
 
-This module keeps the policy logic on the simulation side:
-- read the current OmniMap / GS state
-- convert the current view to a hemisphere parameterization
-- query the existing Fisher evaluator for angular gradients
-- advance the camera on the upper hemisphere while keeping it looking at the scene
+本模块将策略逻辑保留在仿真侧：
+- 读取当前 OmniMap / GS 状态
+- 将当前视图转换为半球参数化
+- 查询已有 Fisher 评估器得到角度梯度
+- 在保持观察场景的前提下推进上半球相机
 
-The controller intentionally preserves the Fisher gradient direction.
-It first builds a 2D velocity in spherical coordinates `(theta, phi)`,
-then applies a two-sided speed policy on that vector norm:
-- if the norm is too large, shrink it while preserving direction
-- if the norm is too small, treat the controller as converged and stop
-Only afterwards is the spherical velocity mapped to either angular
-updates or Cartesian tangent velocity.
+控制器会刻意保持 Fisher 梯度方向。
+它先在球坐标 `(theta, phi)` 上构建二维速度，
+再对该向量模长施加双侧速度策略：
+- 模长过大：在保持方向的情况下缩小
+- 模长过小：视为控制收敛并停止
+之后才将球坐标速度映射为角度更新或笛卡尔切向速度。
 """
 
 from __future__ import annotations
@@ -31,7 +30,7 @@ from .pose_utils import c2w_to_w2c, w2c_to_c2w
 
 
 def _ensure_omnimap_import_paths() -> Path:
-    """Make OmniMap's sibling-import layout resolvable from the simulation side."""
+    """让仿真侧能够解析 OmniMap 的同级导入结构。"""
     repo_root = Path(__file__).resolve().parent.parent
     omnimap_dir = repo_root / "omnimap"
     for path in (repo_root, omnimap_dir):
@@ -46,7 +45,7 @@ def _sim_look_at_c2w(
     target: np.ndarray,
     up: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Build a sim-render-compatible `c2w` pose with camera +Y pointing image-down."""
+    """构建与仿真渲染兼容的 `c2w` 位姿（相机 +Y 指向图像向下）。"""
     eye = np.asarray(eye, dtype=np.float64).reshape(3)
     target = np.asarray(target, dtype=np.float64).reshape(3)
     up = (
@@ -90,7 +89,7 @@ def _sim_spherical_c2w(
     theta: float,
     phi: float,
 ) -> np.ndarray:
-    """Convert spherical state into the SceneSimulator-compatible camera convention."""
+    """将球坐标状态转换为 SceneSimulator 兼容的相机约定。"""
     center = np.asarray(scene_center, dtype=np.float64).reshape(3)
     eye = center + np.array(
         [
@@ -107,7 +106,7 @@ def _spherical_direction(
     theta: float,
     phi: float,
 ) -> np.ndarray:
-    """Return the unit direction on the upper hemisphere for `(theta, phi)`."""
+    """返回 `(theta, phi)` 在上半球对应的单位方向。"""
     return np.array(
         [
             math.cos(phi) * math.cos(theta),
@@ -122,7 +121,7 @@ def _local_frame_from_theta_phi(
     theta: float,
     phi: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return `(e_theta, e_phi, n_hat)` at one spherical state."""
+    """返回某个球坐标状态下的 `(e_theta, e_phi, n_hat)`。"""
     ct = math.cos(theta)
     st = math.sin(theta)
     cp = math.cos(phi)
@@ -137,7 +136,7 @@ def _position_to_spherical(
     position: np.ndarray,
     scene_center: np.ndarray,
 ) -> tuple[float, float, float]:
-    """Convert a 3D position back into `(radius, theta, phi)` around `scene_center`."""
+    """将三维位置反解为围绕 `scene_center` 的 `(radius, theta, phi)`。"""
     offset = np.asarray(position, dtype=np.float64).reshape(3) - np.asarray(
         scene_center, dtype=np.float64
     ).reshape(3)
@@ -154,7 +153,7 @@ def _position_to_spherical(
 
 @dataclass
 class MotionPolicyResult:
-    """Structured record of one Fisher-driven pose update."""
+    """一次 Fisher 驱动位姿更新的结构化记录。"""
 
     idx: int
     viewpoint_source: str
@@ -218,22 +217,22 @@ class MotionPolicyResult:
 
     @property
     def grad_theta(self) -> float:
-        """Backward-compatible alias for existing debug prints."""
+        """为现有调试打印保留的向后兼容别名。"""
         return self.grad_theta_raw
 
     @property
     def grad_phi(self) -> float:
-        """Backward-compatible alias for existing debug prints."""
+        """为现有调试打印保留的向后兼容别名。"""
         return self.grad_phi_raw
 
     @property
     def grad_norm(self) -> float:
-        """Backward-compatible alias for existing debug prints."""
+        """为现有调试打印保留的向后兼容别名。"""
         return self.grad_norm_raw
 
 
 class FisherMotionPolicy:
-    """Advance the camera pose on the Fisher hemisphere using angle gradients."""
+    """利用角度梯度在 Fisher 半球上推进相机位姿。"""
 
     def __init__(
         self,
@@ -315,7 +314,7 @@ class FisherMotionPolicy:
         return float(theta % (2.0 * math.pi))
 
     def _clamp_phi(self, phi: float) -> float:
-        """Keep the elevation on the valid upper-hemisphere interval."""
+        """将仰角限制在上半球合法范围内。"""
         return float(np.clip(phi, self.phi_min, self.phi_max))
 
     @staticmethod
@@ -323,7 +322,7 @@ class FisherMotionPolicy:
         vec: np.ndarray,
         limit: float,
     ) -> tuple[np.ndarray, bool, float]:
-        """Clip a 2D spherical velocity by norm while preserving its direction."""
+        """按模长裁剪二维球坐标速度，同时保持方向不变。"""
         vec = np.asarray(vec, dtype=np.float64).reshape(2)
         norm = float(np.linalg.norm(vec))
         if norm <= limit or norm <= 1e-12:
@@ -337,7 +336,7 @@ class FisherMotionPolicy:
         angular_velocity_world: np.ndarray,
         dt: float,
     ) -> np.ndarray:
-        """Integrate a world-frame angular velocity over one explicit Euler step on SO(3)."""
+        """在 SO(3) 上用显式欧拉步积分世界坐标系角速度。"""
         current_rotation = np.asarray(current_rotation, dtype=np.float64).reshape(3, 3)
         angular_velocity_world = np.asarray(
             angular_velocity_world, dtype=np.float64
@@ -353,7 +352,7 @@ class FisherMotionPolicy:
         current_position: np.ndarray,
         reference_scene_center: np.ndarray,
     ) -> np.ndarray:
-        """Construct the desired camera orientation that points toward the reference sphere center."""
+        """构建指向参考球心的目标相机朝向。"""
         return _sim_look_at_c2w(
             eye=np.asarray(current_position, dtype=np.float64),
             target=np.asarray(reference_scene_center, dtype=np.float64),
@@ -389,7 +388,7 @@ class FisherMotionPolicy:
         speed_clipped: bool,
         clip_scale_ratio: float,
     ) -> "MotionPolicyResult":
-        """Return a no-motion result when the spherical speed is below the stop threshold."""
+        """当球坐标速度低于停止阈值时，返回“无运动”结果。"""
         return MotionPolicyResult(
             idx=int(idx),
             viewpoint_source=viewpoint_source,
@@ -457,7 +456,7 @@ class FisherMotionPolicy:
         scene_center_np: np.ndarray,
         radius: float,
     ) -> np.ndarray:
-        """Resolve the authoritative current pose in sim rendering convention."""
+        """在仿真渲染约定下解析当前权威位姿。"""
         if viewpoint_source == "c2w_matrix":
             c2w = np.asarray(current_viewpoint, dtype=np.float64)
             if c2w.shape != (4, 4):
@@ -479,7 +478,7 @@ class FisherMotionPolicy:
         scene_center_np: np.ndarray,
         current_position: np.ndarray,
     ) -> None:
-        """Lock the reference sphere once per policy lifecycle."""
+        """在策略生命周期内只初始化一次参考球几何。"""
         if self.reference_initialized:
             return
         self.reference_scene_center = np.asarray(
@@ -514,7 +513,7 @@ class FisherMotionPolicy:
         clipped_spherical_speed: bool,
         clip_scale_ratio: float,
     ) -> MotionPolicyResult:
-        """Advance one step using tangent + radial velocity in world coordinates."""
+        """在世界坐标下用“切向+径向”速度推进一步。"""
         current_position = np.asarray(current_c2w[:3, 3], dtype=np.float64)
         current_radius, _, _ = _position_to_spherical(
             current_position, reference_scene_center
@@ -527,11 +526,11 @@ class FisherMotionPolicy:
         theta_rate = float(applied_spherical_velocity[0])
         phi_rate = float(applied_spherical_velocity[1])
 
-        # Tangential command from Fisher policy in Cartesian coordinates.
+        # Fisher 策略在笛卡尔坐标下的切向速度指令。
         vt_world = current_radius * (theta_rate * e_theta + phi_rate * e_phi)
 
-        # Radial correction follows velocity_cmd_algorithm.md:
-        # e_n = (p-c) * (R-r) / (r+eps), and only contributes when r < R.
+        # 径向修正遵循 velocity_cmd_algorithm.md：
+        # e_n = (p-c) * (R-r) / (r+eps)，且仅在 r < R 时生效。
         radial_offset = current_position - reference_scene_center
         denom = float(current_radius + 1e-6)
         radial_gap = float(reference_radius - current_radius)
@@ -641,7 +640,7 @@ class FisherMotionPolicy:
 
     @staticmethod
     def _build_w2c44_from_camera(camera: Any) -> np.ndarray:
-        """Extract a dense `w2c` matrix from an OmniMap camera object."""
+        """从 OmniMap 相机对象提取完整 `w2c` 矩阵。"""
         w2c = np.eye(4, dtype=np.float64)
         w2c[:3, :3] = camera.R.detach().float().cpu().numpy()
         w2c[:3, 3] = camera.T.detach().float().cpu().numpy()
@@ -649,7 +648,7 @@ class FisherMotionPolicy:
 
     @staticmethod
     def _center_from_gaussians(gs_backend: Any) -> Optional[torch.Tensor]:
-        """Fallback scene center estimate derived from the active Gaussian map."""
+        """基于当前高斯地图的后备场景中心估计。"""
         xyz = getattr(gs_backend.gaussians, "get_xyz", None)
         if xyz is None:
             return None
@@ -664,7 +663,7 @@ class FisherMotionPolicy:
 
     @staticmethod
     def _center_from_keyviews(gs_backend: Any) -> Optional[torch.Tensor]:
-        """Secondary fallback center estimate derived from keyframe camera centers."""
+        """基于关键帧相机中心的次级后备中心估计。"""
         keyviews = getattr(gs_backend, "keyviewpoints", None)
         if not keyviews:
             return None
@@ -681,7 +680,7 @@ class FisherMotionPolicy:
         return torch.stack(centers, dim=0).mean(dim=0)
 
     def _get_scene_center(self, gs_backend: Any) -> Optional[torch.Tensor]:
-        """Resolve the best currently-available scene center for hemisphere motion."""
+        """解析当前可用的最佳场景中心，用于半球运动。"""
         center = getattr(gs_backend, "sence_center", None)
         if center is None and hasattr(gs_backend, "tsdfs"):
             center = gs_backend.tsdfs.get_pointcloud_center()
@@ -713,7 +712,7 @@ class FisherMotionPolicy:
 
     @staticmethod
     def _infer_runtime_device(gs_backend: Any) -> str:
-        """Infer which torch device OmniMap is currently using."""
+        """推断 OmniMap 当前使用的 torch 设备。"""
         if getattr(gs_backend, "keyviewpoints", None):
             device = gs_backend.keyviewpoints[-1].device
             return str(device)
@@ -735,7 +734,7 @@ class FisherMotionPolicy:
         idx: int,
         device: str,
     ) -> Any:
-        """Wrap a raw `c2w` pose as an OmniMap `Camera` for Fisher queries."""
+        """将原始 `c2w` 位姿封装为 OmniMap `Camera`，用于 Fisher 查询。"""
         _ensure_omnimap_import_paths()
         from gaussian.utils.camera_utils import Camera
         from gaussian.utils.graphics_utils import getProjectionMatrix2
@@ -784,7 +783,7 @@ class FisherMotionPolicy:
         intrinsics_vec: Sequence[float] | None = None,
         image_size: Sequence[int] | None = None,
     ) -> tuple[Any, str]:
-        """Convert the current viewpoint into a `HemisphereCamera` consistently."""
+        """将当前视角一致地转换为 `HemisphereCamera`。"""
         _ensure_omnimap_import_paths()
         from gaussian.utils.camera_utils import Camera, HemisphereCamera
 
@@ -882,8 +881,8 @@ class FisherMotionPolicy:
                 image_size=image_size,
             )
 
-        # Reuse OmniMap's existing information-gain logic directly so the simulator
-        # only owns the motion decision, not a forked Fisher implementation.
+        # 直接复用 OmniMap 现有信息增益逻辑，使仿真侧只负责运动决策，
+        # 避免维护一套分叉的 Fisher 实现。
         fisher_eval = gs_backend.fisher_eval
         history_stat = fisher_eval.compute_history_stat(gs_backend.keyviewpoints)
         current_result = fisher_eval.compute_view_score(hemi_cam, history_stat)
@@ -900,8 +899,8 @@ class FisherMotionPolicy:
         grad_norm = float(math.hypot(grad_theta, grad_phi))
         radius = float(hemi_cam.radius)
 
-        # First map raw Fisher gradients into a 2D spherical velocity, then apply
-        # a two-sided norm policy so the direction remains aligned with the gradient field.
+        # 先将原始 Fisher 梯度映射为二维球坐标速度，再施加双侧模长策略，
+        # 以保证速度方向与梯度场保持一致。
         scaled_spherical_velocity = np.array(
             [
                 self.step_gain_theta * grad_theta,
@@ -1010,13 +1009,12 @@ class FisherMotionPolicy:
                 )
             return result
 
-        # Then update the spherical state and convert it back into the loop's authoritative pose.
+        # 然后更新球坐标状态，并转换回主循环的权威位姿。
         delta_theta = float(applied_spherical_velocity[0])
         delta_phi = float(applied_spherical_velocity[1])
         next_theta = self._wrap_theta(current_theta + delta_theta)
         next_phi = self._clamp_phi(current_phi + delta_phi)
-        # Rebuild poses in the simulator's rendering convention so closed-loop
-        # RGBD renders keep the same upright image orientation as Phase 1.
+        # 按仿真渲染约定重建位姿，确保闭环 RGBD 渲染与 Phase 1 保持一致的图像朝上方向。
         next_c2w = _sim_spherical_c2w(
             scene_center=scene_center_np,
             radius=radius,
@@ -1107,7 +1105,7 @@ class FisherMotionPolicy:
         image_size: Sequence[int],
         idx: int,
     ) -> MotionPolicyResult:
-        """Convenience wrapper for the simulation loop's authoritative c2w state."""
+        """面向仿真主循环权威 c2w 状态的便捷封装。"""
         return self.next_pose(
             gs_backend=gs_backend,
             current_viewpoint=np.asarray(current_c2w, dtype=np.float64),

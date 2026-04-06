@@ -1,4 +1,4 @@
-"""Phase-2 bridge from simulated RGBD frames into OmniMap."""
+"""将仿真 RGBD 帧接入 OmniMap 的 Phase 2 桥接模块。"""
 
 from __future__ import annotations
 
@@ -16,10 +16,10 @@ from .pose_utils import assert_pose_roundtrip, c2w_to_posevec
 
 
 def _ensure_omnimap_import_paths() -> Path:
-    """Ensure both repo root and `omnimap/` are importable.
+    """确保 repo 根目录和 `omnimap/` 都可被导入。
 
-    `omnimap/omni.py` currently imports sibling modules like `from util.utils ...`,
-    so we need the `omnimap/` directory itself on `sys.path`.
+    `omnimap/omni.py` 当前会用 `from util.utils ...` 这类同级导入，
+    因此需要把 `omnimap/` 目录本身加入 `sys.path`。
     """
     repo_root = Path(__file__).resolve().parent.parent
     omnimap_dir = repo_root / "omnimap"
@@ -35,7 +35,7 @@ def build_default_omnimap_args(
     depth_scale: float = 1000.0,
     vis_gui: bool = False,
 ) -> SimpleNamespace:
-    """Create the minimum args object required by `OMNI`."""
+    """构建 `OMNI` 运行所需的最小参数对象。"""
     return SimpleNamespace(
         output=output,
         depth_scale=float(depth_scale),
@@ -45,7 +45,7 @@ def build_default_omnimap_args(
 
 
 def load_omnimap_config(config_path: str | os.PathLike[str]) -> Dict[str, Any]:
-    """Load OmniMap yaml config with the project's existing helper."""
+    """使用项目现有工具加载 OmniMap 的 yaml 配置。"""
     _ensure_omnimap_import_paths()
     from util.utils import load_config
 
@@ -59,7 +59,7 @@ def apply_config_overrides(
     config: Mapping[str, Any],
     overrides: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Apply a shallow set of top-level config overrides for sim-side debugging."""
+    """为仿真侧调试应用一组浅层（顶层）配置覆盖项。"""
     merged = dict(config)
     if not overrides:
         return merged
@@ -84,7 +84,7 @@ def build_fisher_debug_config_overrides(
     fisher_display_radius_scale: float | None = None,
     fisher_arrow_radius_scale: float | None = None,
 ) -> Dict[str, Any]:
-    """Translate sim-side Fisher debug toggles into OmniMap config overrides."""
+    """将仿真侧 Fisher 调试开关转换为 OmniMap 配置覆盖项。"""
     overrides: Dict[str, Any] = {}
     if show_fisher_heatmap is not None:
         overrides["show_fisher_heatmap"] = bool(show_fisher_heatmap)
@@ -115,7 +115,7 @@ def build_fisher_debug_config_overrides(
 
 
 class _NullProgressBar:
-    """Small tqdm-like stub for direct Python function calls."""
+    """用于直接 Python 调用场景的简化 tqdm 替身。"""
 
     def __init__(self) -> None:
         self.n = 0
@@ -133,7 +133,7 @@ class _NullProgressBar:
 
 @dataclass
 class StepResult:
-    """Lightweight per-frame summary exposed back to the simulation loop."""
+    """回传给仿真主循环的轻量级逐帧摘要。"""
 
     idx: int
     camera_position: list[float]
@@ -147,7 +147,7 @@ class StepResult:
 
 
 class OmniMapRunner:
-    """Feed simulated RGBD + pose directly into `OMNI.track(...)`."""
+    """将仿真 RGBD 与位姿直接送入 `OMNI.track(...)`。"""
 
     def __init__(
         self,
@@ -211,7 +211,7 @@ class OmniMapRunner:
 
     @staticmethod
     def _prepare_rgb(rgb: np.ndarray) -> torch.Tensor:
-        """Convert a numpy RGB frame into OmniMap's `[3, H, W]` tensor layout."""
+        """将 numpy RGB 帧转换为 OmniMap 所需的 `[3, H, W]` 张量布局。"""
         rgb = np.asarray(rgb)
         if rgb.ndim != 3 or rgb.shape[2] != 3:
             raise ValueError(f"rgb must have shape [H, W, 3], got {rgb.shape}")
@@ -220,7 +220,7 @@ class OmniMapRunner:
         return torch.as_tensor(np.ascontiguousarray(rgb)).permute(2, 0, 1)
 
     def _prepare_depth(self, depth_m: np.ndarray) -> torch.Tensor:
-        """Normalize a metric depth map into a clean tensor for tracking."""
+        """将米制深度图归一化为用于跟踪的干净张量。"""
         depth_m = np.asarray(depth_m, dtype=np.float32)
         if depth_m.ndim != 2:
             raise ValueError(f"depth_m must have shape [H, W], got {depth_m.shape}")
@@ -235,7 +235,7 @@ class OmniMapRunner:
 
     @staticmethod
     def _prepare_intrinsics(intrinsics_vec: Sequence[float]) -> torch.Tensor:
-        """Validate and pack `[fx, fy, cx, cy]` into a tensor."""
+        """校验并打包 `[fx, fy, cx, cy]` 为张量。"""
         intrinsics = np.asarray(intrinsics_vec, dtype=np.float64).reshape(-1)
         if intrinsics.shape != (4,):
             raise ValueError(
@@ -259,15 +259,15 @@ class OmniMapRunner:
         update_rate: int = 1,
         run_pose_check: bool = True,
     ) -> StepResult:
-        """Push one simulated frame into OmniMap."""
+        """向 OmniMap 推入一帧仿真数据。"""
         c2w = np.asarray(c2w, dtype=np.float64)
         if c2w.shape != (4, 4):
             raise ValueError(f"c2w must have shape (4, 4), got {c2w.shape}")
         if run_pose_check:
             assert_pose_roundtrip(c2w)
 
-        # The simulation side stays authoritative in metric RGBD / `c2w`,
-        # and this bridge performs the exact conversions OmniMap expects.
+        # 仿真侧始终以米制 RGBD / `c2w` 为权威输入，
+        # 本桥接层负责执行 OmniMap 所需的精确格式转换。
         image = self._prepare_rgb(rgb)
         depth = self._prepare_depth(depth_m)
         intrinsics = self._prepare_intrinsics(intrinsics_vec)
@@ -276,7 +276,7 @@ class OmniMapRunner:
 
         self.args.image_size = [int(image.shape[1]), int(image.shape[2])]
 
-        # `OMNI.track(...)` is the only downstream tracking entry used by the simulated pipeline.
+        # `OMNI.track(...)` 是当前仿真流水线唯一使用的下游跟踪入口。
         self.omni.track(
             int(idx),
             image[None],
@@ -320,7 +320,7 @@ class OmniMapRunner:
         return result
 
     def terminate(self) -> None:
-        """Finalize OmniMap outputs when the current run produced a non-empty map."""
+        """当当前运行产出非空地图时，完成 OmniMap 结果收尾。"""
         gs = self.omni.gs
         num_keyframes = len(gs.keyviewpoints)
         num_gaussians = len(gs.gaussians.get_xyz)
@@ -341,7 +341,7 @@ class OmniMapRunner:
             self.progress_bar.close()
 
     def export_final_fisher_artifacts(self, tag: str = "final") -> None:
-        """Persist the latest Fisher heatmap / velocity views and cached geometry."""
+        """持久化最新 Fisher 热力图/速度场视图及缓存几何。"""
         gs = self.omni.gs
         export_fn = getattr(gs, "export_final_fisher_artifacts", None)
         if export_fn is None:

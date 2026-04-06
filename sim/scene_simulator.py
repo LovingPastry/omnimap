@@ -18,7 +18,7 @@ import open3d as o3d
 try:
     from .assets import create_coordinate_frame, create_ground_plane
 except ImportError:
-    # Allow direct script-style imports when `sim` is not imported as a package.
+    # 当 `sim` 未以包形式导入时，允许脚本式直接导入。
     from assets import create_coordinate_frame, create_ground_plane
 
 
