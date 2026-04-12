@@ -1,13 +1,16 @@
-from gaussian.renderer.nbv.diag_fisher import (
+from .diag_fisher import (
     DiagFisherEvaluator,
     LogFisherEvaluator,
     LogSquareFisherEvaluator,
 )
-from gaussian.renderer.nbv.legacy_fisher import LegacyFisherEvaluator
+from .legacy_fisher import LegacyFisherEvaluator
+from .motion_policy import FisherMotionPolicy, MotionPolicyResult
 
 __all__ = [
     "LegacyFisherEvaluator",
     "DiagFisherEvaluator",
     "LogFisherEvaluator",
     "LogSquareFisherEvaluator",
+    "FisherMotionPolicy",
+    "MotionPolicyResult",
 ]

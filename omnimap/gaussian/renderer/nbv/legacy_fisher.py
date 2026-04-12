@@ -5,18 +5,35 @@ import math
 
 import torch
 
-from util.utils import Log
-from gaussian.utils.camera_utils import Camera, HemisphereCamera
-from gaussian.renderer.nbv.debug import build_debug_messages
-from gaussian.renderer.nbv.hemisphere_field import (
-    angle_grad_to_tangent_dirs,
-    dirs_to_theta_phi,
-    fibonacci_hemisphere_dirs,
-    fisher_values_to_colors,
-    idw_on_sphere,
-    scalarize_value,
-)
-from gaussian.renderer.nbv.interfaces import FisherEvalResult, HemisphereFieldResult
+try:
+    from ...utils.camera_utils import Camera, HemisphereCamera
+    from .debug import build_debug_messages
+    from .hemisphere_field import (
+        angle_grad_to_tangent_dirs,
+        dirs_to_theta_phi,
+        fibonacci_hemisphere_dirs,
+        fisher_values_to_colors,
+        idw_on_sphere,
+        scalarize_value,
+    )
+    from .interfaces import FisherEvalResult, HemisphereFieldResult
+except ImportError:
+    from gaussian.utils.camera_utils import Camera, HemisphereCamera
+    from gaussian.renderer.nbv.debug import build_debug_messages
+    from gaussian.renderer.nbv.hemisphere_field import (
+        angle_grad_to_tangent_dirs,
+        dirs_to_theta_phi,
+        fibonacci_hemisphere_dirs,
+        fisher_values_to_colors,
+        idw_on_sphere,
+        scalarize_value,
+    )
+    from gaussian.renderer.nbv.interfaces import FisherEvalResult, HemisphereFieldResult
+
+try:
+    from omnimap.util.utils import Log
+except ImportError:
+    from util.utils import Log
 
 
 class LegacyFisherEvaluator:
@@ -138,6 +155,86 @@ class LegacyFisherEvaluator:
             )
         return torch.tensor([dtheta, dphi], device=device, dtype=torch.float32)
 
+    @staticmethod
+    def _current_view_dir(base_hemi: HemisphereCamera) -> torch.Tensor:
+        device = base_hemi.theta.device
+        theta = base_hemi.theta.detach().float().reshape(1)
+        phi = base_hemi.phi.detach().float().reshape(1)
+        ct = torch.cos(theta)
+        st = torch.sin(theta)
+        cp = torch.cos(phi)
+        sp = torch.sin(phi)
+        return torch.stack([cp * ct, cp * st, sp], dim=1).to(device=device)
+
+    def build_current_view_field(
+        self,
+        viewpoint: Camera,
+        scene_center: torch.Tensor,
+        idx: int,
+    ) -> HemisphereFieldResult:
+        base_hemi = HemisphereCamera.from_camera(viewpoint, scene_center)
+        history_stat = self.compute_history_stat(None)
+        current_result = self.compute_view_score(base_hemi, history_stat)
+        current_grad_theta_phi = self.compute_view_gradient(base_hemi, history_stat)
+        current_dir = self._current_view_dir(base_hemi)
+        current_vel_dir = angle_grad_to_tangent_dirs(
+            dirs_to_theta_phi(current_dir),
+            current_grad_theta_phi.unsqueeze(0),
+        ).squeeze(0)
+        labels = self._debug_labels()
+        debug_messages = build_debug_messages(
+            idx=idx,
+            base_hemi=base_hemi,
+            history_stat=history_stat,
+            current_result=current_result,
+            sample_dirs=current_dir,
+            sample_vals=torch.tensor(
+                [float(current_result.score)],
+                device=scene_center.device,
+                dtype=torch.float32,
+            ),
+            dense_vals=torch.tensor(
+                [float(current_result.score)],
+                device=scene_center.device,
+                dtype=torch.float32,
+            ),
+            fisher_norm=torch.tensor([1.0], device=scene_center.device, dtype=torch.float32),
+            color_stats={"mode": "local_velocity_only"},
+            **labels,
+        )
+        return HemisphereFieldResult(
+            idx=idx,
+            base_hemi=base_hemi,
+            history_stat=history_stat,
+            current_score=float(current_result.score),
+            current_grad_theta_phi=current_grad_theta_phi,
+            current_vel_dir=current_vel_dir,
+            sample_dirs=current_dir,
+            sample_vals=torch.tensor(
+                [float(current_result.score)],
+                device=scene_center.device,
+                dtype=torch.float32,
+            ),
+            sample_grad_theta_phi=current_grad_theta_phi.unsqueeze(0),
+            sample_vel_dirs=current_vel_dir.unsqueeze(0),
+            dense_dirs=None,
+            dense_vals=None,
+            dense_grad_theta_phi=None,
+            dense_vel_dirs=None,
+            dense_colors=None,
+            dense_velocity_norm=None,
+            dense_velocity_colors=None,
+            fisher_norm=None,
+            color_stats={"mode": "local_velocity_only"},
+            velocity_color_stats={},
+            debug_stats={
+                "messages": debug_messages,
+                "current_result": current_result,
+                "score_label": "Fisher local velocity updated",
+                "mode": "local_velocity_only",
+            },
+        )
+
     def build_hemisphere_field(
         self,
         viewpoint: Camera,
@@ -147,6 +244,13 @@ class LegacyFisherEvaluator:
         num_dense_points: int,
         power: float,
     ) -> HemisphereFieldResult:
+        if bool(self.config.get("fisher_local_velocity_only", False)):
+            return self.build_current_view_field(
+                viewpoint=viewpoint,
+                scene_center=scene_center,
+                idx=idx,
+            )
+
         base_hemi = HemisphereCamera.from_camera(viewpoint, scene_center)
         history_stat = self.compute_history_stat(None)
 
@@ -224,6 +328,9 @@ class LegacyFisherEvaluator:
             idx=idx,
             base_hemi=base_hemi,
             history_stat=history_stat,
+            current_score=float(current_result.score),
+            current_grad_theta_phi=None,
+            current_vel_dir=None,
             sample_dirs=sample_dirs,
             sample_vals=sample_vals,
             sample_grad_theta_phi=sample_grad_theta_phi,

@@ -64,3 +64,5 @@ path:
   tap_cp1: /home/fuyx/lanzc/omnimap/thirdparty/TAP/weights/tap_vit_l_v1_0.pkl
   tap_cp2: /home/fuyx/lanzc/omnimap/thirdparty/TAP/weights/merged_2560.pkl
   sbert_cp: /home/fuyx/lanzc/omnimap/thirdparty/all-MiniLM-L6-v2
+
+fisher_local_velocity_only: false

@@ -54,7 +54,7 @@ def parse_args() -> argparse.Namespace:
             "    --vis_gui \\\n"
             "    --hold_gui_sec 5\n\n"
             "Use this script when you want one-step numbers before running the full "
-            "closed-loop entrypoint sim_fisher_closed_loop.py."
+            "closed-loop entrypoint sim/sim_fisher_closed_loop.py."
         ),
         formatter_class=argparse.RawTextHelpFormatter,
     )
@@ -320,8 +320,7 @@ def main() -> None:
         raise RuntimeError("No valid warm-up frame was processed")
 
     policy = FisherMotionPolicy(
-        step_gain_theta=step_scale,
-        step_gain_phi=step_scale,
+        fisher_step_scale=step_scale,
         cartesian=args.cartesian,
         dt=args.dt,
         radial_gain=args.radial_gain,

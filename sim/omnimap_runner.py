@@ -83,6 +83,7 @@ def build_fisher_debug_config_overrides(
     fisher_idw_power: float | None = None,
     fisher_display_radius_scale: float | None = None,
     fisher_arrow_radius_scale: float | None = None,
+    headless_update_fisher_every_frame: bool | None = None,
 ) -> Dict[str, Any]:
     """将仿真侧 Fisher 调试开关转换为 OmniMap 配置覆盖项。"""
     overrides: Dict[str, Any] = {}
@@ -111,6 +112,10 @@ def build_fisher_debug_config_overrides(
         overrides["fisher_display_radius_scale"] = float(fisher_display_radius_scale)
     if fisher_arrow_radius_scale is not None:
         overrides["fisher_arrow_radius_scale"] = float(fisher_arrow_radius_scale)
+    if headless_update_fisher_every_frame is not None:
+        overrides["headless_update_fisher_every_frame"] = bool(
+            headless_update_fisher_every_frame
+        )
     return overrides
 
 

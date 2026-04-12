@@ -519,7 +519,12 @@ class TSDFBackEnd():
         
         # print(len(captions))
         '''[3] sbert'''
-        caption_fts = self.sbert_model.encode(new_captions, convert_to_tensor=True, device="cuda").detach()
+        caption_fts = self.sbert_model.encode(
+            new_captions,
+            convert_to_tensor=True,
+            device="cuda",
+            show_progress_bar=False,
+        ).detach()
         caption_fts = caption_fts / caption_fts.norm(dim=-1, keepdim=True)
         
         '''[4] get 3D voxels'''

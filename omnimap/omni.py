@@ -27,6 +27,15 @@ class OMNI:
         self.poses = {}
         self.intrinsics = None
         self.depth_scale = args.depth_scale
+        self._last_track_pose_44 = None
+        self._last_track_tstamp = None
+        self._headless_boundary_snapshot_enabled = (
+            (not bool(self.args.vis_gui))
+            and (str(getattr(self.args, "output", "None")) != "None")
+            and bool(self.config.get("headless_save_fisher_boundary_snapshots", True))
+        )
+        self._headless_first_snapshot_done = False
+
         self.omni_normal = None
         # mean, std for image normalization
         self.MEAN = torch.as_tensor([0.485, 0.456, 0.406], device=self.device)[:, None, None]
@@ -41,6 +50,36 @@ class OMNI:
         self.last_time = time.time()
         self.iteration_count = 0
         self.hz = 0
+
+    def _latest_viewpoint_for_snapshot(self):
+        latest_viewpoint = getattr(self.gs, "viewpoint", None)
+        if latest_viewpoint is None:
+            keyviews = getattr(self.gs, "keyviewpoints", None)
+            if keyviews:
+                latest_viewpoint = keyviews[-1]
+        return latest_viewpoint
+
+    def _export_boundary_fisher_snapshot(self, *, tag: str, idx: int) -> bool:
+        if not self._headless_boundary_snapshot_enabled:
+            return False
+        if self._last_track_pose_44 is None:
+            return False
+        export_fn = getattr(self.gs, "export_fisher_snapshot", None)
+        if export_fn is None:
+            return False
+        latest_viewpoint = self._latest_viewpoint_for_snapshot()
+        if latest_viewpoint is None:
+            return False
+        try:
+            export_fn(
+                viewpoint=latest_viewpoint,
+                pose=np.asarray(self._last_track_pose_44, dtype=np.float64),
+                idx=int(idx),
+                tag=str(tag),
+            )
+            return True
+        except Exception:
+            return False
 
     
     @torch.cuda.amp.autocast(enabled=True)
@@ -89,6 +128,23 @@ class OMNI:
                 }
         
         self.gs.process_track_data(data, self.hz)
+
+        if pose_44 is not None:
+            pose_44_np = (
+                pose_44[0].detach().cpu().numpy()
+                if isinstance(pose_44, torch.Tensor)
+                else np.asarray(pose_44[0])
+            )
+            self._last_track_pose_44 = np.asarray(pose_44_np, dtype=np.float64)
+            self._last_track_tstamp = int(tstamp)
+            if (
+                self._headless_boundary_snapshot_enabled
+                and not self._headless_first_snapshot_done
+            ):
+                self._headless_first_snapshot_done = self._export_boundary_fisher_snapshot(
+                    tag="first",
+                    idx=self._last_track_tstamp,
+                )
             
         if tstamp % update_rate == 0:
             loss_dict = {
@@ -111,6 +167,11 @@ class OMNI:
     
     @timeit
     def terminate(self):
+        if self._headless_boundary_snapshot_enabled and self._last_track_tstamp is not None:
+            self._export_boundary_fisher_snapshot(
+                tag="last",
+                idx=int(self._last_track_tstamp),
+            )
         self.gs.eval_fast(self.images, self.poses,  depth_scale=self.depth_scale)
         self.gs.finalize()
         self.gs.gs_instance()

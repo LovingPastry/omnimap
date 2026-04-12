@@ -80,6 +80,24 @@ compute_view_gradient(...)
 
 ## 配置项
 
+### 0. 只计算当前位置速度，不构建全局半球场
+
+```python
+config["fisher_local_velocity_only"]
+```
+
+- 类型：`bool`
+- 默认：`False`
+- 作用：
+  - 只对当前视角计算 Fisher 分数
+  - 只做 1 次当前位置中心差分，得到 `dF/dtheta` 和 `dF/dphi`
+  - 直接得到当前位置切向速度方向
+  - 跳过半球采样、球面插值、热力图和箭头场构建
+- 适用场景：真机前向推理、闭环控制、只关心“当前该往哪动”的实时控制链
+- 注意：
+  - 打开后 `show_fisher_heatmap` / `show_velocity_field` 不再触发全局 Fisher 场可视化
+  - 当前结果会缓存为后续控制使用的“当前位置速度信息”
+
 ### 1. 是否计算速度场
 
 ```python
@@ -208,6 +226,14 @@ velocity_arrow_length = 0.07
 
 ```python
 enable_velocity_field = False
+show_velocity_field = False
+```
+
+如果是在真机或实时推理链路里，只需要当前位置速度，不需要全局采样与可视化：
+
+```python
+fisher_local_velocity_only = True
+show_fisher_heatmap = False
 show_velocity_field = False
 ```
 

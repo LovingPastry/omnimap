@@ -11,17 +11,33 @@
 
 import torch
 import math
-from diff_gaussian_rasterization import (
-    GaussianRasterizationSettings,
-    GaussianRasterizer,
-)
-from gaussian.scene.gaussian_model import GaussianModel
-from gaussian.utils.camera_utils import Camera
+from typing import TYPE_CHECKING
+try:
+    from diff_gaussian_rasterization import (
+        GaussianRasterizationSettings,
+        GaussianRasterizer,
+    )
+    _DIFF_GAUSSIAN_IMPORT_ERROR = None
+except ModuleNotFoundError as exc:
+    GaussianRasterizationSettings = None
+    GaussianRasterizer = None
+    _DIFF_GAUSSIAN_IMPORT_ERROR = exc
+
+if TYPE_CHECKING:
+    from ..scene.gaussian_model import GaussianModel
+    from ..utils.camera_utils import Camera
+
+
+def _require_diff_gaussian_rasterization() -> None:
+    if _DIFF_GAUSSIAN_IMPORT_ERROR is not None:
+        raise ModuleNotFoundError(
+            "diff_gaussian_rasterization is required for gaussian rendering"
+        ) from _DIFF_GAUSSIAN_IMPORT_ERROR
 
 
 def render(
-    viewpoint_camera: Camera,
-    pc: GaussianModel,
+    viewpoint_camera: "Camera",
+    pc: "GaussianModel",
     bg_color: torch.Tensor,
     scaling_modifier=1.0,
 ):
@@ -110,15 +126,18 @@ def render(
 
 
 def render_instance(
-    viewpoint_camera: Camera,
-    pc: GaussianModel,
-    bg_color=torch.Tensor([0.2, 0.2, 0.2]).cuda(),
+    viewpoint_camera: "Camera",
+    pc: "GaussianModel",
+    bg_color=None,
     scaling_modifier=1.0,
 ):
     """
     Render the instance scene.
     Background tensor (bg_color) must be on GPU!
     """
+    _require_diff_gaussian_rasterization()
+    if bg_color is None:
+        bg_color = torch.tensor([0.2, 0.2, 0.2], dtype=torch.float32, device="cuda")
     # Set up rasterization configuration
     tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
     tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
@@ -215,19 +234,24 @@ def _render_normals_helper(viewpoint_camera, pc, rasterizer):
 
     return normal_image
 
-
-from modified_diff_gaussian_rasterization import (
-    GaussianRasterizer as ModifiedGaussianRasterizer,
-    GaussianRasterizationSettings as ModifiedGaussianRasterizationSettings,
-)
-from gaussian.utils.sh_utils import eval_sh
+try:
+    from modified_diff_gaussian_rasterization import (
+        GaussianRasterizer as ModifiedGaussianRasterizer,
+        GaussianRasterizationSettings as ModifiedGaussianRasterizationSettings,
+    )
+    _MODIFIED_DIFF_GAUSSIAN_IMPORT_ERROR = None
+except ModuleNotFoundError as exc:
+    ModifiedGaussianRasterizer = None
+    ModifiedGaussianRasterizationSettings = None
+    _MODIFIED_DIFF_GAUSSIAN_IMPORT_ERROR = exc
+from ..utils.sh_utils import eval_sh
 
 pipe = {"compute_cov3D_python": False, "convert_SHs_python": False, "debug": False}
 
 
 def modified_render(
-    viewpoint_camera: Camera,
-    pc: GaussianModel,
+    viewpoint_camera: "Camera",
+    pc: "GaussianModel",
     bg_color: torch.Tensor,
     scaling_modifier=1.0,
     override_color=None,
@@ -237,6 +261,10 @@ def modified_render(
 
     Background tensor (bg_color) must be on GPU!
     """
+    if _MODIFIED_DIFF_GAUSSIAN_IMPORT_ERROR is not None:
+        raise ModuleNotFoundError(
+            "modified_diff_gaussian_rasterization is required for modified gaussian rendering"
+        ) from _MODIFIED_DIFF_GAUSSIAN_IMPORT_ERROR
 
     # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
     screenspace_points = (

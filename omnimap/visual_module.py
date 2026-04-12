@@ -208,7 +208,12 @@ class YOLOVisualModule(VisualModule):
             new_captions.append(subject)
         
         # 提取语义特征
-        caption_fts = self.sbert_model.encode(new_captions, convert_to_tensor=True, device="cuda").detach()
+        caption_fts = self.sbert_model.encode(
+            new_captions,
+            convert_to_tensor=True,
+            device="cuda",
+            show_progress_bar=False,
+        ).detach()
         caption_fts = caption_fts / caption_fts.norm(dim=-1, keepdim=True)
         
         return final_masks, caption_fts, last_mask_image

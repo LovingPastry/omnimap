@@ -70,6 +70,7 @@ path:
   sbert_cp: /home/fuyx/lanzc/omnimap/thirdparty/all-MiniLM-L6-v2
 
 # Fisher / NBV debug defaults for the simulation toolchain.
+fisher_local_velocity_only: false
 enable_velocity_field: true
 show_velocity_field: true
 show_fisher_heatmap: true

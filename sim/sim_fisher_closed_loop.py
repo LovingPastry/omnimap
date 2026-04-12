@@ -15,16 +15,9 @@ os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
-repo_root = Path(__file__).resolve().parent
+repo_root = Path(__file__).resolve().parent.parent
 if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
-
-from sim.motion_policy import FisherMotionPolicy
-from sim.omnimap_runner import (
-    OmniMapRunner,
-    build_fisher_debug_config_overrides,
-)
-from sim.scene_simulator import SceneSimulator
 
 
 def look_at_c2w(
@@ -133,7 +126,7 @@ def compute_depth_stats(depth: np.ndarray) -> tuple[float, float, int, int, floa
     )
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse the Phase-4 closed-loop experiment CLI."""
     parser = argparse.ArgumentParser(
         description=(
@@ -148,7 +141,7 @@ def parse_args() -> argparse.Namespace:
         ),
         epilog="""
 # 推荐默认闭环命令：
-python3 sim_fisher_closed_loop.py \
+python3 sim/sim_fisher_closed_loop.py \
     --pcd_path replica/log_pcd_0/对比结果/RoboSeg_geo/Kettle.ply \
     --point_scale 0.001 \
     --config config/sim_rtabmap_config.yaml \
@@ -169,7 +162,7 @@ python3 sim_fisher_closed_loop.py \
     --angular_gain 2.0
 
 # 保存每一步渲染结果：
-python3 sim_fisher_closed_loop.py \
+python3 sim/sim_fisher_closed_loop.py \
     --pcd_path replica/log_pcd_0/对比结果/RoboSeg_geo/Kettle.ply \
     --point_scale 0.001 \
     --config config/sim_rtabmap_config.yaml \
@@ -241,6 +234,12 @@ python3 sim_fisher_closed_loop.py \
         type=float,
         default=2.0,
         help="Angular gain applied to the pose-error rotvec when cartesian mode computes omega commands",
+    )
+    parser.add_argument(
+        "--angular_speed_max",
+        type=float,
+        default=1.0,
+        help="Maximum norm of cartesian angular velocity command (rad/s)",
     )
     parser.add_argument(
         "--enable_angular",
@@ -346,6 +345,23 @@ python3 sim_fisher_closed_loop.py \
     )
     parser.add_argument("--vis_gui", action="store_true")
     parser.add_argument(
+        "--headless",
+        action="store_true",
+        help=(
+            "Run in explicit headless mode: force-disable GUI branches and set "
+            "Open3D offscreen-friendly environment defaults when not already set."
+        ),
+    )
+    parser.add_argument(
+        "--headless_dense_fisher_export",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "When running with --headless, keep Fisher heatmap/velocity enabled and "
+            "request per-frame Fisher field updates so nbv_vis exports match dense-mode behavior."
+        ),
+    )
+    parser.add_argument(
         "--save_frames",
         action="store_true",
         help="Save per-step RGB / depth / c2w artifacts under save_dir/frames",
@@ -363,23 +379,52 @@ python3 sim_fisher_closed_loop.py \
         help="Optional delay before process exit so GUI windows remain visible for a bit",
     )
     parser.add_argument("--terminate", action="store_true")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-def main() -> None:
-    """Run the authoritative Phase-4 loop from render to next-pose update.
+def run_closed_loop(args: argparse.Namespace) -> None:
+    """Run the authoritative Phase-4 loop from render to next-pose update."""
+    if args.headless:
+        # Keep user-provided env vars untouched; only set a conservative default.
+        # Avoid forcing EGL/surfaceless globally because some driver stacks stall there.
+        os.environ.setdefault("OPEN3D_CPU_RENDERING", "1")
 
-    The loop owns the canonical camera state:
-    `current_c2w -> render -> track -> Fisher policy -> next_c2w`.
-    This keeps the closed-loop order explicit and makes each step easy to audit.
-    """
-    args = parse_args()
+        # Headless means no runtime windows from OmniMap / Fisher visualizer.
+        args.vis_gui = False
+        if not args.headless_dense_fisher_export:
+            args.show_fisher_heatmap = False
+            args.show_fisher_arrows = False
+        args.step_delay_sec = 0.0
+        args.hold_gui_sec = 0.0
+
+        if args.headless_dense_fisher_export:
+            print(
+                "[ClosedLoop] headless=True with dense Fisher export: "
+                "forced vis_gui=False, keep Fisher heatmap/arrows enabled, "
+                "request per-frame Fisher updates in headless mode."
+            )
+        else:
+            print(
+                "[ClosedLoop] headless=True: forced vis_gui=False, "
+                "show_fisher_heatmap=False, show_fisher_arrows=False, "
+                "step_delay_sec=0, hold_gui_sec=0"
+            )
+
+    from sim.motion_policy import FisherMotionPolicy
+    from sim.omnimap_runner import (
+        OmniMapRunner,
+        build_fisher_debug_config_overrides,
+    )
+    from sim.scene_simulator import SceneSimulator
 
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. Build the static simulated scene once.
+    scene_t0 = time.perf_counter()
+    print("[ClosedLoop] Stage 1/4: initialize SceneSimulator")
     simulator = SceneSimulator(width=args.width, height=args.height)
+    print("[ClosedLoop] Stage 1/4: load point cloud")
     simulator.load_pointcloud(
         args.pcd_path,
         voxel_size=args.voxel_size,
@@ -390,6 +435,9 @@ def main() -> None:
         simulator.add_ground(size=args.ground_size, z=args.ground_z)
     if args.coord_frame:
         simulator.add_coordinate_frame()
+    print(
+        f"[ClosedLoop] Stage 1/4 done in {time.perf_counter() - scene_t0:.2f}s"
+    )
 
     stats = simulator.get_scene_stats()
     print("[ClosedLoop] scene stats:")
@@ -415,6 +463,9 @@ def main() -> None:
         fisher_idw_power=args.fisher_idw_power,
         fisher_display_radius_scale=args.fisher_display_radius_scale,
         fisher_arrow_radius_scale=args.fisher_arrow_radius_scale,
+        headless_update_fisher_every_frame=(
+            bool(args.headless and args.headless_dense_fisher_export)
+        ),
     )
     base_radius = (
         float(args.hemi_radius)
@@ -442,6 +493,7 @@ def main() -> None:
     intrinsics = np.array([args.fx, args.fy, args.cx, args.cy], dtype=np.float32)
 
     runner = OmniMapRunner.from_config_path(
+        # 2. Initialize OmniMap runtime (TSDF + 3DGS + Fisher components).
         config_path=args.config,
         output=str(save_dir),
         depth_scale=args.depth_scale,
@@ -451,14 +503,15 @@ def main() -> None:
         config_overrides=fisher_config_overrides,
         verbose=True,
     )
+    print("[ClosedLoop] Stage 2/4: OmniMapRunner ready")
     policy = FisherMotionPolicy(
-        step_gain_theta=step_scale,
-        step_gain_phi=step_scale,
+        fisher_step_scale=step_scale,
         cartesian=args.cartesian,
         dt=args.dt,
         radial_gain=args.radial_gain,
         linear_vel_max=args.linear_vel_max,
         angular_gain=args.angular_gain,
+        angular_speed_max=args.angular_speed_max,
         enable_angular=args.enable_angular,
         grad_eps=args.grad_eps,
         spherical_speed_min=args.spherical_speed_min,
@@ -466,6 +519,7 @@ def main() -> None:
         max_delta_phi=args.max_delta_phi,
         verbose=True,
     )
+    print("[ClosedLoop] Stage 3/4: FisherMotionPolicy ready")
 
     log_path = save_dir / "loop_log.jsonl"
     csv_path = save_dir / "loop_debug.csv"
@@ -757,6 +811,12 @@ def main() -> None:
     if args.vis_gui and args.hold_gui_sec > 0:
         print(f"[ClosedLoop] Holding GUI for {args.hold_gui_sec:.2f}s before exit")
         time.sleep(float(args.hold_gui_sec))
+
+
+def main() -> None:
+    """CLI entrypoint for advanced closed-loop experiments."""
+    args = parse_args()
+    run_closed_loop(args)
 
 
 if __name__ == "__main__":

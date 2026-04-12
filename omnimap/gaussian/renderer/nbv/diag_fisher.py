@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import torch
 
-from gaussian.renderer.nbv.legacy_fisher import LegacyFisherEvaluator
+try:
+    from .legacy_fisher import LegacyFisherEvaluator
+except ImportError:
+    from gaussian.renderer.nbv.legacy_fisher import LegacyFisherEvaluator
 
 
 class DiagFisherEvaluator(LegacyFisherEvaluator):

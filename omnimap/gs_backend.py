@@ -95,6 +95,10 @@ class GSBackEnd(mp.Process):
         self._last_gs_colors = None
         self._last_fisher_points = None
         self._last_fisher_colors = None
+        self.latest_fisher_field_result = None
+        self.latest_fisher_score = None
+        self.latest_fisher_gradient = None
+        self.latest_fisher_velocity_dir = None
         self._fisher_visgui_notice_logged = False
         self.fisher_eval = FisherEvaluator(self.gaussians, self.config)
         self.fisher_visualizer = FisherVisualizer(
@@ -155,6 +159,23 @@ class GSBackEnd(mp.Process):
         if center is not None:
             self.sence_center = center
         return center
+
+    def get_fisher_scene_center(self) -> Optional[torch.Tensor]:
+        """Public accessor for the best currently available Fisher scene center."""
+        return self._resolve_fisher_scene_center()
+
+    def get_runtime_device(self) -> str:
+        """Public accessor for the torch device used by the current GS runtime."""
+        if self.keyviewpoints:
+            return str(self.keyviewpoints[-1].device)
+        try:
+            params = self.gaussians.capture()
+            for value in params:
+                if isinstance(value, torch.Tensor):
+                    return str(value.device)
+        except Exception:
+            pass
+        return "cuda:0" if torch.cuda.is_available() else "cpu"
 
     def _create_o3d_window(self, window_name: str, width: int, height: int):
         window = o3d.visualization.VisualizerWithKeyCallback()
@@ -282,8 +303,9 @@ class GSBackEnd(mp.Process):
             tsdf_points = np.asarray(self.tsdfs.all_pc.points)
             tsdf_colors = np.asarray(self.tsdfs.all_pc.colors)
         traj_points = None
-        if self.cam_traj is not None and len(self.cam_traj.points) > 0:
-            traj_points = np.asarray(self.cam_traj.points)
+        cam_traj = getattr(self, "cam_traj", None)
+        if cam_traj is not None and len(cam_traj.points) > 0:
+            traj_points = np.asarray(cam_traj.points)
         self.fisher_visualizer.update_context(
             tsdf_points=tsdf_points,
             tsdf_colors=tsdf_colors,
@@ -838,16 +860,22 @@ class GSBackEnd(mp.Process):
                     num_dense_points=num_dense_points,
                     power=power,
                 )
-
-        if not self.vis_gui and idx == 0:
-            num_samples, num_dense_points, power = self._get_fisher_sampling_params()
-            self.update_fisher_hemisphere_pc(
-                viewpoint=viewpoint,
-                idx=idx,
-                num_samples=num_samples,
-                num_dense_points=num_dense_points,
-                power=power,
+        else:
+            headless_update_every_frame = bool(
+                self.config.get("headless_update_fisher_every_frame", False)
             )
+            if headless_update_every_frame or idx == 0:
+                pose = np.linalg.inv(w2c.cpu().numpy())
+                self.last_camera_pose = pose
+                self._update_fisher_context_cache(pose)
+                num_samples, num_dense_points, power = self._get_fisher_sampling_params()
+                self.update_fisher_hemisphere_pc(
+                    viewpoint=viewpoint,
+                    idx=idx,
+                    num_samples=num_samples,
+                    num_dense_points=num_dense_points,
+                    power=power,
+                )
 
     @timeit
     def gs_instance(self, vis=False):
@@ -873,6 +901,7 @@ class GSBackEnd(mp.Process):
         num_samples: int = 64,
         num_dense_points: int = 2048,
         power: float = 2.0,
+        force_full_field: bool = False,
     ):
         Log(
             f"Enter update_fisher_hemisphere_pc(frame={idx})",
@@ -895,6 +924,42 @@ class GSBackEnd(mp.Process):
             num_dense_points=num_dense_points,
             power=power,
         )
+        self.latest_fisher_field_result = field_result
+        self.latest_fisher_score = getattr(field_result, "current_score", None)
+        self.latest_fisher_gradient = getattr(field_result, "current_grad_theta_phi", None)
+        self.latest_fisher_velocity_dir = getattr(field_result, "current_vel_dir", None)
+
+        if bool(self.config.get("fisher_local_velocity_only", False)) and not force_full_field:
+            if (
+                not self._fisher_visgui_notice_logged
+                and (
+                    bool(self.config.get("show_fisher_heatmap", False))
+                    or bool(self.config.get("show_velocity_field", False))
+                )
+            ):
+                Log(
+                    "fisher_local_velocity_only=True: skip hemisphere sampling, interpolation, and visualization.",
+                    tag="NextBestView",
+                )
+                self._fisher_visgui_notice_logged = True
+            grad = field_result.current_grad_theta_phi
+            vel_dir = field_result.current_vel_dir
+            if grad is not None:
+                Log(
+                    (
+                        f"Fisher local velocity updated at frame {idx}: "
+                        f"score={float(field_result.current_score):.6f}, "
+                        f"dtheta={float(grad[0].item()):.6f}, "
+                        f"dphi={float(grad[1].item()):.6f}, "
+                        f"vel_dir={vel_dir.detach().cpu().numpy().tolist() if vel_dir is not None else None}"
+                    ),
+                    tag="NextBestView",
+                )
+            self.fisher_hemi_geometry = None
+            self._last_fisher_points = None
+            self._last_fisher_colors = None
+            return
+
         for message in field_result.debug_stats.get("messages", []):
             Log(message, tag="NextBestView")
 
@@ -932,3 +997,34 @@ class GSBackEnd(mp.Process):
     def export_final_fisher_artifacts(self, tag: str = "final") -> None:
         """Persist the latest Fisher/velocity windows and cached geometry state."""
         self.fisher_visualizer.export_current_artifacts(tag=tag)
+
+    def export_fisher_snapshot(
+        self,
+        *,
+        viewpoint,
+        pose: np.ndarray,
+        idx: int,
+        tag: str,
+        num_samples: Optional[int] = None,
+        num_dense_points: Optional[int] = None,
+        power: Optional[float] = None,
+    ) -> None:
+        """Force one Fisher hemisphere build and export its current point-cloud snapshot."""
+        self._update_fisher_context_cache(np.asarray(pose, dtype=np.float64))
+        sample_count, dense_count, idw_power = self._get_fisher_sampling_params()
+        if num_samples is not None:
+            sample_count = int(num_samples)
+        if num_dense_points is not None:
+            dense_count = int(num_dense_points)
+        if power is not None:
+            idw_power = float(power)
+
+        self.update_fisher_hemisphere_pc(
+            viewpoint=viewpoint,
+            idx=int(idx),
+            num_samples=sample_count,
+            num_dense_points=dense_count,
+            power=idw_power,
+            force_full_field=True,
+        )
+        self.export_final_fisher_artifacts(tag=tag)

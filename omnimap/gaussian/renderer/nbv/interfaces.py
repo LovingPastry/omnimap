@@ -5,7 +5,10 @@ from typing import Dict, Optional, Protocol
 
 import torch
 
-from gaussian.utils.camera_utils import Camera, HemisphereCamera
+try:
+    from ...utils.camera_utils import Camera, HemisphereCamera
+except ImportError:
+    from gaussian.utils.camera_utils import Camera, HemisphereCamera
 
 
 @dataclass
@@ -27,6 +30,9 @@ class HemisphereFieldResult:
     # Optional: per-sample 3D velocity directions (tangent to hemisphere surface).
     # Shape: [num_samples, 3].
     sample_vel_dirs: Optional[torch.Tensor] = None
+    current_score: Optional[float] = None
+    current_grad_theta_phi: Optional[torch.Tensor] = None
+    current_vel_dir: Optional[torch.Tensor] = None
 
     dense_dirs: torch.Tensor = None
     dense_vals: torch.Tensor = None
@@ -63,5 +69,13 @@ class FisherEvaluator(Protocol):
         num_samples: int,
         num_dense_points: int,
         power: float,
+    ) -> HemisphereFieldResult:
+        ...
+
+    def build_current_view_field(
+        self,
+        viewpoint: Camera,
+        scene_center: torch.Tensor,
+        idx: int,
     ) -> HemisphereFieldResult:
         ...

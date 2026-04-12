@@ -5,9 +5,17 @@ from typing import Optional
 import numpy as np
 import open3d as o3d
 
-from util.utils import Log
-from util.vis_utils import draw_camera
-from gaussian.utils.sh_utils import SH2RGB
+try:
+    from ...utils.sh_utils import SH2RGB
+except ImportError:
+    from gaussian.utils.sh_utils import SH2RGB
+
+try:
+    from omnimap.util.utils import Log
+    from omnimap.util.vis_utils import draw_camera
+except ImportError:
+    from util.utils import Log
+    from util.vis_utils import draw_camera
 
 
 class FisherVisualizer:

@@ -5,7 +5,10 @@ from typing import Dict, List
 
 import torch
 
-from gaussian.utils.camera_utils import HemisphereCamera
+try:
+    from ...utils.camera_utils import HemisphereCamera
+except ImportError:
+    from gaussian.utils.camera_utils import HemisphereCamera
 
 
 def summarize_tensor(name: str, tensor: torch.Tensor) -> str:

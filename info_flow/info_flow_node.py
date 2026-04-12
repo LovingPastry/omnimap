@@ -3,6 +3,7 @@ import os  # nopep8
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import sys  # nopep8
 from pathlib import Path  # nopep8
@@ -27,10 +28,10 @@ from cv_bridge import CvBridge
 from geometry_msgs.msg import TransformStamped, TwistStamped
 from message_filters import ApproximateTimeSynchronizer, Subscriber
 from omni import OMNI
+from omnimap.gaussian.renderer.nbv.motion_policy import FisherMotionPolicy
 from omnimap.util.utils import load_config
 from scipy.spatial.transform import Rotation as R
 from sensor_msgs.msg import CameraInfo, Image
-from sim.motion_policy import FisherMotionPolicy
 from tqdm import tqdm, trange
 
 rlimit = resource.getrlimit(resource.RLIMIT_NOFILE)
@@ -97,10 +98,20 @@ class InfoFlowROSNode:
         self.bridge = CvBridge()
         self.index = 0
         self.progress_bar = tqdm(desc="InfoFlow")
+        self.max_frames = int(args.max_frames)
+        if self.max_frames <= 0:
+            raise ValueError(f"max_frames must be positive, got {self.max_frames}")
+        self.terminate = bool(args.terminate)
+        self.save_fisher_snapshots = bool(args.save_fisher_snapshots)
+        self.shutdown_requested = False
+        self.first_snapshot_saved = False
+        self.last_pose_4x4 = None
 
         self.output = args.output
+        self.should_record_frames = self.terminate and self.output != "None"
+        self.can_export_fisher_snapshots = self.save_fisher_snapshots and self.output != "None"
         self.all_inputs = []
-        if self.output != "None":
+        if self.should_record_frames or self.can_export_fisher_snapshots:
             os.makedirs(self.output, exist_ok=True)
 
         self.tf_buffer = tf2_ros.Buffer()
@@ -111,13 +122,13 @@ class InfoFlowROSNode:
 
         self.omni = OMNI(args, config)
         self.motion_policy = FisherMotionPolicy(
-            step_gain_theta=args.fisher_step_scale,
-            step_gain_phi=args.fisher_step_scale,
+            fisher_step_scale=args.fisher_step_scale,
             cartesian=True,
             dt=args.dt,
             radial_gain=args.radial_gain,
             linear_vel_max=args.linear_vel_max,
             angular_gain=args.angular_gain,
+            angular_speed_max=args.angular_speed_max,
             enable_angular=args.enable_angular,
             grad_eps=args.grad_eps,
             spherical_speed_min=args.spherical_speed_min,
@@ -126,9 +137,7 @@ class InfoFlowROSNode:
 
         self.rgb_sub = Subscriber(args.rgb_topic, Image)
         self.depth_sub = Subscriber(args.depth_topic, Image)
-        self.tsync = ApproximateTimeSynchronizer(
-            [self.rgb_sub, self.depth_sub], queue_size=10, slop=0.1
-        )
+        self.tsync = ApproximateTimeSynchronizer([self.rgb_sub, self.depth_sub], queue_size=10, slop=0.1)
         self.tsync.registerCallback(self.image_callback)
 
         self.cmd_pub = rospy.Publisher(args.cmd_topic, TwistStamped, queue_size=1)
@@ -182,9 +191,7 @@ class InfoFlowROSNode:
         msg.header.frame_id = self.cmd_frame
 
         linear = np.asarray(motion_result.velocity_world, dtype=np.float64).reshape(3)
-        angular = np.asarray(
-            motion_result.angular_velocity_world, dtype=np.float64
-        ).reshape(3)
+        angular = np.asarray(motion_result.angular_velocity_world, dtype=np.float64).reshape(3)
 
         msg.twist.linear.x = float(linear[0])
         msg.twist.linear.y = float(linear[1])
@@ -218,7 +225,49 @@ class InfoFlowROSNode:
 
         self.publish_motion_result(motion_result, stamp)
 
+    def maybe_export_fisher_snapshot(self, *, pose_4x4, idx: int, tag: str) -> bool:
+        if not self.can_export_fisher_snapshots:
+            return False
+
+        latest_viewpoint = getattr(self.omni.gs, "viewpoint", None)
+        if latest_viewpoint is None:
+            keyviews = getattr(self.omni.gs, "keyviewpoints", None)
+            if keyviews:
+                latest_viewpoint = keyviews[-1]
+        if latest_viewpoint is None:
+            rospy.logwarn_throttle(
+                2.0,
+                "Skip Fisher snapshot export: latest viewpoint is unavailable (gs.viewpoint and gs.keyviewpoints are both empty).",
+            )
+            return False
+
+        export_fn = getattr(self.omni.gs, "export_fisher_snapshot", None)
+        if export_fn is None:
+            rospy.logwarn_throttle(
+                2.0,
+                "Skip Fisher snapshot export: gs backend does not expose export_fisher_snapshot().",
+            )
+            return False
+
+        try:
+            export_fn(
+                viewpoint=latest_viewpoint,
+                pose=np.asarray(pose_4x4, dtype=np.float64),
+                idx=int(idx),
+                tag=tag,
+            )
+            return True
+        except Exception as exc:
+            rospy.logwarn("Fisher snapshot export failed for %s: %s", tag, exc)
+            return False
+
     def image_callback(self, rgb_msg, depth_msg):
+        if self.shutdown_requested:
+            return
+        if self.index >= self.max_frames:
+            self.request_shutdown(f"Reached frame limit ({self.max_frames}), stopping ROS spin.")
+            return
+
         pose, pose_4x4 = self.get_pose_from_tf(rgb_msg.header.stamp)
         if pose is None:
             self.publish_zero_twist(rgb_msg.header.stamp)
@@ -226,9 +275,7 @@ class InfoFlowROSNode:
 
         try:
             rgb_image = self.bridge.imgmsg_to_cv2(rgb_msg, "rgb8")
-            depth_image = self.bridge.imgmsg_to_cv2(
-                depth_msg, desired_encoding="passthrough"
-            )
+            depth_image = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding="passthrough")
         except Exception as exc:
             rospy.logerr("CV Bridge error: %s", exc)
             self.publish_zero_twist(rgb_msg.header.stamp)
@@ -239,7 +286,7 @@ class InfoFlowROSNode:
         pose_tensor = torch.as_tensor(pose)
         pose_4x4_tensor = torch.as_tensor(pose_4x4)
 
-        if self.output != "None":
+        if self.should_record_frames:
             frame_data = {
                 "index": self.index,
                 "image": image[None].cpu().numpy(),
@@ -267,37 +314,70 @@ class InfoFlowROSNode:
             rospy.logerr("OMNI.track failed: %s", exc)
             self.publish_zero_twist(rgb_msg.header.stamp)
             return
+        self.last_pose_4x4 = np.asarray(pose_4x4, dtype=np.float64)
+        if not self.first_snapshot_saved:
+            self.first_snapshot_saved = self.maybe_export_fisher_snapshot(
+                pose_4x4=pose_4x4,
+                idx=self.index,
+                tag="first",
+            )
         self.maybe_publish_velocity(
             pose_4x4=pose_4x4,
             image_shape=(rgb_image.shape[0], rgb_image.shape[1]),
             stamp=rgb_msg.header.stamp,
         )
         self.index += 1
+        if self.index >= self.max_frames:
+            self.request_shutdown(f"Reached frame limit ({self.max_frames}), stopping ROS spin.")
+
+    def request_shutdown(self, reason):
+        if self.shutdown_requested:
+            return
+        self.shutdown_requested = True
+        rospy.loginfo(reason)
+        self.publish_zero_twist()
+        rospy.signal_shutdown(reason)
 
     def terminate(self):
         self.publish_zero_twist()
-        if self.output != "None":
-            save_trajectory(self.omni, self.all_inputs, self.output)
         self.progress_bar.close()
-        self.omni.terminate()
+        last_pose = self.last_pose_4x4
+        if self.index > 0 and last_pose is not None:
+            self.maybe_export_fisher_snapshot(
+                pose_4x4=last_pose,
+                idx=max(self.index - 1, 0),
+                tag="last",
+            )
+        if self.terminate:
+            if self.should_record_frames and self.all_inputs:
+                save_trajectory(self.omni, self.all_inputs, self.output)
+            self.omni.terminate()
         rospy.signal_shutdown("InfoFlow ROS Node terminated")
 
 
 def build_argparser():
     parser = argparse.ArgumentParser(
-        description=(
-            "InfoFlow ROS Node\n"
-            "订阅 RGBD + TF，内部运行 OmniMap 与 FisherMotionPolicy，\n"
-            "并向 /servo_server/delta_twist_cmds 发布 TwistStamped 速度命令。\n"
-            "\nUsage:\n"
-            "source source_env.sh\n"
-            "python info_flow/info_flow_node.py \\\n"
-            "  --config config/rtabmap_config.yaml \\\n"
-            "  --rgb_topic /cam_1/color/image_raw \\\n"
-            "  --depth_topic /cam_1/aligned_depth_to_color/image_raw \\\n"
-            "  --camera_info_topic /cam_1/color/camera_info \\\n"
-            "  --world_frame base_link \\\n"
-            "  --camera_frame cam_1_color_optical_frame\n"
+        description=("InfoFlow ROS Node\n订阅 RGBD + TF，内部运行 OmniMap 与 FisherMotionPolicy，\n并向 /servo_server/delta_twist_camera 发布 TwistStamped 速度命令。\n"),
+        epilog=(
+            "开发期常改参数：\n"
+            "  --fisher_step_scale      Fisher 主步长\n"
+            "  --linear_vel_max         线速度上限\n"
+            "  --angular_gain           角速度增益\n"
+            "  --radial_gain            径向修正增益\n"
+            "  --angular_speed_max      角速度上限\n"
+            "  --grad_eps               中心差分步长\n"
+            "  --max_frames             单次调试最多处理帧数\n"
+            "  --save_fisher_snapshots  仅保存首帧/尾帧 Fisher 点云快照\n\n"
+            "示例：\n"
+            "  python info_flow/info_flow_node.py \\\n"
+            "      --config config/rtabmap_config.yaml \\\n"
+            "      --fisher_step_scale 1e-5 \\\n"
+            "      --linear_vel_max 0.05 \\\n"
+            "      --angular_gain 2.0 \\\n"
+            "      --radial_gain 0.2 \\\n"
+            "      --angular_speed_max 1.0 \\\n"
+            "      --save_fisher_snapshots \\\n"
+            "      --max_frames 500"
         ),
         formatter_class=argparse.RawTextHelpFormatter,
     )
@@ -343,7 +423,7 @@ def build_argparser():
     parser.add_argument(
         "--cmd_topic",
         type=str,
-        default="/servo_server/delta_twist_cmds",
+        default="/servo_server/delta_twist_camera",
         help="output TwistStamped topic",
     )
     parser.add_argument(
@@ -360,6 +440,24 @@ def build_argparser():
         help="output path",
     )
     parser.add_argument(
+        "--max_frames",
+        type=int,
+        default=500,
+        help="maximum number of synchronized RGBD frames to process before shutdown",
+    )
+    parser.add_argument(
+        "--terminate",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="run post-processing on exit, including OMNI termination and optional frame saving",
+    )
+    parser.add_argument(
+        "--save_fisher_snapshots",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="save first/last Fisher point-cloud snapshots under output/nbv_vis without per-frame visualization",
+    )
+    parser.add_argument(
         "--depth_scale",
         type=float,
         default=1000.0,
@@ -368,13 +466,13 @@ def build_argparser():
     parser.add_argument(
         "--fisher_step_scale",
         type=float,
-        default=1e-4,
+        default=1e-5,
         help="shared Fisher control scale for theta/phi",
     )
     parser.add_argument(
         "--linear_vel_max",
         type=float,
-        default=0.5,
+        default=0.05,
         help="maximum Cartesian linear velocity",
     )
     parser.add_argument(
@@ -392,7 +490,7 @@ def build_argparser():
     parser.add_argument(
         "--dt",
         type=float,
-        default=0.1,
+        default=1,
         help="control timestep used by FisherMotionPolicy",
     )
     parser.add_argument(
@@ -412,6 +510,12 @@ def build_argparser():
         action=argparse.BooleanOptionalAction,
         default=True,
         help="enable angular velocity output",
+    )
+    parser.add_argument(
+        "--angular_speed_max",
+        type=float,
+        default=1.0,
+        help="maximum norm of cartesian angular velocity command (rad/s)",
     )
     parser.add_argument(
         "--policy_verbose",
