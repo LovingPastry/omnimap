@@ -228,6 +228,55 @@ python main.py --dataset scannet --scene scene0000_00
 
 After building the map, the results will be saved in folder `outputs/{scene}`, which contains the rendered outputs and evaluation metrics.
 
+### Logging Levels and Output Control
+
+支持统一日志参数的入口脚本（如 `demo.py`、`sim/sim_fisher_closed_loop.py`、`info_flow/info_flow_node.py`）现在采用“分区 + 等级”日志体系。
+
+日志分区：
+
+- `main`：主进程区（入口脚本与主流程调度）
+- `tsdf`：TSDF 后端
+- `gaussian`：3DGS 映射后端
+- `fisher`：Fisher 信息场与可视化
+- `planner`：主动视角规划与策略控制
+- `profile`：性能计时与 `timeit` 剖析日志
+
+日志等级：
+
+- `DEBUG`：最详细调试信息
+- `INFO`：常规运行信息
+- `WARNING`：仅保留告警信息
+
+常用参数：
+
+- `--log_profile {quiet,default,debug}`：预设终端输出档位。
+- `--log_level {DEBUG,INFO,WARNING,ERROR}`：覆盖基础日志等级（高级调试时使用）。
+- `--log_section {all,main,tsdf,gaussian,fisher,planner,profile}`：指定日志分区，可重复传入多个分区。
+- `--log_min_level {DEBUG,INFO,WARNING}`：终端最小输出等级阈值。
+- `--log_every N`：每 N 帧/步输出一次汇总日志，减少刷屏。
+- `--log_file/--no-log_file`：是否写入 `run.log`。
+
+示例：
+
+```bash
+# 只看主流程 + 规划区，且只输出 INFO 及以上
+python info_flow/info_flow_node.py \
+  --config config/rtabmap_config.yaml \
+  --log_section main --log_section planner \
+  --log_min_level INFO
+
+# 仅看 Fisher + Planner 调试日志
+python sim/sim_fisher_closed_loop.py \
+  --pcd_path <path_to_pcd> \
+  --save_dir sim/sim_outputs/phase4_main \
+  --log_section fisher --log_section planner \
+  --log_min_level DEBUG
+
+# 全部分区，仅保留 WARNING
+python demo.py --dataset replica --scene room_0 \
+  --log_section all --log_min_level WARNING
+```
+
 ### Gen 3D Mesh
 
 We use the rendered depth and color images to generate the color mesh. You can run the following code to perform this operation.
@@ -278,3 +327,16 @@ If you find our work helpful, please cite:
 ## 👏 Acknowledgements
 
 We would like to express our gratitude to the open-source projects and their contributors [HI-SLAM2](https://github.com/Willyzw/HI-SLAM2), [3D Gaussian Splatting](https://github.com/graphdeco-inria/gaussian-splatting), [YOLO-World](https://github.com/AILab-CVC/YOLO-World), and [TAP](https://github.com/baaivision/tokenize-anything). Their valuable work has greatly contributed to the development of our codebase.
+
+
+## TODO
+* [ ] 空间约束：把位于 `spatial_bounds` 之外的点对应的像素，深度值和RGB值全置0，相当于让深度无效化，背景为黑色。
+  * 方案二：硬约束删除。把xyz坐标位于spatial bounds之外的高斯球直接删除。
+
+* [ ] RGBD压缩与解压
+  * [X] 把Realsense相机发布的RGBD压缩，发布到新话题 `/cam_1/color/image_raw/compressed` 和 `/cam_1/aligned_depth_to_color/image_raw/compressed`
+  * [X] 订阅新话题，解压
+
+* [ ] 信息增益尺度平均化：当前使用相机速度正比与信息增益梯度，但二者之间的尺度缩放没有考虑信息增益与参数数量（正比于高斯球数量）的关系。可以考虑让令缩放系数除以高斯球数量。
+
+* [X] 法向速度与角速度计算：为什么不直接设计为error/dt？

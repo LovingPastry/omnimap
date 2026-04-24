@@ -16,6 +16,7 @@ import argparse
 import numpy as np
 import lietorch
 import resource
+from omnimap.util.utils import configure_logging, get_section_logger
 
 rlimit = resource.getrlimit(resource.RLIMIT_NOFILE)
 resource.setrlimit(resource.RLIMIT_NOFILE, (100000, rlimit[1]))
@@ -55,6 +56,7 @@ def rgbd_stream(
     length=100000,
     max_depth=12.0,
     dataset="replica",
+    logger=None,
 ):
     """image generator"""
 
@@ -88,7 +90,8 @@ def rgbd_stream(
         poses.append(pose)
     poses_4x4 = torch.as_tensor(np.array(poses_4x4))
     poses = torch.as_tensor(np.array(poses))
-    print("loading data ......")
+    if logger is not None:
+        logger.info("正在加载数据...")
     for t, (rgbfile, depthfile) in zip(
         trange(len(rgb_image_list)), zip(rgb_image_list, depth_image_list)
     ):
@@ -171,12 +174,52 @@ if __name__ == "__main__":
         action="store_true",
         help="undistort images if calib file contains distortion parameters",
     )
+    parser.add_argument(
+        "--log_profile",
+        choices=("quiet", "default", "debug"),
+        default="default",
+        help="Console logging profile. File log remains more verbose by default.",
+    )
+    parser.add_argument(
+        "--log_level",
+        type=str,
+        default=None,
+        help="Optional explicit logging level override (e.g., DEBUG/INFO/WARNING/ERROR).",
+    )
+    parser.add_argument(
+        "--log_section",
+        action="append",
+        choices=("all", "main", "tsdf", "gaussian", "fisher", "planner", "profile"),
+        default=None,
+        help="选择输出日志分区；可重复传入。未指定时默认 all。",
+    )
+    parser.add_argument(
+        "--log_min_level",
+        choices=("DEBUG", "INFO", "WARNING"),
+        default="INFO",
+        help="终端最小日志等级阈值。",
+    )
+    parser.add_argument(
+        "--log_every",
+        type=int,
+        default=10,
+        help="Update progress/log summary every N frames.",
+    )
+    parser.add_argument(
+        "--log_file",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable or disable run.log output in output directory.",
+    )
     parser.add_argument("--output", default="None", help="path to save output")
     args = parser.parse_args()
 
     args.config = f"config/{args.dataset}_config.yaml"
     # args.config = "config/replica_config.yaml"
     config = load_config(args.config)
+    # Default Fisher visualization sampling density for this entrypoint.
+    config.setdefault("fisher_num_samples", 128)
+    config.setdefault("fisher_num_dense_points", 1024)
     config["scene"] = args.scene
     dataset_dir = config["path"]["data_path"]
 
@@ -203,6 +246,20 @@ if __name__ == "__main__":
     if args.output == "None":
         args.output = f"replica/output/{args.scene}_{str(int(time.time()))}"
     os.makedirs(args.output, exist_ok=True)
+    log_file_path = os.path.join(args.output, "run.log") if bool(args.log_file) else None
+    requested_sections = args.log_section or ["all"]
+    selected_sections = (
+        None if "all" in {str(s).lower() for s in requested_sections} else requested_sections
+    )
+    configure_logging(
+        profile=str(args.log_profile),
+        level=args.log_level,
+        log_file=log_file_path,
+        enabled_sections=selected_sections,
+        min_console_level=args.log_min_level,
+        force=True,
+    )
+    logger = get_section_logger("entry.demo", "main")
     torch.multiprocessing.set_start_method("spawn")
 
     omni = None
@@ -217,9 +274,14 @@ if __name__ == "__main__":
         args.length,
         args.max_depth,
         args.dataset,
+        logger,
     )
 
-    progress_bar = tqdm(range(0, len(all_inputs)), desc="Training")
+    progress_bar = tqdm(
+        range(0, len(all_inputs)),
+        desc="Training",
+        disable=(str(args.log_profile).lower() == "quiet"),
+    )
     # progress_bar = tqdm(desc="Training")
 
     for frame_data in all_inputs:
@@ -245,9 +307,10 @@ if __name__ == "__main__":
             intrinsics=intrinsics,
             is_last=is_last,
             pose_44=pose_44,
+            update_rate=max(1, int(args.log_every)),
         )
     progress_bar.close()
 
     omni.terminate()
     save_trajectory(omni, all_inputs, args.output)
-    print(f"Done, results saved to {args.output}")
+    logger.info("运行结束，结果已保存至 %s", args.output)

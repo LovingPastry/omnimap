@@ -12,7 +12,7 @@ from collections import defaultdict
 import os
 import matplotlib.pyplot as plt
 from PIL import Image, ImageDraw, ImageFont
-from util.utils import Log, clone_obj
+from util.utils import clone_obj, get_section_logger, should_log_step
 from util.vis_utils import (
     draw_camera,
     create_camera_trajectory_line,
@@ -62,6 +62,9 @@ class GSBackEnd(mp.Process):
     ):
         super().__init__()
         self.config = config
+        self.logger = get_section_logger("gs.backend", "gaussian")
+        self.fisher_logger = get_section_logger("gs.fisher", "fisher")
+        self._diag_log_every = int(config.get("diag_log_every", 30))
 
         self.iteration_count = 0
         # only need save keyframe viewpoint
@@ -145,16 +148,16 @@ class GSBackEnd(mp.Process):
         if center is None:
             center = self._fallback_center_from_gaussians(self.gaussians)
             if center is not None:
-                Log(
-                    f"Fisher scene center fallback: using Gaussian mean {center.detach().cpu().numpy().tolist()}",
-                    tag="NextBestView",
+                self.fisher_logger.info(
+                    "Fisher 场景中心回退：使用高斯均值 %s",
+                    center.detach().cpu().numpy().tolist(),
                 )
         if center is None:
             center = self._fallback_center_from_keyviews()
             if center is not None:
-                Log(
-                    f"Fisher scene center fallback: using keyframe camera mean {center.detach().cpu().numpy().tolist()}",
-                    tag="NextBestView",
+                self.fisher_logger.info(
+                    "Fisher 场景中心回退：使用关键帧相机均值 %s",
+                    center.detach().cpu().numpy().tolist(),
                 )
         if center is not None:
             self.sence_center = center
@@ -306,6 +309,17 @@ class GSBackEnd(mp.Process):
         cam_traj = getattr(self, "cam_traj", None)
         if cam_traj is not None and len(cam_traj.points) > 0:
             traj_points = np.asarray(cam_traj.points)
+        elif len(self.keyviewpoints) > 0:
+            centers = []
+            for viewpoint in self.keyviewpoints:
+                center = getattr(viewpoint, "camera_center", None)
+                if center is None:
+                    continue
+                center_np = center.detach().cpu().numpy().reshape(3)
+                if np.isfinite(center_np).all():
+                    centers.append(center_np)
+            if centers:
+                traj_points = np.asarray(centers, dtype=np.float64)
         self.fisher_visualizer.update_context(
             tsdf_points=tsdf_points,
             tsdf_colors=tsdf_colors,
@@ -400,7 +414,7 @@ class GSBackEnd(mp.Process):
         self.camera_optimizer = None
 
     def post_refine(self):
-        Log("Starting post refinement", tag="GaussianSplatting")
+        self.logger.info("开始后处理精炼")
         if self.config["Training"]["compensate_exposure"]:
             opt_params = []
             for view in self.keyviewpoints:
@@ -554,7 +568,7 @@ class GSBackEnd(mp.Process):
                 self.gaussians.optimizer.step()
                 self.gaussians.optimizer.zero_grad(set_to_none=True)
 
-        Log("Initialized map")
+        self.logger.info("地图初始化完成")
         return render_pkg
 
     def map(self, viewpoints, iters, current_id, is_keyframe, corr_index=None):
@@ -658,9 +672,46 @@ class GSBackEnd(mp.Process):
             packet: 包含当前帧所有数据的字典
             hz: 当前处理频率，用于自适应参数调整
         """
+        packet_images = packet["images"]
+        packet_depths = packet["depths"]
+        spatial_keep_mask = packet.get("spatial_keep_mask", None)
+        if spatial_keep_mask is not None:
+            spatial_keep_mask = torch.as_tensor(
+                spatial_keep_mask, dtype=torch.bool, device=packet_depths.device
+            )
+            if spatial_keep_mask.shape == packet_depths.shape:
+                packet_images = packet_images.clone()
+                packet_depths = packet_depths.clone()
+                packet_depths[~spatial_keep_mask] = 0
+                packet_images[:, ~spatial_keep_mask] = 0
+                if should_log_step(int(packet["tstamp"]), self._diag_log_every):
+                    masked_ratio = (
+                        float((~spatial_keep_mask).sum().item())
+                        / float(spatial_keep_mask.numel())
+                        * 100.0
+                    )
+                    depth_nonzero_ratio = (
+                        float((packet_depths > 0).sum().item())
+                        / float(packet_depths.numel())
+                        * 100.0
+                    )
+                    self.logger.debug(
+                        "frame=%d GS 重新应用空间掩码 masked_ratio=%.2f%% depth_nonzero_ratio=%.2f%%",
+                        int(packet["tstamp"]),
+                        masked_ratio,
+                        depth_nonzero_ratio,
+                    )
+            else:
+                self.logger.warning(
+                    "frame=%d GS 接收到的 spatial_keep_mask 形状不匹配 mask=%s depth=%s，已忽略掩码",
+                    int(packet["tstamp"]),
+                    tuple(spatial_keep_mask.shape),
+                    tuple(packet_depths.shape),
+                )
+
         # 1. 初始化投影矩阵（仅在首次调用时执行）
         if not hasattr(self, "projection_matrix"):
-            H, W = packet["images"].shape[-2:]
+            H, W = packet_images.shape[-2:]
             self.K = K = list(packet["intrinsics"]) + [W, H]
             self.projection_matrix = (
                 getProjectionMatrix2(
@@ -676,8 +727,8 @@ class GSBackEnd(mp.Process):
 
         # 3. 创建当前帧的相机视点对象
         viewpoint = Camera.init_from_tracking(
-            packet["images"] / 255.0,
-            packet["depths"],
+            packet_images / 255.0,
+            packet_depths,
             w2c,
             idx,
             self.projection_matrix,
@@ -701,8 +752,8 @@ class GSBackEnd(mp.Process):
             self.initialized = True
             if self.vis_gui:
                 self.vis_h, self.vis_w = (
-                    packet["images"].shape[1],
-                    packet["images"].shape[2],
+                    packet_images.shape[1],
+                    packet_images.shape[2],
                 )
                 self.set_gui()
         # new image needs initialize for viewpoint and gs
@@ -830,15 +881,15 @@ class GSBackEnd(mp.Process):
         if self.sence_center is None:
             self.sence_center = self.tsdfs.get_pointcloud_center()
             if self.sence_center is not None:
-                Log(
-                    f"Scene center initialized at {self.sence_center.cpu().numpy()}",
-                    tag="NextBestView",
+                self.fisher_logger.info(
+                    "场景中心已初始化：%s",
+                    self.sence_center.cpu().numpy(),
                 )
 
         if self.vis_gui:
-            gt_image = packet["images"].permute(1, 2, 0).clone()
+            gt_image = packet_images.permute(1, 2, 0).clone()
             self.images[0] = torch.clamp(gt_image, 0, 255).cpu().numpy()[:, :, ::-1]
-            depth = packet["depths"].clone().cpu().numpy()
+            depth = packet_depths.clone().cpu().numpy()
             min_depth, max_depth = 0.1, 5.0
             depth = np.clip(depth, min_depth, max_depth)
             depth_norm = ((depth - min_depth) / (max_depth - min_depth)) * 255
@@ -861,21 +912,10 @@ class GSBackEnd(mp.Process):
                     power=power,
                 )
         else:
-            headless_update_every_frame = bool(
-                self.config.get("headless_update_fisher_every_frame", False)
-            )
-            if headless_update_every_frame or idx == 0:
-                pose = np.linalg.inv(w2c.cpu().numpy())
-                self.last_camera_pose = pose
-                self._update_fisher_context_cache(pose)
-                num_samples, num_dense_points, power = self._get_fisher_sampling_params()
-                self.update_fisher_hemisphere_pc(
-                    viewpoint=viewpoint,
-                    idx=idx,
-                    num_samples=num_samples,
-                    num_dense_points=num_dense_points,
-                    power=power,
-                )
+            # Headless mode keeps the runtime path lightweight:
+            # no per-frame Fisher hemisphere build/sampling/interpolation here.
+            # Build is deferred to explicit export points (e.g. final snapshot export).
+            pass
 
     @timeit
     def gs_instance(self, vis=False):
@@ -903,17 +943,11 @@ class GSBackEnd(mp.Process):
         power: float = 2.0,
         force_full_field: bool = False,
     ):
-        Log(
-            f"Enter update_fisher_hemisphere_pc(frame={idx})",
-            tag="NextBestView",
-        )
+        self.fisher_logger.debug("进入 Fisher 半球场更新：frame=%d", idx)
         if self.sence_center is None:
             self.sence_center = self._resolve_fisher_scene_center()
         if self.sence_center is None:
-            Log(
-                "Skip Fisher hemisphere visualization: scene center is unavailable.",
-                tag="NextBestView",
-            )
+            self.fisher_logger.warning("跳过 Fisher 半球可视化：场景中心不可用。")
             return
         self.fisher_eval.keyviewpoints = self.keyviewpoints
         field_result = self.fisher_eval.build_hemisphere_field(
@@ -937,23 +971,23 @@ class GSBackEnd(mp.Process):
                     or bool(self.config.get("show_velocity_field", False))
                 )
             ):
-                Log(
-                    "fisher_local_velocity_only=True: skip hemisphere sampling, interpolation, and visualization.",
-                    tag="NextBestView",
+                self.fisher_logger.info(
+                    "fisher_local_velocity_only=True：跳过半球采样、插值与可视化。"
                 )
                 self._fisher_visgui_notice_logged = True
             grad = field_result.current_grad_theta_phi
             vel_dir = field_result.current_vel_dir
             if grad is not None:
-                Log(
+                self.fisher_logger.debug(
                     (
-                        f"Fisher local velocity updated at frame {idx}: "
-                        f"score={float(field_result.current_score):.6f}, "
-                        f"dtheta={float(grad[0].item()):.6f}, "
-                        f"dphi={float(grad[1].item()):.6f}, "
-                        f"vel_dir={vel_dir.detach().cpu().numpy().tolist() if vel_dir is not None else None}"
+                        "Fisher 局部速度已更新：frame=%d score=%.6f "
+                        "dtheta=%.6f dphi=%.6f vel_dir=%s"
                     ),
-                    tag="NextBestView",
+                    idx,
+                    float(field_result.current_score),
+                    float(grad[0].item()),
+                    float(grad[1].item()),
+                    vel_dir.detach().cpu().numpy().tolist() if vel_dir is not None else None,
                 )
             self.fisher_hemi_geometry = None
             self._last_fisher_points = None
@@ -961,14 +995,13 @@ class GSBackEnd(mp.Process):
             return
 
         for message in field_result.debug_stats.get("messages", []):
-            Log(message, tag="NextBestView")
+            self.fisher_logger.debug("信息场调试信息：%s", message)
 
         if bool(self.config.get("show_velocity_field", False)) and not bool(
             self.config.get("enable_velocity_field", False)
         ):
-            Log(
-                "show_velocity_field=True but enable_velocity_field=False; velocity arrows are skipped.",
-                tag="NextBestView",
+            self.fisher_logger.warning(
+                "show_velocity_field=True 但 enable_velocity_field=False，已跳过速度箭头。"
             )
 
         self.fisher_visualizer.apply_field_result(field_result)
@@ -978,14 +1011,16 @@ class GSBackEnd(mp.Process):
         self._last_gs_points = self.fisher_visualizer.last_gs_points
         self._last_gs_colors = self.fisher_visualizer.last_gs_colors
 
-        Log(
+        self.fisher_logger.info(
             (
-                f"Fisher hemisphere updated at frame {idx}: "
-                f"samples={num_samples}, dense={num_dense_points}, "
-                f"min={field_result.sample_vals.min().item():.6f}, "
-                f"max={field_result.sample_vals.max().item():.6f}"
+                "Fisher 半球场更新完成：frame=%d samples=%d dense=%d "
+                "min=%.6f max=%.6f"
             ),
-            tag="NextBestView",
+            idx,
+            num_samples,
+            num_dense_points,
+            field_result.sample_vals.min().item(),
+            field_result.sample_vals.max().item(),
         )
 
         self.export_frame0_fisher_artifacts_if_needed(idx)
@@ -1011,6 +1046,11 @@ class GSBackEnd(mp.Process):
     ) -> None:
         """Force one Fisher hemisphere build and export its current point-cloud snapshot."""
         self._update_fisher_context_cache(np.asarray(pose, dtype=np.float64))
+        prev_enable_velocity = self.config.get("enable_velocity_field", False)
+        prev_show_velocity = self.config.get("show_velocity_field", False)
+        # Even in headless mode, final snapshot export should include velocity arrows/surfaces.
+        self.config["enable_velocity_field"] = True
+        self.config["show_velocity_field"] = True
         sample_count, dense_count, idw_power = self._get_fisher_sampling_params()
         if num_samples is not None:
             sample_count = int(num_samples)
@@ -1018,13 +1058,16 @@ class GSBackEnd(mp.Process):
             dense_count = int(num_dense_points)
         if power is not None:
             idw_power = float(power)
-
-        self.update_fisher_hemisphere_pc(
-            viewpoint=viewpoint,
-            idx=int(idx),
-            num_samples=sample_count,
-            num_dense_points=dense_count,
-            power=idw_power,
-            force_full_field=True,
-        )
-        self.export_final_fisher_artifacts(tag=tag)
+        try:
+            self.update_fisher_hemisphere_pc(
+                viewpoint=viewpoint,
+                idx=int(idx),
+                num_samples=sample_count,
+                num_dense_points=dense_count,
+                power=idw_power,
+                force_full_field=True,
+            )
+            self.export_final_fisher_artifacts(tag=tag)
+        finally:
+            self.config["enable_velocity_field"] = prev_enable_velocity
+            self.config["show_velocity_field"] = prev_show_velocity

@@ -255,6 +255,20 @@ class FisherVisualizer:
                         vel_mesh += arrow
                     vel_mesh.compute_vertex_normals()
 
+        # Cache previous frame geometries before any overwrite so GUI removal
+        # always targets old objects instead of the just-built ones.
+        prev_velocity_geometry = self.velocity_geometry
+        prev_velocity_surface_geometry = self.velocity_surface_geometry
+
+        # Keep export caches valid even in headless mode (no GUI windows attached).
+        self.fisher_hemi_geometry = hemi_pc if show_fisher_heatmap else None
+        self.velocity_geometry = (
+            vel_mesh if (show_velocity_field and vel_mesh is not None) else None
+        )
+        self.velocity_surface_geometry = (
+            vel_pc if (show_velocity_field and vel_pc is not None) else None
+        )
+
         if self.vis_gui:
             if fisher_window_mode == "split":
                 self._update_split_context_window(
@@ -279,19 +293,23 @@ class FisherVisualizer:
                 self.heatmap_geometry = None
                 self.fisher_hemi_geometry = None
 
-            if self.velocity_window is not None and self.velocity_geometry is not None:
-                self.velocity_window.remove_geometry(
-                    self.velocity_geometry, reset_bounding_box=False
-                )
-                self.velocity_geometry = None
             if (
                 self.velocity_window is not None
-                and self.velocity_surface_geometry is not None
+                and prev_velocity_geometry is not None
             ):
                 self.velocity_window.remove_geometry(
-                    self.velocity_surface_geometry, reset_bounding_box=False
+                    prev_velocity_geometry, reset_bounding_box=False
                 )
-                self.velocity_surface_geometry = None
+            if (
+                self.velocity_window is not None
+                and prev_velocity_surface_geometry is not None
+            ):
+                self.velocity_window.remove_geometry(
+                    prev_velocity_surface_geometry, reset_bounding_box=False
+                )
+
+            self.velocity_geometry = None
+            self.velocity_surface_geometry = None
 
             if show_velocity_field and vel_mesh is not None and self.velocity_window is not None:
                 show_velocity_surface = (
@@ -334,11 +352,45 @@ class FisherVisualizer:
         return hemi_pc
 
     def _context_points_and_colors(self):
+        base_points = None
+        base_colors = None
         if self.last_tsdf_points is not None and len(self.last_tsdf_points) > 0:
-            return self.last_tsdf_points, self.last_tsdf_colors
-        if self.last_gs_points is not None and len(self.last_gs_points) > 0:
-            return self.last_gs_points, self.last_gs_colors
-        return None, None
+            base_points = np.asarray(self.last_tsdf_points, dtype=np.float64)
+            base_colors = np.asarray(self.last_tsdf_colors, dtype=np.float64)
+        elif self.last_gs_points is not None and len(self.last_gs_points) > 0:
+            base_points = np.asarray(self.last_gs_points, dtype=np.float64)
+            base_colors = np.asarray(self.last_gs_colors, dtype=np.float64)
+
+        traj_overlay_points = []
+        if self.last_traj_points is not None and len(self.last_traj_points) > 0:
+            traj = np.asarray(self.last_traj_points, dtype=np.float64)
+            traj_overlay_points.append(traj)
+            if len(traj) >= 2:
+                # Densify each segment so "trajectory lines" remain visible in point-cloud-only exports.
+                samples_per_seg = 16
+                seg_points = []
+                for p0, p1 in zip(traj[:-1], traj[1:]):
+                    t = np.linspace(0.0, 1.0, samples_per_seg, endpoint=False)
+                    seg = p0[None, :] * (1.0 - t[:, None]) + p1[None, :] * t[:, None]
+                    seg_points.append(seg)
+                if seg_points:
+                    traj_overlay_points.append(np.vstack(seg_points))
+
+        if traj_overlay_points:
+            traj_points = np.vstack(traj_overlay_points)
+            traj_colors = np.tile(
+                np.array([[1.0, 0.2, 0.2]], dtype=np.float64),
+                (len(traj_points), 1),
+            )
+            if base_points is None:
+                base_points, base_colors = traj_points, traj_colors
+            else:
+                base_points = np.vstack([base_points, traj_points])
+                base_colors = np.vstack([base_colors, traj_colors])
+
+        if base_points is None:
+            return None, None
+        return base_points, base_colors
 
     @staticmethod
     def _write_point_cloud(path: str, points: np.ndarray, colors: np.ndarray) -> None:
@@ -354,39 +406,49 @@ class FisherVisualizer:
 
         context_points, context_colors = self._context_points_and_colors()
 
-        if context_points is not None and self.last_fisher_points is not None:
-            merged_points = np.vstack([context_points, self.last_fisher_points])
-            merged_colors = np.vstack([context_colors, self.last_fisher_colors])
+        if self.last_fisher_points is not None:
+            if context_points is not None:
+                merged_points = np.vstack([context_points, self.last_fisher_points])
+                merged_colors = np.vstack([context_colors, self.last_fisher_colors])
+            else:
+                merged_points = np.asarray(self.last_fisher_points, dtype=np.float64)
+                merged_colors = np.asarray(self.last_fisher_colors, dtype=np.float64)
             self._write_point_cloud(
                 os.path.join(out_dir, f"{tag}_mapping_plus_fisher_heatmap.ply"),
                 merged_points,
                 merged_colors,
             )
 
-        if context_points is not None and self.last_velocity_points is not None:
-            merged_points = np.vstack([context_points, self.last_velocity_points])
-            merged_colors = np.vstack([context_colors, self.last_velocity_colors])
+        if self.last_velocity_points is not None:
+            if context_points is not None:
+                merged_points = np.vstack([context_points, self.last_velocity_points])
+                merged_colors = np.vstack([context_colors, self.last_velocity_colors])
+            else:
+                merged_points = np.asarray(self.last_velocity_points, dtype=np.float64)
+                merged_colors = np.asarray(self.last_velocity_colors, dtype=np.float64)
+
+            # Export velocity arrows in the same velocity-surface ply as dense colored points.
+            if self.velocity_geometry is not None:
+                sample_count = int(self.config.get("velocity_arrow_export_points", 20000))
+                sample_count = max(1000, sample_count)
+                arrow_pc = self.velocity_geometry.sample_points_uniformly(
+                    number_of_points=sample_count
+                )
+                arrow_points = np.asarray(arrow_pc.points, dtype=np.float64)
+                if len(arrow_points) > 0:
+                    arrow_colors = np.asarray(arrow_pc.colors, dtype=np.float64)
+                    if arrow_colors.size == 0:
+                        arrow_colors = np.tile(
+                            np.array([[1.0, 0.0, 0.0]], dtype=np.float64),
+                            (len(arrow_points), 1),
+                        )
+                    merged_points = np.vstack([merged_points, arrow_points])
+                    merged_colors = np.vstack([merged_colors, arrow_colors])
+
             self._write_point_cloud(
                 os.path.join(out_dir, f"{tag}_mapping_plus_velocity_surface.ply"),
                 merged_points,
                 merged_colors,
-            )
-
-        if self.velocity_geometry is not None:
-            o3d.io.write_triangle_mesh(
-                os.path.join(out_dir, f"{tag}_velocity_arrows.ply"),
-                self.velocity_geometry,
-            )
-
-        if self.last_camera_pose is not None:
-            np.save(
-                os.path.join(out_dir, f"{tag}_camera_c2w.npy"),
-                self.last_camera_pose,
-            )
-        if self.last_traj_points is not None:
-            np.save(
-                os.path.join(out_dir, f"{tag}_trajectory_points.npy"),
-                self.last_traj_points,
             )
 
         if self.vis_gui:

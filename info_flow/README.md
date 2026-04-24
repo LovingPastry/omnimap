@@ -1,90 +1,131 @@
 # InfoFlow ROS 节点
 
-`info_flow/` 目录用于存放仓库内和 ROS 对接的 Python 节点，不走单独的 `catkin` 包骨架。
+`info_flow/` 目录用于仓库内 ROS 对接节点，不走单独 `catkin` 包骨架。
 
-当前主节点是：
+## 当前功能
 
-- `info_flow_node.py`
+- `tf_native` 模式（默认）：
+  - 输入为 `RGB(compressed) + Depth(compressed)`。
+  - 位姿由 TF 查询 `world_frame -> camera_frame`（默认 `base_link -> cam_1_color_optical_frame`）。
+  - Tracking 入队采用自主门控：
+    - 首帧通过；
+    - `dt` 小于阈值拒绝；
+    - 平移和旋转增量均小于阈值拒绝；
+    - 连续拒绝达到 30 帧，强制当前帧作为 keyframe 入队。
+  - 仅通过门控才解码 RGBD 并入 Tracking 队列。
 
-它会：
+- `rtabmap_native` 模式：
+  - 兼容别名，内部映射到 `tf_native`，并在 `main` 分区打印迁移提示。
 
-1. 订阅 RGB、Depth、`CameraInfo`
-2. 从 TF 查询 `world_frame -> camera_frame`
-3. 把图像、深度和位姿喂给 `OMNI.track(...)`
-4. 用 `omnimap/gaussian/renderer/nbv/motion_policy.py` 里的 `FisherMotionPolicy`
-5. 向 `/servo_server/delta_twist_camera` 发布 `geometry_msgs/TwistStamped`
+- `legacy_tf` 模式：
+  - 保留原有串行回滚路径：`RGBD -> TF pose -> track -> live planning -> publish`。
 
-- [ ]下游节点需要还需要做一层 `cam_1_color_frame -> tool0` 的转化
+- Tracking/Planning 解耦（`tf_native`）：
+  - Tracking worker 独立线程消费队列，执行 `OMNI.track(...)`，完成后构建并原子切换 `PlannerSnapshot`。
+  - Planning loop 使用 `rospy.Timer` 固定频率运行（默认 30Hz），始终基于“当前快照 + 最新位姿”计算速度。
 
-## 运行方式
+## 数据流（tf_native）
+
+1. 同步输入 `RGB + Depth`。
+2. 用图像时间戳查询 TF 得到 `c2w/w2c`，更新 `latest_pose_state`。
+3. 自主门控判定是否入 Tracking。
+4. 通过门控才解码 RGBD 并入队；队列满时丢最旧帧（`DropOldestQueue`）。
+5. Tracking 成功后构建新快照，Planning 自动切到新快照。
+
+## 启动 CLI
+
+### tf_native（推荐）
 
 ```bash
 source source_env.sh
 python info_flow/info_flow_node.py \
   --config config/rtabmap_config.yaml \
-  --fisher_step_scale 1e-5 \
-  --linear_vel_max 0.05 \
-  --angular_gain 2.0 \
-  --radial_gain 0.2 \
-  --angular_speed_max 1.0 \
-  --dt 1.0 \
-  --save_fisher_snapshots \
+  --slam_frontend_mode tf_native \
+  --rgb_topic /cam_1/color/image_raw/compressed \
+  --depth_topic /cam_1/aligned_depth_to_color/image_raw/compressed \
+  --camera_info_topic /cam_1/color/camera_info \
+  --world_frame base_link \
+  --camera_frame cam_1_color_optical_frame \
+  --sync_slop_sec 0.12 \
+  --planner_hz 30 \
+  --pose_stale_timeout_sec 0.2 \
+  --track_queue_size 2 \
+  --keyframe_min_interval_sec 0.10 \
+  --keyframe_min_translation_m 0.01 \
+  --keyframe_min_rotation_deg 1.0 \
+  --cmd_topic /servo_server/delta_twist_camera \
+  --cmd_frame base_link \
   --max_frames 500
 ```
 
-## 开发期最常改的参数
-
-- `--fisher_step_scale`: Fisher 控制主缩放，决定切向推进强度
-- `--linear_vel_max`: 最大线速度，直接限制机械臂平移速度
-- `--angular_gain`: 角速度增益，控制朝向修正力度
-- `--radial_gain`: 径向修正增益，用于球面约束修正
-- `--grad_eps`: Fisher 梯度中心差分步长
-- `--spherical_speed_min`: 球面速度下限，低于该值时直接输出零速度
-- `--enable_angular`: 是否输出角速度
-- `--angular_speed_max`: 角速度上限，限制输出 `omega` 范数
-- `--max_frames`: 最多处理多少帧，默认 `500`
-- `--terminate`: 退出时是否执行后处理；关闭时不会进入保存帧和 `omni.terminate()` 阶段
-- `--save_fisher_snapshots`: 仅保存首帧和尾帧的 Fisher 点云快照，避免逐帧球形速度场可视化计算
-
-一个更接近日常调参的启动示例：
+### 兼容别名（内部仍走 tf_native）
 
 ```bash
 python info_flow/info_flow_node.py \
   --config config/rtabmap_config.yaml \
-  --fisher_step_scale 5e-6 \
-  --linear_vel_max 0.03 \
-  --angular_gain 1.5 \
-  --radial_gain 0.1 \
-  --angular_speed_max 0.8 \
-  --grad_eps 0.01 \
-  --save_fisher_snapshots \
-  --max_frames 300
+  --slam_frontend_mode rtabmap_native
 ```
 
-## 低频接口参数
+### legacy_tf 回滚
 
-- `--config`: OmniMap 配置文件
-- `--rgb_topic`: RGB 图像 topic
-- `--depth_topic`: 深度图 topic
-- `--camera_info_topic`: 相机内参 topic
-- `--world_frame`: TF 世界坐标系
-- `--camera_frame`: TF 相机坐标系
-- `--cmd_topic`: 输出速度命令 topic，默认 `/servo_server/delta_twist_camera`
-- `--cmd_frame`: `TwistStamped.header.frame_id`，默认 `base_link`
-- `--depth_scale`: 深度缩放系数
+```bash
+python info_flow/info_flow_node.py \
+  --config config/rtabmap_config.yaml \
+  --slam_frontend_mode legacy_tf \
+  --rgb_topic /cam_1/color/image_raw/compressed \
+  --depth_topic /cam_1/aligned_depth_to_color/image_raw/compressed
+```
 
-## 失效保护
+## 关键参数
 
-以下场景会发布零 `TwistStamped`：
+- 前端与位姿：
+  - `--slam_frontend_mode {tf_native,rtabmap_native,legacy_tf}`
+  - `--rgb_topic`
+  - `--depth_topic`
+  - `--camera_info_topic`
+  - `--world_frame`（默认 `base_link`）
+  - `--camera_frame`（默认 `cam_1_color_optical_frame`）
+  - `--sync_slop_sec`（默认 `0.12`，RGBD 同步窗口）
 
-- TF 查询失败
-- 图像转换失败
-- Fisher 状态尚未就绪
-- 控制器判定应停止
+- 关键帧门控：
+  - `--keyframe_min_interval_sec`（默认 `0.10`）
+  - `--keyframe_min_translation_m`（默认 `0.01`）
+  - `--keyframe_min_rotation_deg`（默认 `1.0`）
+  - 强制关键帧间隔固定 30 帧（代码常量）
+
+- 规划与实时性：
+  - `--planner_hz`（默认 `30.0`）
+  - `--pose_stale_timeout_sec`（默认 `0.2`）
+  - `--track_queue_size`（默认 `2`）
+  - `--max_frames`（默认 `500`）
+
+- 兼容保留但已弃用（tf_native 下不生效）：
+  - `--slam_odom_topic`
+  - `--odom_info_topic`
+
+## 验收与诊断
+
+- 控制输出频率（目标 `>=20Hz`）：
+
+```bash
+rostopic hz /servo_server/delta_twist_camera
+```
+
+- TF 可用性：
+
+```bash
+rosrun tf tf_echo base_link cam_1_color_optical_frame
+```
+
+- 关注日志统计字段：
+  - 门控：`gate_passed / gate_interval / gate_motion / gate_forced`
+  - 队列：`enqueued / dropped`
+  - 跟踪：`track_ok / track_fail / snapshot_ok / snapshot_fail`
+  - 规划：`planner_nonzero / planner_zero` 及零速原因细分
 
 ## 退出行为
 
-- 默认最多处理 `500` 帧，到达上限后自动停止
-- 默认 `--no-terminate`，按下 `Ctrl+C` 或达到帧上限时不会进入 `saving frames`
-- 如果显式传入 `--terminate`，节点退出时才会执行 `omni.terminate()`，并在 `--output` 有效时保存轨迹与 RGBD
-- 如果显式传入 `--save_fisher_snapshots`，节点会在首帧和退出时各导出一次 Fisher 点云快照到 `output/nbv_vis/`
+- 达到 `--max_frames` 自动停止
+- 退出前始终发布零速
+- `--terminate` 开启时执行 `omni.terminate()`，并按需保存轨迹
+- `--save_fisher_snapshots` 开启时保存首帧/末帧 Fisher 快照

@@ -46,8 +46,8 @@ tsdf:
   block_count: 30000
   unregistered_threshold: 0.005
   depth_scale: 1000.0
-  depth_max: 2000.0
-  spatial_bounds: [-1.0, -0.2, -0.4, 0.4, -0.3, 0.5]
+  depth_max: 20.0
+  # spatial_bounds: [-1.0, -0.2, -0.4, 0.4, -0.3, 0.5]
 
 
 instance:

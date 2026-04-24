@@ -13,6 +13,7 @@ import numpy as np
 import torch
 
 from .pose_utils import assert_pose_roundtrip, c2w_to_posevec
+from omnimap.util.utils import get_logger, should_log_step
 
 
 def _ensure_omnimap_import_paths() -> Path:
@@ -83,7 +84,6 @@ def build_fisher_debug_config_overrides(
     fisher_idw_power: float | None = None,
     fisher_display_radius_scale: float | None = None,
     fisher_arrow_radius_scale: float | None = None,
-    headless_update_fisher_every_frame: bool | None = None,
 ) -> Dict[str, Any]:
     """将仿真侧 Fisher 调试开关转换为 OmniMap 配置覆盖项。"""
     overrides: Dict[str, Any] = {}
@@ -112,10 +112,6 @@ def build_fisher_debug_config_overrides(
         overrides["fisher_display_radius_scale"] = float(fisher_display_radius_scale)
     if fisher_arrow_radius_scale is not None:
         overrides["fisher_arrow_radius_scale"] = float(fisher_arrow_radius_scale)
-    if headless_update_fisher_every_frame is not None:
-        overrides["headless_update_fisher_every_frame"] = bool(
-            headless_update_fisher_every_frame
-        )
     return overrides
 
 
@@ -162,6 +158,7 @@ class OmniMapRunner:
         max_depth_m: Optional[float] = None,
         progress_bar: Optional[Any] = None,
         verbose: bool = True,
+        log_every: int = 10,
     ) -> None:
         _ensure_omnimap_import_paths()
         from omni import OMNI
@@ -174,8 +171,14 @@ class OmniMapRunner:
         self.args = args
         self.config = dict(config)
         self.max_depth_m = None if max_depth_m is None else float(max_depth_m)
+        if self.max_depth_m is not None:
+            tsdf_cfg = dict(self.config.get("tsdf", {}))
+            tsdf_cfg["depth_max"] = float(self.max_depth_m)
+            self.config["tsdf"] = tsdf_cfg
         self.progress_bar = progress_bar or _NullProgressBar()
         self.verbose = bool(verbose)
+        self.log_every = max(1, int(log_every))
+        self.logger = get_logger("core.runner")
 
         if self.args.output != "None":
             Path(self.args.output).mkdir(parents=True, exist_ok=True)
@@ -194,6 +197,7 @@ class OmniMapRunner:
         max_depth_m: Optional[float] = None,
         config_overrides: Optional[Mapping[str, Any]] = None,
         verbose: bool = True,
+        log_every: int = 10,
     ) -> "OmniMapRunner":
         args = build_default_omnimap_args(
             output=output,
@@ -212,6 +216,7 @@ class OmniMapRunner:
             config=config,
             max_depth_m=max_depth_m,
             verbose=verbose,
+            log_every=log_every,
         )
 
     @staticmethod
@@ -316,12 +321,16 @@ class OmniMapRunner:
         )
 
         if self.verbose:
-            print(
-                f"[OmniMapRunner] idx={result.idx} cam_pos={result.camera_position} "
+            message = (
+                f"idx={result.idx} cam_pos={result.camera_position} "
                 f"depth_min={result.depth_min_m:.4f} depth_max={result.depth_max_m:.4f} "
                 f"initialized={result.gs_initialized} keyframes={result.num_keyframes} "
                 f"gaussians={result.num_gaussians}"
             )
+            if should_log_step(result.idx, self.log_every):
+                self.logger.info(message)
+            else:
+                self.logger.debug(message)
         return result
 
     def terminate(self) -> None:
@@ -331,11 +340,10 @@ class OmniMapRunner:
         num_gaussians = len(gs.gaussians.get_xyz)
 
         if num_keyframes == 0 or num_gaussians == 0:
-            print(
-                "[OmniMapRunner] Skip omni.terminate(): "
-                f"keyframes={num_keyframes}, gaussians={num_gaussians}. "
-                "The Phase-2 smoke test ran, but the current inputs did not produce "
-                "a non-empty map for offline evaluation/export."
+            self.logger.warning(
+                "skip terminate: keyframes=%d gaussians=%d",
+                num_keyframes,
+                num_gaussians,
             )
             if hasattr(self.progress_bar, "close"):
                 self.progress_bar.close()
@@ -352,3 +360,31 @@ class OmniMapRunner:
         if export_fn is None:
             return
         export_fn(tag=tag)
+
+    def export_fisher_snapshot(
+        self,
+        *,
+        pose_c2w: np.ndarray,
+        idx: int,
+        tag: str = "final",
+    ) -> None:
+        """Force one Fisher field build for the given pose and export snapshot artifacts."""
+        gs = self.omni.gs
+        export_fn = getattr(gs, "export_fisher_snapshot", None)
+        if export_fn is None:
+            return
+
+        latest_viewpoint = getattr(gs, "viewpoint", None)
+        if latest_viewpoint is None:
+            keyviews = getattr(gs, "keyviewpoints", None)
+            if keyviews:
+                latest_viewpoint = keyviews[-1]
+        if latest_viewpoint is None:
+            return
+
+        export_fn(
+            viewpoint=latest_viewpoint,
+            pose=np.asarray(pose_c2w, dtype=np.float64),
+            idx=int(idx),
+            tag=str(tag),
+        )

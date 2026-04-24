@@ -20,7 +20,7 @@ import distinctipy
 import cv2
 import open3d as o3d
 import open3d.core as o3c
-from util.utils import Log
+from util.utils import get_section_logger, should_log_step
 import numpy as np
 import torch
 # from inst_class import InstFrame
@@ -40,8 +40,15 @@ from visual_module import timeit
 class TSDFBackEnd():
     def __init__(self, config, save_dir, vis_gui):
         super().__init__()
+        self.logger = get_section_logger("tsdf.backend", "tsdf")
+        self._diag_log_every = int(config.get("diag_log_every", 30))
+        self._last_low_keep_ratio_warn_tstamp = -1
         self.device = torch.device("cuda")
         self.o3c_device = o3c.Device("CUDA:0")
+        if not torch.cuda.is_available():
+            self.logger.warning(
+                "TSDF 初始化前检测到 torch.cuda 不可用，Open3D CUDA 后端可能失败。"
+            )
         self.vis_gui = vis_gui
         self.save_dir = save_dir
         self.config = config
@@ -57,6 +64,10 @@ class TSDFBackEnd():
             bounds = self.config["tsdf"].get("spatial_bounds", None)
             if bounds is not None:
                 self.spatial_bounds = torch.tensor(bounds, device=self.device, dtype=torch.float32)
+                self.logger.info(
+                    "已启用空间边界过滤，bounds=%s",
+                    [float(v) for v in bounds],
+                )
             else:
                 self.use_spatial_bounds = False
         
@@ -89,6 +100,8 @@ class TSDFBackEnd():
         self.x_coords = None
         self.height = None
         self.all_pc = o3d.geometry.PointCloud()
+        self.last_spatial_keep_mask = None
+        self.last_spatial_mask_applied = False
         
         self.load_models()
         
@@ -322,12 +335,16 @@ class TSDFBackEnd():
         )
         
         return mask
+
+    def get_last_spatial_keep_mask(self):
+        if self.last_spatial_keep_mask is None:
+            return None
+        return self.last_spatial_keep_mask.clone()
             
     def integrate(self, color_im, depth_im, cam_intr, cam_pose, tstamp, obs_weight=1.0):
-        self.depth_im = depth_im.cuda()
-        color = o3d.t.geometry.Image(np.ascontiguousarray(color_im.cpu().numpy())).to(o3c.uint8).to(self.o3c_device)
-        depth_im = depth_im * self.depth_scale
-        depth = o3d.t.geometry.Image(np.ascontiguousarray(depth_im.cpu().numpy())).to(o3c.uint16).to(self.o3c_device)
+        depth_m = depth_im
+        depth_m_filtered = depth_m
+        color_im_filtered = color_im
         self.cam_pose = torch.inverse(cam_pose).to(self.device)
         cam_pose = np.linalg.inv(cam_pose.detach().cpu().numpy().astype(np.float64, copy=False))
         extrinsic = o3c.Tensor.from_numpy(cam_pose)
@@ -337,14 +354,20 @@ class TSDFBackEnd():
             cam_intr = cam_intr.detach().cpu().numpy().astype(np.float64, copy=False)
             intrinsic_np =  np.array([cam_intr[0], 0.0, cam_intr[2], 0.0, cam_intr[1], cam_intr[3], 0.0, 0.0, 1.0], dtype=np.float64).reshape(3,3)
             self.intrinsic = o3c.Tensor.from_numpy(intrinsic_np)
-            
+
+        if self.height is None:
+            self.height, self.width = depth_m_filtered.shape[:2]
+
+        spatial_keep_mask = torch.ones(
+            (self.height, self.width), dtype=torch.bool, device=self.device
+        )
+        self.last_spatial_mask_applied = False
+
         if self.use_spatial_bounds:
             # 1. 将深度图转换为点云
-            if self.height is None:
-                self.height, self.width = depth_im.shape[:2]
-            
+            depth_im_scaled = depth_m_filtered * self.depth_scale
             temp_coords, temp_valid = self.depth_to_point_cloud(
-                depth_im.cpu().numpy(), 
+                depth_im_scaled.cpu().numpy(),
                 extrinsic, 
                 self.intrinsic, 
                 self.width, 
@@ -355,19 +378,53 @@ class TSDFBackEnd():
             # 2. 过滤超出范围的点
             bounds_mask = self.filter_points_by_bounds(temp_coords)
             
-            # 3. 将无效点的深度设为 0（不参与 TSDF 融合）
-            if bounds_mask.sum() < temp_valid.sum():
-                # 将掩码映射回深度图
-                depth_mask = torch.zeros_like(depth_im, dtype=torch.bool).cuda()
-                depth_mask = depth_mask.permute(1, 0).reshape(-1)
-                depth_mask[temp_valid] = bounds_mask[temp_valid]
-                depth_mask = depth_mask.reshape(self.width, self.height).permute(1, 0)
-                
-                # 修改深度图
-                depth_im_filtered = depth_im.clone()
-                depth_im_filtered[~depth_mask] = 0
-                depth = o3d.t.geometry.Image(np.ascontiguousarray(depth_im_filtered.cpu().numpy())).to(o3c.uint16).to(self.o3c_device)
-                
+            # 3. 将有效像素中的越界点映射回图像掩码（无效深度默认保留原 RGB）
+            keep_mask_flat = torch.ones(
+                self.width * self.height, dtype=torch.bool, device=self.device
+            )
+            keep_mask_flat[temp_valid] = bounds_mask[temp_valid]
+            spatial_keep_mask = keep_mask_flat.reshape(self.width, self.height).permute(1, 0)
+
+            if torch.any(~spatial_keep_mask):
+                spatial_keep_mask_local = spatial_keep_mask.to(depth_m_filtered.device)
+                depth_m_filtered = depth_m_filtered.clone()
+                depth_m_filtered[~spatial_keep_mask_local] = 0
+                color_im_filtered = color_im_filtered.clone()
+                color_im_filtered[~spatial_keep_mask_local] = 0
+                self.last_spatial_mask_applied = True
+
+        self.last_spatial_keep_mask = spatial_keep_mask
+        if self.use_spatial_bounds and should_log_step(tstamp, self._diag_log_every):
+            total_pixels = int(spatial_keep_mask.numel())
+            keep_pixels = int(spatial_keep_mask.sum().item())
+            keep_ratio = (keep_pixels / total_pixels) if total_pixels > 0 else 1.0
+            filtered_ratio = max(0.0, 1.0 - keep_ratio)
+            depth_nonzero_ratio = float((depth_m_filtered > 0).sum().item()) / float(
+                max(1, depth_m_filtered.numel())
+            )
+            self.logger.debug(
+                "frame=%d 空间掩码 applied=%s keep_ratio=%.2f%% filtered_ratio=%.2f%% depth_nonzero_ratio=%.2f%%",
+                int(tstamp),
+                bool(self.last_spatial_mask_applied),
+                keep_ratio * 100.0,
+                filtered_ratio * 100.0,
+                depth_nonzero_ratio * 100.0,
+            )
+            if keep_ratio < 0.02 and self._last_low_keep_ratio_warn_tstamp != int(tstamp):
+                self.logger.warning(
+                    "frame=%d 空间 keep_ratio 过低（%.2f%%），请检查 spatial_bounds 或相机位姿。",
+                    int(tstamp),
+                    keep_ratio * 100.0,
+                )
+                self._last_low_keep_ratio_warn_tstamp = int(tstamp)
+        self.depth_im = depth_m_filtered.cuda()
+        depth_im = depth_m_filtered * self.depth_scale
+        color = o3d.t.geometry.Image(
+            np.ascontiguousarray(color_im_filtered.cpu().numpy())
+        ).to(o3c.uint8).to(self.o3c_device)
+        depth = o3d.t.geometry.Image(
+            np.ascontiguousarray(depth_im.cpu().numpy())
+        ).to(o3c.uint16).to(self.o3c_device)
         
         # max_depth have been valued
         frustum_block_coords = self.world.compute_unique_block_coordinates(
@@ -392,8 +449,6 @@ class TSDFBackEnd():
         # voxel_indices = torch.utils.dlpack.from_dlpack(voxel_indices.to_dlpack())
         # voxel_indices = voxel_indices.transpose(0, 1) # (Mx8x8x8,4)
         
-        if self.height is None:
-            self.height, self.width = depth_im.shape[:2]
         # (N, 3)       (N,)
         self.obs_coords, depth_valid = self.depth_to_point_cloud(
             depth_im.cpu().numpy(), extrinsic, self.intrinsic, self.width, self.height, self.depth_scale
@@ -420,13 +475,21 @@ class TSDFBackEnd():
         if tstamp%self.instance_skip != 0:
             return
         
-        if self.use_spatial_bounds and tstamp % 10 == 0:  # 每10帧输出一次
-            total_points = depth_valid.sum().item()
-            filtered_points = self.all_vaild.sum().item()
-            filter_ratio = (total_points - filtered_points) / total_points * 100 if total_points > 0 else 0
-            Log(f"Frame {tstamp}: Filtered {filter_ratio:.1f}% points outside bounds", tag="TSDF")
+        if self.use_spatial_bounds and should_log_step(tstamp, self._diag_log_every):
+            total_pixels = int(self.last_spatial_keep_mask.numel())
+            keep_pixels = int(self.last_spatial_keep_mask.sum().item())
+            filter_ratio = (
+                (total_pixels - keep_pixels) / total_pixels * 100.0
+                if total_pixels > 0
+                else 0.0
+            )
+            self.logger.debug(
+                "frame=%d 边界过滤汇总 filtered_ratio=%.2f%%",
+                int(tstamp),
+                filter_ratio,
+            )
         
-        img = color_im.cpu().numpy()[:,:,::-1]
+        img = color_im_filtered.cpu().numpy()[:,:,::-1]
         '''[1] yolo-world'''
         data_info = dict(img=img, img_id=0, texts=self.yolo_texts)
         data_info = self.yolo_world_test_pipeline(data_info)
@@ -640,7 +703,7 @@ class TSDFBackEnd():
                 
         if (len(self.instance_feature)-self.last_num)>10:
             self.last_num = len(self.instance_feature)
-            Log(f"Now the number of instance is: {len(self.instance_feature)}", tag="Open-Instance" )
+            self.logger.info("当前实例数量：%d", len(self.instance_feature))
         if self.vis_gui:
             self.update_vis()
         return   
@@ -774,8 +837,11 @@ class TSDFBackEnd():
         
     def adjust_embed_capacity(self):
         if self.world.hashmap().capacity() > self.instance_id_vol.shape[0]:
-            print("!"*1000)
-            print("new hashmap", self.world.hashmap().capacity())
+            self.logger.warning(
+                "检测到哈希容量扩容：old=%d new=%d",
+                int(self.instance_id_vol.shape[0]),
+                int(self.world.hashmap().capacity()),
+            )
             delta = self.world.hashmap().capacity() - self.instance_id_vol.shape[0]
             self.instance_id_vol = torch.cat([self.instance_id_vol, torch.zeros(delta, self.block_resolution, self.block_resolution, self.block_resolution, 3).long().to(self.device)], dim=0)
             self.instance_pro_vol = torch.cat([self.instance_pro_vol, torch.zeros(delta, self.block_resolution, self.block_resolution, self.block_resolution, 4).long().to(self.device)], dim=0)
@@ -837,7 +903,11 @@ class TSDFBackEnd():
 
     def vis_ply_final(self, vis=False):        
         points, pc_colors, ins_colors, max_pro_instance_id, confidence_colors, unique_labels, labels_to_remove = self.get_all_voxels(if_confidence=True)
-        Log(f"Before move the instance is {len(unique_labels)}, after is {len(unique_labels)-len(labels_to_remove)}", tag="Open-Instance")
+        self.logger.info(
+            "实例过滤前=%d，过滤后=%d",
+            len(unique_labels),
+            len(unique_labels) - len(labels_to_remove),
+        )
         pc = o3d.geometry.PointCloud()
         pc.points = o3d.utility.Vector3dVector(points.cpu().numpy())
         pc.colors = o3d.utility.Vector3dVector(ins_colors.cpu().numpy())
