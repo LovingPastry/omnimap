@@ -159,3 +159,26 @@ rosrun tf tf_echo base_link cam_1_color_optical_frame
 - `--save_fisher_snapshots` 开启时保存首帧/末帧 Fisher 快照
 
 ## TODO 
+
+## 执行侧最小化部署
+
+如果执行侧主机已经具备 `ROS Noetic + MoveIt + ur_robot_driver`，建议不要继续复用算力侧的完整 `InfoFlow` 大环境，而是直接使用轻量执行入口：
+
+- 运行入口：[info_flow_servo_runtime.py](/home/fuyx/lanzc/omnimap/info_flow/info_flow_servo_runtime.py)
+- 环境脚本：[source_servo_env.sh](/home/fuyx/lanzc/omnimap/source_servo_env.sh)
+- 完整指南：[EXECUTION_SIDE_SETUP.md](/home/fuyx/lanzc/omnimap/info_flow/EXECUTION_SIDE_SETUP.md)
+
+轻量执行侧只保留：
+
+- `rospy`
+- `tf2_ros`
+- `numpy`
+- `scipy`
+- `omnimap_msgs`
+
+不再依赖：
+
+- `torch`
+- `OMNI.track`
+- `Fisher planner`
+- snapshot / gaussian backend
