@@ -1,0 +1,7 @@
+std_msgs/Header header
+string run_id
+uint32 model_version
+uint32 keyframe_idx
+string snapshot_uri
+float64 created_wall_time
+string runtime_device_hint

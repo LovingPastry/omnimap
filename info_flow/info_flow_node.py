@@ -69,6 +69,23 @@ class PoseState:
 
 
 @dataclass
+class SphericalCommand:
+    stamp: rospy.Time
+    wall_time: float
+    model_version: int
+    idx: int
+    dt: float
+    delta_theta: float
+    delta_phi: float
+    delta_r: float
+    reference_radius: float
+    reference_scene_center: np.ndarray
+    should_stop: bool
+    stop_reason: str
+    fisher_score: float
+
+
+@dataclass
 class PipelineStats:
     pose_updates: int = 0
     frame_candidates: int = 0
@@ -85,6 +102,12 @@ class PipelineStats:
     planner_zero_pose_stale: int = 0
     planner_zero_policy_stop: int = 0
     planner_zero_exception: int = 0
+    servo_steps: int = 0
+    servo_nonzero: int = 0
+    servo_zero: int = 0
+    servo_zero_missing_cmd: int = 0
+    servo_zero_pose_stale: int = 0
+    servo_zero_cmd_stale: int = 0
     gated_by_interval: int = 0
     gated_by_motion: int = 0
     gated_passed: int = 0
@@ -185,7 +208,18 @@ class InfoFlowROSNode:
         self.slam_odom_topic = str(args.slam_odom_topic)
         self.odom_info_topic = str(args.odom_info_topic)
         self.planner_hz = float(args.planner_hz)
+        self.servo_hz = float(args.servo_hz)
         self.pose_stale_timeout_sec = float(args.pose_stale_timeout_sec)
+        self.spherical_cmd_timeout_sec = float(args.spherical_cmd_timeout_sec)
+        self.planner_output_mode = str(args.planner_output_mode)
+        if self.planner_hz <= 0 or self.servo_hz <= 0:
+            raise ValueError(
+                f"planner_hz and servo_hz must be positive, got planner_hz={self.planner_hz}, servo_hz={self.servo_hz}"
+            )
+        if self.spherical_cmd_timeout_sec <= 0:
+            raise ValueError(
+                f"spherical_cmd_timeout_sec must be positive, got {self.spherical_cmd_timeout_sec}"
+            )
         self.sync_slop_sec = float(args.sync_slop_sec)
         self.start_wall_time = float(time.monotonic())
         self.status_log_interval_sec = max(0.2, float(args.status_log_interval_sec))
@@ -194,9 +228,16 @@ class InfoFlowROSNode:
         self._last_status_planner_steps = 0
         self._last_status_planner_nonzero = 0
         self._last_status_planner_zero = 0
+        self._last_status_servo_steps = 0
+        self._last_status_servo_nonzero = 0
+        self._last_status_servo_zero = 0
         self._last_queue_drop_log_wall = 0.0
         self._tf_diag_prev_pose_4x4 = None
         self._tf_diag_prev_stamp_sec = None
+        self._last_sync_cb_wall = 0.0
+        self._last_sync_stamp_sec = None
+        self._last_tf_success_wall = 0.0
+        self._last_tf_success_stamp_sec = None
 
         self.pose_lock = threading.Lock()
         self.latest_pose_state: Optional[PoseState] = None
@@ -204,6 +245,8 @@ class InfoFlowROSNode:
         self.snapshot_lock = threading.Lock()
         self.active_snapshot: Optional[PlannerSnapshot] = None
         self.model_version = 0
+        self.servo_lock = threading.Lock()
+        self.active_spherical_cmd: Optional[SphericalCommand] = None
 
         self.stats_lock = threading.Lock()
         self.stats = PipelineStats()
@@ -223,6 +266,7 @@ class InfoFlowROSNode:
             enable_angular=args.enable_angular,
             grad_eps=args.grad_eps,
             spherical_speed_min=args.spherical_speed_min,
+            planner_output_mode=self.planner_output_mode,
             verbose=True,
             # control_law_mode="dt_consistent",
         )
@@ -266,6 +310,10 @@ class InfoFlowROSNode:
         self.track_stop_event = None
         self.track_worker_thread = None
         self.planner_timer = None
+        self.servo_timer = None
+        self.spherical_cmd_pub = rospy.Publisher(
+            "/omnimap/spherical_cmd", TwistStamped, queue_size=1
+        )
 
         if requested_mode == "rtabmap_native":
             self.main_logger.info("slam_frontend_mode=rtabmap_native 已迁移为 tf_native（兼容别名）。")
@@ -289,6 +337,12 @@ class InfoFlowROSNode:
             "InfoFlowROSNode 初始化完成，模式=%s，TwistStamped 发布到 %s",
             self.mode,
             args.cmd_topic,
+        )
+        self.main_logger.info(
+            "控制输出模式：planner_output_mode=%s planner_hz=%.1f servo_hz=%.1f",
+            self.planner_output_mode,
+            float(self.planner_hz),
+            float(self.servo_hz),
         )
         self.main_logger.info(
             "前端位姿参数默认值：slam_frontend_mode=%s world_frame=%s camera_frame=%s",
@@ -323,6 +377,11 @@ class InfoFlowROSNode:
             rospy.Duration(1.0 / max(self.planner_hz, 1e-6)),
             self._planning_timer_callback,
         )
+        if self.planner_output_mode == "spherical_delta":
+            self.servo_timer = rospy.Timer(
+                rospy.Duration(1.0 / max(self.servo_hz, 1e-6)),
+                self._servo_timer_callback,
+            )
 
     def _setup_legacy_tf(self, args):
         self.tf_buffer = tf2_ros.Buffer()
@@ -453,6 +512,12 @@ class InfoFlowROSNode:
             steps = int(self.stats.planner_steps)
             nonzero = int(self.stats.planner_nonzero)
             zero = int(self.stats.planner_zero)
+            servo_steps = int(self.stats.servo_steps)
+            servo_nonzero = int(self.stats.servo_nonzero)
+            servo_zero = int(self.stats.servo_zero)
+            servo_zero_missing_cmd = int(self.stats.servo_zero_missing_cmd)
+            servo_zero_pose_stale = int(self.stats.servo_zero_pose_stale)
+            servo_zero_cmd_stale = int(self.stats.servo_zero_cmd_stale)
             zero_missing = int(self.stats.planner_zero_missing_input)
             zero_stale = int(self.stats.planner_zero_pose_stale)
             zero_stop = int(self.stats.planner_zero_policy_stop)
@@ -467,19 +532,30 @@ class InfoFlowROSNode:
         d_steps = steps - self._last_status_planner_steps
         d_nonzero = nonzero - self._last_status_planner_nonzero
         d_zero = zero - self._last_status_planner_zero
+        d_servo_steps = servo_steps - self._last_status_servo_steps
+        d_servo_nonzero = servo_nonzero - self._last_status_servo_nonzero
+        d_servo_zero = servo_zero - self._last_status_servo_zero
         plan_hz = d_steps / max(elapsed, 1e-6)
         cmd_hz = d_nonzero / max(elapsed, 1e-6)
         zero_hz = d_zero / max(elapsed, 1e-6)
+        servo_hz = d_servo_steps / max(elapsed, 1e-6)
+        servo_cmd_hz = d_servo_nonzero / max(elapsed, 1e-6)
+        servo_zero_hz = d_servo_zero / max(elapsed, 1e-6)
 
         self._last_status_log_wall = now
         self._last_status_planner_steps = steps
         self._last_status_planner_nonzero = nonzero
         self._last_status_planner_zero = zero
+        self._last_status_servo_steps = servo_steps
+        self._last_status_servo_nonzero = servo_nonzero
+        self._last_status_servo_zero = servo_zero
 
         self.planner_logger.info(
             (
                 "规划状态：model_v=%d plan_hz=%.1f cmd_hz=%.1f zero_hz=%.1f "
+                "servo_hz=%.1f servo_cmd_hz=%.1f servo_zero_hz=%.1f "
                 "累计(非零=%d 零速=%d) 零速原因(输入缺失=%d 位姿过期=%d 策略停止=%d 异常=%d) "
+                "servo累计(非零=%d 零速=%d) servo零速原因(命令缺失=%d 命令过期=%d 位姿过期=%d) "
                 "门控(通过=%d interval=%d motion=%d forced=%d) "
                 "跟踪成功=%d 队列=%d 丢弃=%d"
             ),
@@ -487,12 +563,20 @@ class InfoFlowROSNode:
             float(plan_hz),
             float(cmd_hz),
             float(zero_hz),
+            float(servo_hz),
+            float(servo_cmd_hz),
+            float(servo_zero_hz),
             int(nonzero),
             int(zero),
             int(zero_missing),
             int(zero_stale),
             int(zero_stop),
             int(zero_exc),
+            int(servo_nonzero),
+            int(servo_zero),
+            int(servo_zero_missing_cmd),
+            int(servo_zero_cmd_stale),
+            int(servo_zero_pose_stale),
             int(gate_passed),
             int(gate_interval),
             int(gate_motion),
@@ -511,13 +595,61 @@ class InfoFlowROSNode:
             return
 
         stamp = rgb_msg.header.stamp
+        stamp_sec = float(stamp.to_sec()) if stamp is not None else 0.0
+        now_sec = float(rospy.Time.now().to_sec())
+        cb_wall = float(time.monotonic())
+        cb_inter = cb_wall - self._last_sync_cb_wall if self._last_sync_cb_wall > 0.0 else -1.0
+        self._last_sync_cb_wall = cb_wall
+        self._last_sync_stamp_sec = float(stamp_sec)
+        self._log_throttle(
+            "tf_native_sync_cb",
+            1.0,
+            "info",
+            "RGBD同步回调触发：rgb_stamp=%.3f now=%.3f lag=%.3fs",
+            float(stamp_sec),
+            float(now_sec),
+            float(now_sec - stamp_sec),
+        )
+        self.profile_logger.debug(
+            "sync_cb: stamp=%.3f ros_lag=%.3fs inter_cb=%.3fs",
+            float(stamp_sec),
+            float(now_sec - stamp_sec),
+            float(cb_inter),
+        )
+        tf_t0 = time.perf_counter()
         pose_w2c, pose_4x4 = self.get_pose_from_tf(stamp)
+        tf_ms = (time.perf_counter() - tf_t0) * 1000.0
+        self.profile_logger.debug(
+            "tf_lookup: stamp=%.3f tf_ms=%.2f success=%s",
+            float(stamp_sec),
+            float(tf_ms),
+            bool(pose_w2c is not None),
+        )
         if pose_w2c is None:
+            self._log_throttle(
+                "tf_native_sync_tf_fail",
+                1.0,
+                "warning",
+                "RGBD同步已到达，但该帧TF查询失败：rgb_stamp=%.3f now=%.3f lag=%.3fs",
+                float(stamp_sec),
+                float(now_sec),
+                float(now_sec - stamp_sec),
+            )
             self.publish_zero_twist(stamp)
             return
 
         self._set_latest_pose(stamp, pose_4x4, pose_w2c)
-        stamp_sec = float(stamp.to_sec()) if stamp is not None else 0.0
+        self._last_tf_success_wall = float(time.monotonic())
+        self._last_tf_success_stamp_sec = float(stamp_sec)
+        self._log_throttle(
+            "tf_native_sync_tf_ok",
+            1.0,
+            "info",
+            "TF按图像时间戳查询成功：rgb_stamp=%.3f now=%.3f lag=%.3fs",
+            float(stamp_sec),
+            float(now_sec),
+            float(now_sec - stamp_sec),
+        )
         if self._tf_diag_prev_pose_4x4 is not None and self._tf_diag_prev_stamp_sec is not None:
             trans_m, rot_deg = self._pose_delta_metrics(self._tf_diag_prev_pose_4x4, pose_4x4)
             dt_sec = max(0.0, stamp_sec - float(self._tf_diag_prev_stamp_sec))
@@ -740,13 +872,28 @@ class InfoFlowROSNode:
 
         pose_age = float((rospy.Time.now() - pose_state.stamp).to_sec())
         if pose_age > self.pose_stale_timeout_sec:
+            now_wall = float(time.monotonic())
+            since_sync = float(now_wall - self._last_sync_cb_wall) if self._last_sync_cb_wall > 0.0 else -1.0
+            since_tf = float(now_wall - self._last_tf_success_wall) if self._last_tf_success_wall > 0.0 else -1.0
             self._planner_log_throttle(
                 "pose_stale",
                 2.0,
                 "warning",
-                "位姿已过期（age=%.3fs > %.3fs），发布零速度。",
+                (
+                    "位姿已过期（age=%.3fs > %.3fs），发布零速度。"
+                    "最近同步回调距今=%.3fs，最近TF成功距今=%.3fs"
+                ),
                 pose_age,
                 self.pose_stale_timeout_sec,
+                since_sync,
+                since_tf,
+            )
+            self.profile_logger.info(
+                "pose_stale(planner): pose_age=%.3fs since_sync_cb=%.3fs since_tf_ok=%.3fs stamp=%.3f",
+                float(pose_age),
+                float(since_sync),
+                float(since_tf),
+                float(pose_state.stamp.to_sec()),
             )
             self.publish_zero_twist(pose_state.stamp)
             planning_total_ms = (time.perf_counter() - planning_t0) * 1000.0
@@ -820,12 +967,30 @@ class InfoFlowROSNode:
             with self.stats_lock:
                 self.stats.planner_zero += 1
                 self.stats.planner_zero_policy_stop += 1
+            if self.planner_output_mode == "spherical_delta":
+                self._cache_spherical_command(
+                    motion_result=motion_result,
+                    stamp=pose_state.stamp,
+                    model_version=int(snapshot.model_version),
+                )
             self._maybe_log_planning_status()
             return
 
-        publish_t0 = time.perf_counter()
-        self.publish_motion_result(motion_result, pose_state.stamp)
-        publish_ms = (time.perf_counter() - publish_t0) * 1000.0
+        publish_ms = 0.0
+        if self.planner_output_mode == "spherical_delta":
+            self._cache_spherical_command(
+                motion_result=motion_result,
+                stamp=pose_state.stamp,
+                model_version=int(snapshot.model_version),
+            )
+            self._publish_spherical_diag(
+                motion_result=motion_result,
+                stamp=pose_state.stamp,
+            )
+        else:
+            publish_t0 = time.perf_counter()
+            self.publish_motion_result(motion_result, pose_state.stamp)
+            publish_ms = (time.perf_counter() - publish_t0) * 1000.0
         planning_total_ms = (time.perf_counter() - planning_t0) * 1000.0
         mp_timing = getattr(self.motion_policy, "last_timing", {}) or {}
         fisher_ms = float(mp_timing.get("fisher_ms", float("nan")))
@@ -841,9 +1006,259 @@ class InfoFlowROSNode:
             float(publish_ms),
             int(self.model_version),
         )
+        self._planner_log_throttle(
+            "planner_cmd_diag",
+            1.0,
+            "debug",
+            "planner_cmd: mode=%s idx=%d theta_phi_cmd=(%.6f, %.6f) spherical_cmd_age_ms=0.0 cartesian_cmd_norm=%.6f",
+            self.planner_output_mode,
+            int(self.planner_tick),
+            float(getattr(motion_result, "delta_theta_applied", 0.0)),
+            float(getattr(motion_result, "delta_phi_applied", 0.0)),
+            float(np.linalg.norm(np.asarray(getattr(motion_result, "velocity_world", np.zeros(3)), dtype=np.float64))),
+        )
         with self.stats_lock:
             self.stats.planner_nonzero += 1
         self._maybe_log_planning_status()
+
+    def _cache_spherical_command(
+        self,
+        *,
+        motion_result,
+        stamp: rospy.Time,
+        model_version: int,
+    ) -> None:
+        cmd = SphericalCommand(
+            stamp=stamp,
+            wall_time=float(time.monotonic()),
+            model_version=int(model_version),
+            idx=int(getattr(motion_result, "idx", self.planner_tick)),
+            dt=float(getattr(motion_result, "dt", self.motion_policy.dt)),
+            delta_theta=float(getattr(motion_result, "delta_theta_applied", 0.0)),
+            delta_phi=float(getattr(motion_result, "delta_phi_applied", 0.0)),
+            delta_r=0.0,
+            reference_radius=float(getattr(motion_result, "reference_radius", 0.0)),
+            reference_scene_center=np.asarray(
+                getattr(motion_result, "reference_scene_center", [0.0, 0.0, 0.0]),
+                dtype=np.float64,
+            ).reshape(3),
+            should_stop=bool(getattr(motion_result, "should_stop", False)),
+            stop_reason=str(getattr(motion_result, "stop_reason", "unknown")),
+            fisher_score=float(getattr(motion_result, "fisher_score", 0.0)),
+        )
+        with self.servo_lock:
+            self.active_spherical_cmd = cmd
+
+    def _publish_spherical_diag(self, *, motion_result, stamp: rospy.Time) -> None:
+        msg = TwistStamped()
+        msg.header.stamp = stamp if stamp is not None else rospy.Time.now()
+        msg.header.frame_id = self.cmd_frame
+        msg.twist.angular.x = float(getattr(motion_result, "delta_theta_applied", 0.0))
+        msg.twist.angular.y = float(getattr(motion_result, "delta_phi_applied", 0.0))
+        msg.twist.angular.z = float(getattr(motion_result, "dt", self.motion_policy.dt))
+        msg.twist.linear.x = float(getattr(motion_result, "reference_radius", 0.0))
+        msg.twist.linear.y = float(getattr(motion_result, "fisher_score", 0.0))
+        self.spherical_cmd_pub.publish(msg)
+
+    @staticmethod
+    def _position_to_spherical(position: np.ndarray, scene_center: np.ndarray) -> Tuple[float, float, float]:
+        offset = np.asarray(position, dtype=np.float64).reshape(3) - np.asarray(
+            scene_center, dtype=np.float64
+        ).reshape(3)
+        radius = float(np.linalg.norm(offset))
+        if radius < 1e-12:
+            raise ValueError("position is too close to scene center")
+        n_hat = offset / radius
+        theta = float(np.arctan2(n_hat[1], n_hat[0]) % (2.0 * np.pi))
+        phi = float(np.arcsin(np.clip(n_hat[2], 0.0, 1.0)))
+        return radius, theta, phi
+
+    @staticmethod
+    def _local_frame_from_theta_phi(theta: float, phi: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        ct, st = float(np.cos(theta)), float(np.sin(theta))
+        cp, sp = float(np.cos(phi)), float(np.sin(phi))
+        e_theta = np.array([-cp * st, cp * ct, 0.0], dtype=np.float64)
+        e_phi = np.array([-sp * ct, -sp * st, cp], dtype=np.float64)
+        n_hat = np.array([cp * ct, cp * st, sp], dtype=np.float64)
+        return e_theta, e_phi, n_hat
+
+    @staticmethod
+    def _look_at_c2w(eye: np.ndarray, target: np.ndarray) -> np.ndarray:
+        eye = np.asarray(eye, dtype=np.float64).reshape(3)
+        target = np.asarray(target, dtype=np.float64).reshape(3)
+        up = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+
+        forward = target - eye
+        forward_norm = np.linalg.norm(forward)
+        if forward_norm < 1e-12:
+            raise ValueError("eye and target are too close")
+        forward = forward / forward_norm
+
+        right = np.cross(forward, up)
+        right_norm = np.linalg.norm(right)
+        if right_norm < 1e-12:
+            fallback_up = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+            right = np.cross(forward, fallback_up)
+            right_norm = np.linalg.norm(right)
+            if right_norm < 1e-12:
+                raise ValueError("failed to construct right axis")
+        right = right / right_norm
+        true_up = np.cross(right, forward)
+        true_up = true_up / max(np.linalg.norm(true_up), 1e-12)
+        down = -true_up
+
+        c2w = np.eye(4, dtype=np.float64)
+        c2w[:3, 0] = right
+        c2w[:3, 1] = down
+        c2w[:3, 2] = forward
+        c2w[:3, 3] = eye
+        return c2w
+
+    def _servo_timer_callback(self, _event) -> None:
+        if self.shutdown_requested:
+            return
+        with self.stats_lock:
+            self.stats.servo_steps += 1
+
+        with self.pose_lock:
+            pose_state = self.latest_pose_state
+        if pose_state is None:
+            self.publish_zero_twist()
+            with self.stats_lock:
+                self.stats.servo_zero += 1
+                self.stats.servo_zero_missing_cmd += 1
+            return
+        pose_age = float((rospy.Time.now() - pose_state.stamp).to_sec())
+        if pose_age > self.pose_stale_timeout_sec:
+            now_wall = float(time.monotonic())
+            since_sync = float(now_wall - self._last_sync_cb_wall) if self._last_sync_cb_wall > 0.0 else -1.0
+            since_tf = float(now_wall - self._last_tf_success_wall) if self._last_tf_success_wall > 0.0 else -1.0
+            self._planner_log_throttle(
+                "servo_pose_stale",
+                1.0,
+                "warning",
+                "servo 位姿过期（age=%.3fs > %.3fs），发布零速度。",
+                pose_age,
+                self.pose_stale_timeout_sec,
+            )
+            self.profile_logger.info(
+                "pose_stale(servo): pose_age=%.3fs since_sync_cb=%.3fs since_tf_ok=%.3fs stamp=%.3f",
+                float(pose_age),
+                float(since_sync),
+                float(since_tf),
+                float(pose_state.stamp.to_sec()),
+            )
+            self.publish_zero_twist(pose_state.stamp)
+            with self.stats_lock:
+                self.stats.servo_zero += 1
+                self.stats.servo_zero_pose_stale += 1
+            return
+
+        with self.servo_lock:
+            cmd = self.active_spherical_cmd
+        if cmd is None:
+            self.publish_zero_twist(pose_state.stamp)
+            with self.stats_lock:
+                self.stats.servo_zero += 1
+                self.stats.servo_zero_missing_cmd += 1
+            return
+        cmd_age = float(time.monotonic() - cmd.wall_time)
+        if cmd_age > self.spherical_cmd_timeout_sec:
+            self._planner_log_throttle(
+                "servo_cmd_stale",
+                1.0,
+                "warning",
+                "servo 命令过期（age=%.3fs > %.3fs），发布零速度。",
+                cmd_age,
+                self.spherical_cmd_timeout_sec,
+            )
+            self.publish_zero_twist(pose_state.stamp)
+            with self.stats_lock:
+                self.stats.servo_zero += 1
+                self.stats.servo_zero_cmd_stale += 1
+            return
+        if cmd.should_stop:
+            self.publish_zero_twist(pose_state.stamp)
+            with self.stats_lock:
+                self.stats.servo_zero += 1
+            return
+
+        try:
+            current_c2w = np.asarray(pose_state.pose_4x4, dtype=np.float64)
+            current_position = current_c2w[:3, 3]
+            reference_scene_center = np.asarray(
+                cmd.reference_scene_center, dtype=np.float64
+            ).reshape(3)
+            radius, theta, phi = self._position_to_spherical(
+                current_position,
+                reference_scene_center,
+            )
+            e_theta, e_phi, _ = self._local_frame_from_theta_phi(theta, phi)
+            theta_rate = float(cmd.delta_theta)
+            phi_rate = float(cmd.delta_phi)
+            linear_cmd = radius * (theta_rate * e_theta + phi_rate * e_phi)
+            linear_norm_raw = float(np.linalg.norm(linear_cmd))
+            linear_scale = 1.0
+            if linear_norm_raw > float(self.motion_policy.linear_vel_max):
+                linear_scale = float(self.motion_policy.linear_vel_max) / max(
+                    linear_norm_raw, 1e-12
+                )
+                linear_cmd = linear_cmd * linear_scale
+
+            desired_c2w = self._look_at_c2w(current_position, reference_scene_center)
+            current_rotation = np.asarray(current_c2w[:3, :3], dtype=np.float64)
+            desired_rotation = np.asarray(desired_c2w[:3, :3], dtype=np.float64)
+            rotation_error = desired_rotation @ current_rotation.T
+            rotvec_error = R.from_matrix(rotation_error).as_rotvec().astype(np.float64)
+            angular_cmd = np.zeros(3, dtype=np.float64)
+            if (
+                bool(self.motion_policy.enable_angular)
+                and float(np.linalg.norm(rotvec_error))
+                > float(self.motion_policy.angular_speed_deadband)
+            ):
+                angular_cmd = rotvec_error / max(float(cmd.dt), 1e-6)
+                omega_norm_raw = float(np.linalg.norm(angular_cmd))
+                if omega_norm_raw > float(self.motion_policy.angular_speed_max):
+                    angular_cmd = angular_cmd * (
+                        float(self.motion_policy.angular_speed_max)
+                        / max(omega_norm_raw, 1e-12)
+                    )
+            self.publish_motion_components(
+                linear_cmd=linear_cmd,
+                angular_cmd=angular_cmd,
+                stamp=pose_state.stamp,
+            )
+            with self.stats_lock:
+                self.stats.servo_nonzero += 1
+            self._planner_log_throttle(
+                "servo_cmd_diag",
+                1.0,
+                "debug",
+                (
+                    "servo_cmd: planner_rate=%.1f servo_rate=%.1f spherical_cmd_age_ms=%.1f "
+                    "theta_phi_cmd=(%.6f, %.6f) cartesian_cmd_norm=%.6f sat_ratio=%.3f fallback_reason=%s"
+                ),
+                float(self.planner_hz),
+                float(self.servo_hz),
+                cmd_age * 1000.0,
+                theta_rate,
+                phi_rate,
+                float(np.linalg.norm(linear_cmd)),
+                1.0 - float(linear_scale),
+                "none",
+            )
+        except Exception as exc:
+            self._planner_log_throttle(
+                "servo_exception",
+                1.0,
+                "warning",
+                "servo 执行异常，发布零速度：%s",
+                exc,
+            )
+            self.publish_zero_twist(pose_state.stamp)
+            with self.stats_lock:
+                self.stats.servo_zero += 1
+                self.stats.servo_zero_missing_cmd += 1
 
     def _apply_fixed_hemisphere_reference(self) -> None:
         """Temporary override: lock hemisphere center/radius to configured constants."""
@@ -1014,7 +1429,20 @@ class InfoFlowROSNode:
             tf2_ros.ConnectivityException,
             tf2_ros.ExtrapolationException,
         ) as exc:
-            self.main_logger.warning("位姿查询 TF 失败：%s", exc)
+            stamp_sec = float(stamp.to_sec()) if stamp is not None else 0.0
+            now_sec = float(rospy.Time.now().to_sec())
+            self._log_throttle(
+                "tf_lookup_failure_detail",
+                1.0,
+                "warning",
+                "位姿查询TF失败：world=%s camera=%s rgb_stamp=%.3f now=%.3f lag=%.3fs err=%s",
+                self.world_frame,
+                self.camera_frame,
+                float(stamp_sec),
+                float(now_sec),
+                float(now_sec - stamp_sec),
+                exc,
+            )
             return None, None
 
     def publish_zero_twist(self, stamp=None):
@@ -1031,6 +1459,20 @@ class InfoFlowROSNode:
         linear = np.asarray(motion_result.velocity_world, dtype=np.float64).reshape(3)
         angular = np.asarray(motion_result.angular_velocity_world, dtype=np.float64).reshape(3)
 
+        msg.twist.linear.x = float(linear[0])
+        msg.twist.linear.y = float(linear[1])
+        msg.twist.linear.z = float(linear[2])
+        msg.twist.angular.x = float(angular[0])
+        msg.twist.angular.y = float(angular[1])
+        msg.twist.angular.z = float(angular[2])
+        self.cmd_pub.publish(msg)
+
+    def publish_motion_components(self, *, linear_cmd: np.ndarray, angular_cmd: np.ndarray, stamp=None):
+        msg = TwistStamped()
+        msg.header.stamp = stamp if stamp is not None else rospy.Time.now()
+        msg.header.frame_id = self.cmd_frame
+        linear = np.asarray(linear_cmd, dtype=np.float64).reshape(3)
+        angular = np.asarray(angular_cmd, dtype=np.float64).reshape(3)
         msg.twist.linear.x = float(linear[0])
         msg.twist.linear.y = float(linear[1])
         msg.twist.linear.z = float(linear[2])
@@ -1063,6 +1505,16 @@ class InfoFlowROSNode:
 
         if motion_result.should_stop:
             self.publish_zero_twist(stamp)
+            return
+
+        if self.planner_output_mode == "spherical_delta":
+            self._cache_spherical_command(
+                motion_result=motion_result,
+                stamp=stamp,
+                model_version=int(self.model_version),
+            )
+            self._publish_spherical_diag(motion_result=motion_result, stamp=stamp)
+            self._servo_timer_callback(None)
             return
 
         self.publish_motion_result(motion_result, stamp)
@@ -1214,6 +1666,8 @@ class InfoFlowROSNode:
         if self.mode == "tf_native":
             if self.planner_timer is not None:
                 self.planner_timer.shutdown()
+            if self.servo_timer is not None:
+                self.servo_timer.shutdown()
             if self.track_stop_event is not None:
                 self.track_stop_event.set()
             if self.track_queue is not None:
@@ -1223,6 +1677,10 @@ class InfoFlowROSNode:
 
     def terminate(self):
         self.publish_zero_twist()
+        if self.planner_timer is not None:
+            self.planner_timer.shutdown()
+        if self.servo_timer is not None:
+            self.servo_timer.shutdown()
 
         if self.mode == "tf_native":
             if self.track_stop_event is not None:
@@ -1256,6 +1714,8 @@ class InfoFlowROSNode:
                 "track_ok=%d track_fail=%d snapshot_ok=%d snapshot_fail=%d "
                 "planner_steps=%d planner_nonzero=%d planner_zero=%d "
                 "planner_zero_missing=%d planner_zero_stale=%d planner_zero_stop=%d planner_zero_exc=%d "
+                "servo_steps=%d servo_nonzero=%d servo_zero=%d "
+                "servo_zero_missing_cmd=%d servo_zero_cmd_stale=%d servo_zero_pose_stale=%d "
                 "gate_passed=%d gate_interval=%d gate_motion=%d gate_forced=%d"
             ),
             stats.pose_updates,
@@ -1273,6 +1733,12 @@ class InfoFlowROSNode:
             stats.planner_zero_pose_stale,
             stats.planner_zero_policy_stop,
             stats.planner_zero_exception,
+            stats.servo_steps,
+            stats.servo_nonzero,
+            stats.servo_zero,
+            stats.servo_zero_missing_cmd,
+            stats.servo_zero_cmd_stale,
+            stats.servo_zero_pose_stale,
             stats.gated_passed,
             stats.gated_by_interval,
             stats.gated_by_motion,
@@ -1375,6 +1841,25 @@ def build_argparser():
         type=float,
         default=30.0,
         help="planning loop frequency (Hz) for tf_native mode",
+    )
+    parser.add_argument(
+        "--servo_hz",
+        type=float,
+        default=50.0,
+        help="servo publish loop frequency (Hz) used in spherical_delta mode",
+    )
+    parser.add_argument(
+        "--planner_output_mode",
+        type=str,
+        default="cartesian_legacy",
+        choices=("cartesian_legacy", "spherical_delta"),
+        help="planner output mode: legacy cartesian Twist or spherical delta command",
+    )
+    parser.add_argument(
+        "--spherical_cmd_timeout_sec",
+        type=float,
+        default=0.25,
+        help="timeout for cached spherical command before forcing zero Twist",
     )
     parser.add_argument(
         "--pose_stale_timeout_sec",

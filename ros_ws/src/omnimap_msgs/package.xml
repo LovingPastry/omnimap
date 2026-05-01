@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>omnimap_msgs</name>
+  <version>0.0.1</version>
+  <description>Minimal internal message package for distributed InfoFlow nodes.</description>
+
+  <maintainer email="fuyx@example.com">fuyx</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <build_depend>message_generation</build_depend>
+  <build_depend>std_msgs</build_depend>
+
+  <exec_depend>message_runtime</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+</package>

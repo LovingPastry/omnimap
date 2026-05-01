@@ -249,6 +249,7 @@ class MotionPolicyResult:
     speed_clipped: bool
     should_stop: bool
     stop_reason: str
+    planner_output_mode: str = "cartesian_legacy"
 
     def to_jsonable(self) -> dict[str, object]:
         data = asdict(self)
@@ -281,6 +282,10 @@ class FisherMotionPolicy:
         "gain",
         "dt_consistent",
     }
+    _SUPPORTED_PLANNER_OUTPUT_MODES = {
+        "cartesian_legacy",
+        "spherical_delta",
+    }
 
     def __init__(
         self,
@@ -301,6 +306,7 @@ class FisherMotionPolicy:
         phi_max: float | None = None,
         orientation_roll_mode: str = "world_up_lookat",
         control_law_mode: str = "gain",
+        planner_output_mode: str = "cartesian_legacy",
         verbose: bool = True,
     ) -> None:
         if not np.isfinite(fisher_step_scale):
@@ -343,6 +349,12 @@ class FisherMotionPolicy:
                 f"{sorted(self._SUPPORTED_CONTROL_LAW_MODES)}, "
                 f"got {control_law_mode!r}"
             )
+        if planner_output_mode not in self._SUPPORTED_PLANNER_OUTPUT_MODES:
+            raise ValueError(
+                "planner_output_mode must be one of "
+                f"{sorted(self._SUPPORTED_PLANNER_OUTPUT_MODES)}, "
+                f"got {planner_output_mode!r}"
+            )
 
         self.fisher_step_scale = float(fisher_step_scale)
         self.controller_mode = "cartesian" if cartesian else "angular"
@@ -363,6 +375,7 @@ class FisherMotionPolicy:
         self.phi_max = float(math.pi / 2.0 - 1e-3 if phi_max is None else phi_max)
         self.orientation_roll_mode = str(orientation_roll_mode)
         self.control_law_mode = str(control_law_mode)
+        self.planner_output_mode = str(planner_output_mode)
         self.verbose = bool(verbose)
         self.logger = get_section_logger("planner.motion_policy", "planner")
         self._omega_cmd_preclip_norm = 0.0
@@ -536,6 +549,7 @@ class FisherMotionPolicy:
             speed_clipped=bool(speed_clipped),
             should_stop=True,
             stop_reason="below_min_speed",
+            planner_output_mode="cartesian_legacy",
         )
 
     @staticmethod
@@ -688,6 +702,7 @@ class FisherMotionPolicy:
             speed_clipped=bool(clipped_spherical_speed),
             should_stop=False,
             stop_reason="normal_step",
+            planner_output_mode=self.planner_output_mode,
         )
 
     @staticmethod
@@ -1211,6 +1226,7 @@ class FisherMotionPolicy:
                 speed_clipped=False,
                 clip_scale_ratio=1.0,
             )
+            stop_result.planner_output_mode = self.planner_output_mode
             policy_total_ms = (time.perf_counter() - policy_t0) * 1000.0
             self.last_timing = {
                 "fisher_ms": float(fisher_ms),
@@ -1256,6 +1272,99 @@ class FisherMotionPolicy:
             phi_rate_unclipped = float(scaled_spherical_velocity[1])
             theta_rate = float(applied_spherical_velocity[0])
             phi_rate = float(applied_spherical_velocity[1])
+            if self.planner_output_mode == "spherical_delta":
+                next_theta = self._wrap_theta(current_theta + theta_rate * self.dt)
+                next_phi = self._clamp_phi(current_phi + phi_rate * self.dt)
+                next_position = (
+                    reference_scene_center
+                    + current_radius * _spherical_direction(next_theta, next_phi)
+                )
+                desired_c2w = self._compute_desired_orientation(
+                    current_position=current_position,
+                    reference_scene_center=reference_scene_center,
+                    current_c2w=current_c2w,
+                )
+                next_c2w = current_c2w.copy()
+                next_c2w[:3, 3] = next_position
+                next_c2w[:3, :3] = desired_c2w[:3, :3]
+                radial_error = float(current_radius - reference_radius)
+                s2c_ms = (time.perf_counter() - s2c_t0) * 1000.0
+                result = MotionPolicyResult(
+                    idx=int(idx),
+                    viewpoint_source=viewpoint_source,
+                    controller_mode=self.controller_mode,
+                    cartesian=self.cartesian,
+                    current_c2w=current_c2w,
+                    next_c2w=next_c2w,
+                    scene_center=reference_scene_center.tolist(),
+                    reference_scene_center=reference_scene_center.tolist(),
+                    look_at_target=reference_scene_center.tolist(),
+                    desired_c2w=desired_c2w,
+                    radius=float(reference_radius),
+                    reference_radius=float(reference_radius),
+                    current_radius=float(current_radius),
+                    radial_error=radial_error,
+                    dt=self.dt,
+                    current_theta=current_theta,
+                    current_phi=current_phi,
+                    next_theta=next_theta,
+                    next_phi=next_phi,
+                    grad_theta_raw=grad_theta,
+                    grad_phi_raw=grad_phi,
+                    grad_norm_raw=grad_norm,
+                    grad_theta_compressed=float(grad_theta_compressed),
+                    grad_phi_compressed=float(grad_phi_compressed),
+                    grad_norm_compressed=float(grad_norm_compressed),
+                    num_gaussians=int(gaussian_count),
+                    fisher_score=float(current_result.score),
+                    scaled_theta=theta_rate_unclipped,
+                    scaled_phi=phi_rate_unclipped,
+                    delta_theta_applied=theta_rate,
+                    delta_phi_applied=phi_rate,
+                    velocity_raw_world=np.zeros(3, dtype=np.float64),
+                    vt_world=np.zeros(3, dtype=np.float64),
+                    vn_world=np.zeros(3, dtype=np.float64),
+                    velocity_world=np.zeros(3, dtype=np.float64),
+                    rotvec_error=np.zeros(3, dtype=np.float64),
+                    angular_velocity_world=np.zeros(3, dtype=np.float64),
+                    angular_speed_raw=0.0,
+                    angular_speed_applied=0.0,
+                    angular_gain=float(self.angular_gain),
+                    enable_angular=bool(self.enable_angular),
+                    next_position=next_position.astype(np.float64).tolist(),
+                    step_scale_theta=float(effective_step_scale),
+                    step_scale_phi=float(effective_step_scale),
+                    linear_speed_limit=float(self.linear_vel_max),
+                    linear_speed_raw=0.0,
+                    linear_speed_applied=0.0,
+                    spherical_speed_limit=float("nan"),
+                    spherical_speed_min=float(spherical_speed_min),
+                    spherical_speed_raw=float(math.hypot(grad_theta, grad_phi)),
+                    spherical_speed_scaled=float(np.linalg.norm(scaled_spherical_velocity)),
+                    spherical_speed_applied=float(np.linalg.norm(applied_spherical_velocity)),
+                    clip_scale_ratio=float(clip_scale_ratio),
+                    speed_clipped=bool(clipped_spherical_speed),
+                    should_stop=False,
+                    stop_reason="normal_step",
+                    planner_output_mode="spherical_delta",
+                )
+                if self.verbose:
+                    self.logger.debug(
+                        "idx=%d mode=%s src=%s spherical_delta=(%.6f, %.6f) stop=%s",
+                        result.idx,
+                        result.controller_mode,
+                        result.viewpoint_source,
+                        result.delta_theta_applied,
+                        result.delta_phi_applied,
+                        result.should_stop,
+                    )
+                policy_total_ms = (time.perf_counter() - policy_t0) * 1000.0
+                self.last_timing = {
+                    "fisher_ms": float(fisher_ms),
+                    "s2c_ms": float(s2c_ms),
+                    "policy_total_ms": float(policy_total_ms),
+                }
+                return result
             vt_world = current_radius * (theta_rate * e_theta + phi_rate * e_phi)
             vn_world, radial_error = self._cal_e_t(
                 current_position=current_position,
@@ -1462,6 +1571,7 @@ class FisherMotionPolicy:
             speed_clipped=bool(clipped_spherical_speed),
             should_stop=False,
             stop_reason="normal_step",
+            planner_output_mode=self.planner_output_mode,
         )
 
         if self.verbose:

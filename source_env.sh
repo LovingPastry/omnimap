@@ -1,6 +1,13 @@
-conda deactivate
-conda deactivate
-conda activate InfoFlow
+if [ "${OMNIMAP_SKIP_CONDA:-0}" != "1" ] && command -v conda >/dev/null 2>&1; then
+    __conda_setup="$(conda shell.bash hook 2>/dev/null)"
+    if [ $? -eq 0 ]; then
+        eval "$__conda_setup"
+    fi
+    unset __conda_setup
+    conda deactivate >/dev/null 2>&1 || true
+    conda deactivate >/dev/null 2>&1 || true
+    conda activate InfoFlow >/dev/null 2>&1 || true
+fi
 source /opt/ros/noetic/setup.bash
 # export AM_I_DOCKER=False
 # export BUILD_WITH_CUDA=True
@@ -13,3 +20,6 @@ export ROS_MASTER_URI=http://172.19.93.154:11311
 export ROS_HOSTNAME=172.19.73.218
 export ROS_IP=172.19.73.218
 
+if [ -f /home/fuyx/lanzc/omnimap/ros_ws/devel/setup.bash ]; then
+    source /home/fuyx/lanzc/omnimap/ros_ws/devel/setup.bash
+fi

@@ -241,7 +241,7 @@ After building the map, the results will be saved in folder `outputs/{scene}`, w
 - `planner`：主动视角规划与策略控制
 - `profile`：性能计时与 `timeit` 剖析日志
 
-日志等级：
+日志等级： 
 
 - `DEBUG`：最详细调试信息
 - `INFO`：常规运行信息

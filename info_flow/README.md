@@ -22,7 +22,10 @@
 
 - Tracking/Planning 解耦（`tf_native`）：
   - Tracking worker 独立线程消费队列，执行 `OMNI.track(...)`，完成后构建并原子切换 `PlannerSnapshot`。
-  - Planning loop 使用 `rospy.Timer` 固定频率运行（默认 30Hz），始终基于“当前快照 + 最新位姿”计算速度。
+  - Planning loop 使用 `rospy.Timer` 固定频率运行，始终基于“当前快照 + 最新位姿”。
+  - 当 `--planner_output_mode spherical_delta` 时，额外启用高频 Servo timer：
+    - planner 低频输出球坐标增量命令；
+    - servo 高频在线转换为笛卡尔 `TwistStamped`。
 
 ## 数据流（tf_native）
 
@@ -57,6 +60,28 @@ python info_flow/info_flow_node.py \
   --cmd_frame base_link \
   --max_frames 500
 ```
+### 速度场相关参数
+```bash
+python info_flow/info_flow_node.py \
+  --planner_output_mode spherical_delta \
+  --planner_hz 10 \
+  --servo_hz 50 \
+  --spherical_cmd_timeout_sec 0.25 \
+  --keyframe_min_interval_sec 0.10 \
+  --keyframe_min_translation_m 0.01 \
+  --keyframe_min_rotation_deg 1.0 \
+  --track_queue_size 2 \
+  --fisher_step_scale 1e-5 \
+  --grad_eps 0.01 \
+  --dt 1.0 \
+  --spherical_speed_min 0.0 \
+  --linear_vel_max 0.05 \
+  --angular_speed_max 0.5 \
+  --enable_angular \
+  --log_section fisher --log_section planner \
+  --log_min_level INFO
+```
+
 
 ### 兼容别名（内部仍走 tf_native）
 
@@ -95,6 +120,9 @@ python info_flow/info_flow_node.py \
 
 - 规划与实时性：
   - `--planner_hz`（默认 `30.0`）
+  - `--servo_hz`（默认 `50.0`，仅 `spherical_delta` 模式生效）
+  - `--planner_output_mode {cartesian_legacy,spherical_delta}`（默认 `cartesian_legacy`）
+  - `--spherical_cmd_timeout_sec`（默认 `0.25`）
   - `--pose_stale_timeout_sec`（默认 `0.2`）
   - `--track_queue_size`（默认 `2`）
   - `--max_frames`（默认 `500`）
@@ -129,3 +157,5 @@ rosrun tf tf_echo base_link cam_1_color_optical_frame
 - 退出前始终发布零速
 - `--terminate` 开启时执行 `omni.terminate()`，并按需保存轨迹
 - `--save_fisher_snapshots` 开启时保存首帧/末帧 Fisher 快照
+
+## TODO 

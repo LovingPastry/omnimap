@@ -99,3 +99,6 @@ Thumbs.db
 # Logs
 *.log
 sim/sim_outputs/
+ros_ws/build/
+ros_ws/devel/
+ros_ws/logs/
