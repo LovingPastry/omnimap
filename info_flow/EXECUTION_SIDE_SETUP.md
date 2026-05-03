@@ -35,16 +35,24 @@
 
 ---
 
-## 2. 最小 Python 环境
+## 2. 最小 Conda 环境
 
-推荐使用系统 Python3 对应的极简 venv，而不是算力侧的 `InfoFlow` 大环境。
+推荐使用独立的极简 conda 环境，而不是算力侧的 `InfoFlow` 大环境。
 
-创建 venv：
+创建 conda 环境（推荐环境名：`infoflow-servo`）：
 
 ```bash
-python3 -m venv ~/venvs/infoflow-servo
-source ~/venvs/infoflow-servo/bin/activate
+conda create -n infoflow-servo python=3.10 -y
+conda activate infoflow-servo
 python -m pip install --upgrade pip
+python -m pip install -r info_flow/requirements-servo.txt
+```
+
+如果当前机器没有可写的 conda 默认 env 目录，可改用前缀路径：
+
+```bash
+conda create -p /path/to/.conda_envs/infoflow-servo python=3.10 -y
+conda activate /path/to/.conda_envs/infoflow-servo
 python -m pip install -r info_flow/requirements-servo.txt
 ```
 
@@ -79,10 +87,16 @@ python -m pip install -r info_flow/requirements-servo.txt
 
 ## 4. 配置执行侧环境
 
-推荐先设置 venv 路径：
+推荐先设置 conda 环境名：
 
 ```bash
-export SERVO_VENV_PATH=~/venvs/infoflow-servo
+export SERVO_CONDA_ENV=infoflow-servo
+```
+
+如果你使用的是前缀路径环境，则设置为绝对路径：
+
+```bash
+export SERVO_CONDA_ENV=/path/to/.conda_envs/infoflow-servo
 ```
 
 然后加载环境：
@@ -93,7 +107,7 @@ source source_servo_env.sh
 
 这个脚本只做三件事：
 
-- 激活你指定的极简 venv
+- 激活你指定的极简 conda 环境（兼容旧版 venv 变量）
 - source `/opt/ros/noetic/setup.bash`
 - source `ros_ws/devel/setup.bash`
 
