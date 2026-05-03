@@ -3,10 +3,37 @@
 # Lightweight execution-side environment for info_flow_servo_runtime.py
 # Assumes ROS Noetic and robot-side stack are already installed.
 
-if [ -n "${VIRTUAL_ENV:-}" ]; then
+_activate_servo_conda() {
+    local target="${1:-}"
+    if [ -z "$target" ]; then
+        return 1
+    fi
+
+    if ! command -v conda >/dev/null 2>&1; then
+        return 1
+    fi
+
+    local conda_base
+    conda_base="$(conda info --base 2>/dev/null || true)"
+    if [ -z "$conda_base" ] || [ ! -f "$conda_base/etc/profile.d/conda.sh" ]; then
+        return 1
+    fi
+
+    # shellcheck disable=SC1090
+    source "$conda_base/etc/profile.d/conda.sh"
+    conda activate "$target"
+}
+
+if [ -n "${CONDA_PREFIX:-}" ]; then
+    # keep user-selected conda env
+    :
+elif [ -n "${SERVO_CONDA_ENV:-}" ]; then
+    _activate_servo_conda "${SERVO_CONDA_ENV}" || echo "[source_servo_env] WARN: failed to activate SERVO_CONDA_ENV=${SERVO_CONDA_ENV}"
+elif [ -n "${VIRTUAL_ENV:-}" ]; then
     # keep user-selected venv
     :
 elif [ -n "${SERVO_VENV_PATH:-}" ] && [ -f "${SERVO_VENV_PATH}/bin/activate" ]; then
+    # legacy fallback for venv users
     # shellcheck disable=SC1090
     source "${SERVO_VENV_PATH}/bin/activate"
 fi
