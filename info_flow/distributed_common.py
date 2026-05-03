@@ -65,6 +65,20 @@ def load_runtime_config(config_path: str) -> dict:
     config = load_config(config_path)
     config.setdefault("fisher_num_samples", 128)
     config.setdefault("fisher_num_dense_points", 1024)
+    mc = config.setdefault("motion_control", {})
+    mc.setdefault("linear_vel_max", 0.05)
+    mc.setdefault("angular_speed_max", 1.0)
+    mc.setdefault("enable_angular", True)
+    mc.setdefault("planner_hz", 30.0)
+    mc.setdefault("pose_stale_timeout_sec", 0.2)
+    mc.setdefault("fisher_step_scale", 1e-5)
+    mc.setdefault("angular_gain", 2.0)
+    mc.setdefault("radial_gain", 0.2)
+    mc.setdefault("dt", 1.0)
+    mc.setdefault("grad_eps", 0.01)
+    mc.setdefault("spherical_speed_min", 0.0)
+    mc.setdefault("servo_hz", 50.0)
+    mc.setdefault("spherical_cmd_timeout_sec", 0.25)
     return config
 
 

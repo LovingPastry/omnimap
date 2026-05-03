@@ -248,3 +248,27 @@ def look_at_c2w(eye: np.ndarray, target: np.ndarray) -> np.ndarray:
     c2w[:3, 2] = forward
     c2w[:3, 3] = eye
     return c2w
+
+
+def load_servo_motion_config(config_path: str) -> dict:
+    """从 YAML 配置文件中读取 motion_control 块，返回合并了默认值的字典。"""
+    defaults = {
+        "linear_vel_max": 0.05,
+        "angular_speed_max": 1.0,
+        "enable_angular": True,
+        "servo_hz": 50.0,
+        "spherical_cmd_timeout_sec": 0.25,
+        "pose_stale_timeout_sec": 0.2,
+    }
+    if not config_path:
+        return defaults
+    try:
+        import yaml
+        with open(config_path, "r") as f:
+            raw = yaml.safe_load(f) or {}
+        mc = raw.get("motion_control", {}) if isinstance(raw, dict) else {}
+        merged = {**defaults, **mc}
+        return merged
+    except Exception:
+        return defaults
+    return c2w

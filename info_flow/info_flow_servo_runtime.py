@@ -16,6 +16,7 @@ from servo_runtime_common import (
     configure_servo_logging,
     get_section_logger,
     import_spherical_command_msg,
+    load_servo_motion_config,
     local_frame_from_theta_phi,
     lookup_latest_pose_from_tf,
     look_at_c2w,
@@ -94,10 +95,7 @@ class InfoFlowServoRuntime:
         self._throttle_last = {}
 
         self.main_logger.info(
-            (
-                "轻量 Servo runtime 已启动：spherical_cmd_topic=%s cmd_topic=%s servo_hz=%.1f "
-                "cmd_timeout=%.3fs adaptive_scale=%.2f adaptive_cap=%.3fs"
-            ),
+            ("轻量 Servo runtime 已启动：spherical_cmd_topic=%s cmd_topic=%s servo_hz=%.1f cmd_timeout=%.3fs adaptive_scale=%.2f adaptive_cap=%.3fs"),
             args.spherical_cmd_topic,
             args.cmd_topic,
             float(self.servo_hz),
@@ -156,10 +154,7 @@ class InfoFlowServoRuntime:
         self._last_status_steps = int(stats.servo_steps)
         self._last_status_nonzero = int(stats.servo_nonzero)
         self.planner_logger.info(
-            (
-                "Servo 状态：servo_hz=%.1f cmd_hz=%.1f 累计(steps=%d nonzero=%d "
-                "missing_cmd=%d cmd_stale=%d pose_stale=%d tf_fail=%d policy_stop=%d exc=%d)"
-            ),
+            ("Servo 状态：servo_hz=%.1f cmd_hz=%.1f 累计(steps=%d nonzero=%d missing_cmd=%d cmd_stale=%d pose_stale=%d tf_fail=%d policy_stop=%d exc=%d)"),
             float(d_steps / max(elapsed, 1e-6)),
             float(d_nonzero / max(elapsed, 1e-6)),
             int(stats.servo_steps),
@@ -282,9 +277,7 @@ class InfoFlowServoRuntime:
                 angular_cmd = rotvec_error / max(float(cmd.dt), 1e-6)
                 omega_norm_raw = float(np.linalg.norm(angular_cmd))
                 if omega_norm_raw > self.angular_speed_max:
-                    angular_cmd = angular_cmd * (
-                        self.angular_speed_max / max(omega_norm_raw, 1e-12)
-                    )
+                    angular_cmd = angular_cmd * (self.angular_speed_max / max(omega_norm_raw, 1e-12))
 
             publish_motion_components(
                 self.cmd_pub,
@@ -320,20 +313,20 @@ def build_argparser():
     parser = argparse.ArgumentParser(
         description="Lightweight InfoFlow servo runtime for execution-side hosts.",
     )
-    parser.add_argument("-c", "--config", type=str, default="", help="reserved for compatibility; unused by lightweight runtime")
+    parser.add_argument("-c", "--config", type=str, default="config/rtabmap_config.yaml", help="YAML config file path")
     parser.add_argument("--spherical_cmd_topic", type=str, default="/omnimap/spherical_cmd")
     parser.add_argument("--cmd_topic", type=str, default="/servo_server/delta_twist_camera")
     parser.add_argument("--cmd_frame", type=str, default="base_link")
     parser.add_argument("--world_frame", type=str, default="base_link")
     parser.add_argument("--camera_frame", type=str, default="cam_1_color_optical_frame")
-    parser.add_argument("--servo_hz", type=float, default=50.0)
-    parser.add_argument("--spherical_cmd_timeout_sec", type=float, default=0.25)
+    parser.add_argument("--servo_hz", type=float, default=None)
+    parser.add_argument("--spherical_cmd_timeout_sec", type=float, default=None)
     parser.add_argument("--adaptive_cmd_timeout_scale", type=float, default=1.5)
     parser.add_argument("--adaptive_cmd_timeout_cap_sec", type=float, default=0.5)
-    parser.add_argument("--pose_stale_timeout_sec", type=float, default=0.2)
-    parser.add_argument("--linear_vel_max", type=float, default=0.05)
-    parser.add_argument("--angular_speed_max", type=float, default=1.0)
-    parser.add_argument("--enable_angular", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--pose_stale_timeout_sec", type=float, default=None)
+    parser.add_argument("--linear_vel_max", type=float, default=None)
+    parser.add_argument("--angular_speed_max", type=float, default=None)
+    parser.add_argument("--enable_angular", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("-o", "--output", type=str, default=f"replica/output/{time.strftime('%Y%m%d_%H%M%S')}")
     parser.add_argument("--log_level", type=str, default="INFO")
     parser.add_argument("--log_file", action=argparse.BooleanOptionalAction, default=False)
@@ -348,5 +341,18 @@ if __name__ == "__main__":
     os.makedirs(args.output, exist_ok=True)
     log_file = os.path.join(args.output, "servo_runtime.log") if bool(args.log_file) else None
     configure_servo_logging(level=args.log_level, log_file=log_file, force=True)
+
+    mc = load_servo_motion_config(args.config)
+
+    def _resolve(cli_val, yaml_val):
+        return cli_val if cli_val is not None else yaml_val
+
+    args.servo_hz                 = _resolve(args.servo_hz,                 mc["servo_hz"])
+    args.spherical_cmd_timeout_sec = _resolve(args.spherical_cmd_timeout_sec, mc["spherical_cmd_timeout_sec"])
+    args.pose_stale_timeout_sec   = _resolve(args.pose_stale_timeout_sec,   mc["pose_stale_timeout_sec"])
+    args.linear_vel_max           = _resolve(args.linear_vel_max,           mc["linear_vel_max"])
+    args.angular_speed_max        = _resolve(args.angular_speed_max,        mc["angular_speed_max"])
+    args.enable_angular           = _resolve(args.enable_angular,           mc["enable_angular"])
+
     node = InfoFlowServoRuntime(args)
     rospy.spin()

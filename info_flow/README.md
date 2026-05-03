@@ -160,6 +160,8 @@ rosrun tf tf_echo base_link cam_1_color_optical_frame
 
 ## 三环解耦运行
 
+速度规划相关参数（`linear_vel_max`、`angular_speed_max`、`servo_hz` 等）已统一写入 `config/rtabmap_config.yaml` 的 `motion_control` 块，无需在命令行重复指定。CLI 参数仍可用于临时覆盖 YAML 中的值。
+
 1. 在算力端运行Tracking节点
 ```bash
 source source_env.sh
@@ -186,12 +188,7 @@ python info_flow/info_flow_planning_node.py \
 ```bash
 source source_servo_env.sh
 python info_flow/info_flow_servo_runtime.py \
-  --servo_hz 50   \
-  --spherical_cmd_timeout_sec 0.25   \
-  --pose_stale_timeout_sec 0.2   \
-  --linear_vel_max 0.05   \
-  --angular_speed_max 0.5   \
-  --enable_angular   \
+  --config config/rtabmap_config.yaml \
   --log_level INFO
 ```
 
