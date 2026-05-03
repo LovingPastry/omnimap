@@ -384,9 +384,13 @@ class FisherMotionPolicy:
         self.reference_radius: Optional[float] = None
         self.reference_initialized = False
         self.last_timing: dict[str, float] = {
+            "history_ms": 0.0,
+            "score_ms": 0.0,
+            "gradient_ms": 0.0,
             "fisher_ms": 0.0,
             "s2c_ms": 0.0,
             "policy_total_ms": 0.0,
+            "history_source": "missing",
         }
 
         if not (0.0 <= self.phi_min <= self.phi_max <= math.pi / 2.0):
@@ -758,19 +762,48 @@ class FisherMotionPolicy:
         *,
         gs_backend: Any,
         hemi_cam: Any,
-    ) -> tuple[Any, float, float]:
+    ) -> tuple[Any, float, float, dict[str, float]]:
         """Compute Fisher score and raw theta/phi gradient at the current hemisphere pose."""
         fisher_eval = gs_backend.fisher_eval
-        history_stat = fisher_eval.compute_history_stat(gs_backend.keyviewpoints)
+        history_t0 = time.perf_counter()
+        cached_history = getattr(fisher_eval, "precomputed_history_stat", None)
+        history_source = "missing"
+        if cached_history is not None:
+            history_source = "precomputed"
+        elif getattr(gs_backend, "keyviewpoints", None):
+            history_source = "recomputed"
+        history_stat = fisher_eval.get_history_stat(gs_backend.keyviewpoints, prefer_cached=True)
+        history_ms = (time.perf_counter() - history_t0) * 1000.0
+
+        score_t0 = time.perf_counter()
         current_result = fisher_eval.compute_view_score(hemi_cam, history_stat)
+        score_ms = (time.perf_counter() - score_t0) * 1000.0
+
+        gradient_t0 = time.perf_counter()
         grad_theta_phi = fisher_eval.compute_view_gradient(
             hemi_cam,
             history_stat,
             eps=self.grad_eps,
         )
+        gradient_ms = (time.perf_counter() - gradient_t0) * 1000.0
         grad_theta = float(grad_theta_phi[0].item())
         grad_phi = float(grad_theta_phi[1].item())
-        return current_result, grad_theta, grad_phi
+        timing = {
+            "history_ms": float(history_ms),
+            "score_ms": float(score_ms),
+            "gradient_ms": float(gradient_ms),
+            "history_source": str(history_source),
+        }
+        if self.verbose:
+            self.logger.debug(
+                "idx=%d fisher_timing history=%.2fms score=%.2fms gradient=%.2fms source=%s",
+                int(getattr(hemi_cam, "uid", -1) if hasattr(hemi_cam, "uid") else -1),
+                float(history_ms),
+                float(score_ms),
+                float(gradient_ms),
+                str(history_source),
+            )
+        return current_result, grad_theta, grad_phi, timing
 
     def _cal_e_n(
         self,
@@ -1159,7 +1192,7 @@ class FisherMotionPolicy:
 
         # 1) Evaluate Fisher and raw angular gradient at the current viewpoint.
         fisher_t0 = time.perf_counter()
-        current_result, grad_theta, grad_phi = self._get_grad(
+        current_result, grad_theta, grad_phi, grad_timing = self._get_grad(
             gs_backend=gs_backend,
             hemi_cam=hemi_cam,
         )
@@ -1229,9 +1262,13 @@ class FisherMotionPolicy:
             stop_result.planner_output_mode = self.planner_output_mode
             policy_total_ms = (time.perf_counter() - policy_t0) * 1000.0
             self.last_timing = {
+                "history_ms": float(grad_timing.get("history_ms", 0.0)),
+                "score_ms": float(grad_timing.get("score_ms", 0.0)),
+                "gradient_ms": float(grad_timing.get("gradient_ms", 0.0)),
                 "fisher_ms": float(fisher_ms),
                 "s2c_ms": float(s2c_ms),
                 "policy_total_ms": float(policy_total_ms),
+                "history_source": str(grad_timing.get("history_source", "missing")),
             }
             if self.verbose:
                 self.logger.debug(
@@ -1360,9 +1397,13 @@ class FisherMotionPolicy:
                     )
                 policy_total_ms = (time.perf_counter() - policy_t0) * 1000.0
                 self.last_timing = {
+                    "history_ms": float(grad_timing.get("history_ms", 0.0)),
+                    "score_ms": float(grad_timing.get("score_ms", 0.0)),
+                    "gradient_ms": float(grad_timing.get("gradient_ms", 0.0)),
                     "fisher_ms": float(fisher_ms),
                     "s2c_ms": float(s2c_ms),
                     "policy_total_ms": float(policy_total_ms),
+                    "history_source": str(grad_timing.get("history_source", "missing")),
                 }
                 return result
             vt_world = current_radius * (theta_rate * e_theta + phi_rate * e_phi)
@@ -1495,9 +1536,13 @@ class FisherMotionPolicy:
                 )
             policy_total_ms = (time.perf_counter() - policy_t0) * 1000.0
             self.last_timing = {
+                "history_ms": float(grad_timing.get("history_ms", 0.0)),
+                "score_ms": float(grad_timing.get("score_ms", 0.0)),
+                "gradient_ms": float(grad_timing.get("gradient_ms", 0.0)),
                 "fisher_ms": float(fisher_ms),
                 "s2c_ms": float(s2c_ms),
                 "policy_total_ms": float(policy_total_ms),
+                "history_source": str(grad_timing.get("history_source", "missing")),
             }
             return result
 
@@ -1603,9 +1648,13 @@ class FisherMotionPolicy:
             )
         policy_total_ms = (time.perf_counter() - policy_t0) * 1000.0
         self.last_timing = {
+            "history_ms": float(grad_timing.get("history_ms", 0.0)),
+            "score_ms": float(grad_timing.get("score_ms", 0.0)),
+            "gradient_ms": float(grad_timing.get("gradient_ms", 0.0)),
             "fisher_ms": float(fisher_ms),
             "s2c_ms": float(s2c_ms),
             "policy_total_ms": float(policy_total_ms),
+            "history_source": str(grad_timing.get("history_source", "missing")),
         }
         return result
 

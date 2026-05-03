@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import math
+from typing import Any, Dict, Optional
 
 import torch
 
@@ -42,6 +43,8 @@ class LegacyFisherEvaluator:
         self.config = config
         self.reg_lambda = float(config.get("fisher_reg_lambda", 0.1))
         self.keyviewpoints = []
+        self.precomputed_history_stat: Optional[torch.Tensor] = None
+        self.precomputed_history_meta: Dict[str, Any] = {}
 
     def _zero_stat(self) -> torch.Tensor:
         params = [self.gaussians.capture()[1], self.gaussians.capture()[6]]
@@ -76,6 +79,32 @@ class LegacyFisherEvaluator:
             raw_grad = self._compute_current_raw_grad(keyframe)
             history_stat += self._current_stat_from_raw_grad(raw_grad)
         return history_stat
+
+    def set_precomputed_history_stat(self, history_stat: Optional[torch.Tensor]) -> None:
+        if history_stat is None:
+            self.precomputed_history_stat = None
+            self.precomputed_history_meta = {}
+            return
+        params = [self.gaussians.capture()[1], self.gaussians.capture()[6]]
+        device = params[0].device
+        dtype = params[0].dtype
+        history_tensor = torch.as_tensor(history_stat, device=device, dtype=dtype).detach().clone()
+        self.precomputed_history_stat = history_tensor
+        self.precomputed_history_meta = {
+            "shape": tuple(history_tensor.shape),
+            "device": str(history_tensor.device),
+            "dtype": str(history_tensor.dtype),
+        }
+
+    def get_history_stat(
+        self,
+        keyviewpoints=None,
+        *,
+        prefer_cached: bool = True,
+    ) -> torch.Tensor:
+        if prefer_cached and self.precomputed_history_stat is not None:
+            return self.precomputed_history_stat
+        return self.compute_history_stat(keyviewpoints)
 
     def compute_view_score(
         self, cam: Camera, history_stat: torch.Tensor
@@ -173,7 +202,7 @@ class LegacyFisherEvaluator:
         idx: int,
     ) -> HemisphereFieldResult:
         base_hemi = HemisphereCamera.from_camera(viewpoint, scene_center)
-        history_stat = self.compute_history_stat(None)
+        history_stat = self.get_history_stat(None)
         current_result = self.compute_view_score(base_hemi, history_stat)
         current_grad_theta_phi = self.compute_view_gradient(base_hemi, history_stat)
         current_dir = self._current_view_dir(base_hemi)
@@ -252,7 +281,7 @@ class LegacyFisherEvaluator:
             )
 
         base_hemi = HemisphereCamera.from_camera(viewpoint, scene_center)
-        history_stat = self.compute_history_stat(None)
+        history_stat = self.get_history_stat(None)
 
         sample_dirs = fibonacci_hemisphere_dirs(num_samples, scene_center.device)
         fisher_vals = []

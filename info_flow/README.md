@@ -158,7 +158,42 @@ rosrun tf tf_echo base_link cam_1_color_optical_frame
 - `--terminate` 开启时执行 `omni.terminate()`，并按需保存轨迹
 - `--save_fisher_snapshots` 开启时保存首帧/末帧 Fisher 快照
 
-## TODO 
+## 三环解耦运行
+
+1. 在算力端运行Tracking节点
+```bash
+source source_env.sh
+python info_flow/info_flow_tracking_node.py \
+  --config config/rtabmap_config.yaml \
+  --log_profile debug \
+  --log_section profile \
+  --log_section main \
+  --log_min_level DEBUG
+```
+
+2. 在算力端运行Planning节点
+```bash
+source source_env.sh
+python info_flow/info_flow_planning_node.py \
+  --config config/rtabmap_config.yaml \
+  --log_section planner \
+  --log_section profile \
+  --log_min_level DEBUG \
+  --log_profile debug
+```
+
+3. 在执行侧运行Servo节点
+```bash
+source source_servo_env.sh
+python info_flow/info_flow_servo_runtime.py \
+  --servo_hz 50   \
+  --spherical_cmd_timeout_sec 0.25   \
+  --pose_stale_timeout_sec 0.2   \
+  --linear_vel_max 0.05   \
+  --angular_speed_max 0.5   \
+  --enable_angular   \
+  --log_level INFO
+```
 
 ## 执行侧最小化部署
 

@@ -58,6 +58,11 @@ class InfoFlowServoRuntime:
         self.servo_hz = float(args.servo_hz)
         self.pose_stale_timeout_sec = float(args.pose_stale_timeout_sec)
         self.spherical_cmd_timeout_sec = float(args.spherical_cmd_timeout_sec)
+        self.adaptive_cmd_timeout_scale = max(1.0, float(args.adaptive_cmd_timeout_scale))
+        self.adaptive_cmd_timeout_cap_sec = max(
+            self.spherical_cmd_timeout_sec,
+            float(args.adaptive_cmd_timeout_cap_sec),
+        )
         self.linear_vel_max = float(args.linear_vel_max)
         self.angular_speed_max = float(args.angular_speed_max)
         self.enable_angular = bool(args.enable_angular)
@@ -68,6 +73,8 @@ class InfoFlowServoRuntime:
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
         self.cmd_pub = rospy.Publisher(args.cmd_topic, TwistStamped, queue_size=1)
         self.latest_cmd: Optional[CachedSphericalCommand] = None
+        self._last_cmd_receipt_wall: Optional[float] = None
+        self._cmd_interval_ema_sec: Optional[float] = None
 
         self.cmd_sub = rospy.Subscriber(
             args.spherical_cmd_topic,
@@ -87,10 +94,16 @@ class InfoFlowServoRuntime:
         self._throttle_last = {}
 
         self.main_logger.info(
-            "轻量 Servo runtime 已启动：spherical_cmd_topic=%s cmd_topic=%s servo_hz=%.1f",
+            (
+                "轻量 Servo runtime 已启动：spherical_cmd_topic=%s cmd_topic=%s servo_hz=%.1f "
+                "cmd_timeout=%.3fs adaptive_scale=%.2f adaptive_cap=%.3fs"
+            ),
             args.spherical_cmd_topic,
             args.cmd_topic,
             float(self.servo_hz),
+            float(self.spherical_cmd_timeout_sec),
+            float(self.adaptive_cmd_timeout_scale),
+            float(self.adaptive_cmd_timeout_cap_sec),
         )
 
     def _planner_log_throttle(self, key: str, interval_sec: float, level: str, msg: str, *args):
@@ -102,17 +115,34 @@ class InfoFlowServoRuntime:
         getattr(self.planner_logger, str(level).lower())(msg, *args)
 
     def spherical_cmd_callback(self, msg) -> None:
+        receipt_wall_time = float(time.monotonic())
+        if self._last_cmd_receipt_wall is not None:
+            interval_sec = max(0.0, receipt_wall_time - self._last_cmd_receipt_wall)
+            if self._cmd_interval_ema_sec is None:
+                self._cmd_interval_ema_sec = interval_sec
+            else:
+                self._cmd_interval_ema_sec = 0.2 * interval_sec + 0.8 * self._cmd_interval_ema_sec
+        self._last_cmd_receipt_wall = receipt_wall_time
         self.latest_cmd = CachedSphericalCommand(
             msg=msg,
-            receipt_wall_time=float(time.monotonic()),
+            receipt_wall_time=receipt_wall_time,
         )
         self.profile_logger.debug(
-            "cmd_rx: model_v=%d tick=%d stop=%s reason=%s",
+            "cmd_rx: model_v=%d tick=%d stop=%s reason=%s ema_interval=%.3fs",
             int(msg.model_version),
             int(msg.planner_tick),
             bool(msg.should_stop),
             str(msg.stop_reason),
+            float(self._cmd_interval_ema_sec if self._cmd_interval_ema_sec is not None else -1.0),
         )
+
+    def _effective_cmd_timeout_sec(self) -> float:
+        timeout_sec = float(self.spherical_cmd_timeout_sec)
+        if self._cmd_interval_ema_sec is None:
+            return timeout_sec
+        adaptive_timeout = float(self._cmd_interval_ema_sec) * float(self.adaptive_cmd_timeout_scale)
+        adaptive_timeout = min(adaptive_timeout, float(self.adaptive_cmd_timeout_cap_sec))
+        return max(timeout_sec, adaptive_timeout)
 
     def _maybe_log_status(self) -> None:
         now = float(time.monotonic())
@@ -154,14 +184,17 @@ class InfoFlowServoRuntime:
 
         cmd = cmd_cache.msg
         cmd_age = float(time.monotonic() - cmd_cache.receipt_wall_time)
-        if cmd_age > self.spherical_cmd_timeout_sec:
+        effective_timeout_sec = self._effective_cmd_timeout_sec()
+        if cmd_age > effective_timeout_sec:
             self._planner_log_throttle(
                 "cmd_stale",
                 1.0,
                 "warning",
-                "servo 命令过期（age=%.3fs > %.3fs），发布零速度。",
+                "servo 命令过期（age=%.3fs > %.3fs，base=%.3fs ema=%.3fs），发布零速度。",
                 cmd_age,
+                effective_timeout_sec,
                 self.spherical_cmd_timeout_sec,
+                float(self._cmd_interval_ema_sec if self._cmd_interval_ema_sec is not None else -1.0),
             )
             publish_zero_twist(self.cmd_pub, cmd_frame=self.cmd_frame)
             self.stats.servo_zero_cmd_stale += 1
@@ -261,8 +294,9 @@ class InfoFlowServoRuntime:
                 stamp=pose_stamp,
             )
             self.profile_logger.debug(
-                "servo_cmd: cmd_age_ms=%.1f theta_phi=(%.6f, %.6f) linear_norm=%.6f angular_norm=%.6f",
+                "servo_cmd: cmd_age_ms=%.1f timeout_ms=%.1f theta_phi=(%.6f, %.6f) linear_norm=%.6f angular_norm=%.6f",
                 float(cmd_age * 1000.0),
+                float(effective_timeout_sec * 1000.0),
                 float(theta_rate),
                 float(phi_rate),
                 float(np.linalg.norm(linear_cmd)),
@@ -294,6 +328,8 @@ def build_argparser():
     parser.add_argument("--camera_frame", type=str, default="cam_1_color_optical_frame")
     parser.add_argument("--servo_hz", type=float, default=50.0)
     parser.add_argument("--spherical_cmd_timeout_sec", type=float, default=0.25)
+    parser.add_argument("--adaptive_cmd_timeout_scale", type=float, default=1.5)
+    parser.add_argument("--adaptive_cmd_timeout_cap_sec", type=float, default=0.5)
     parser.add_argument("--pose_stale_timeout_sec", type=float, default=0.2)
     parser.add_argument("--linear_vel_max", type=float, default=0.05)
     parser.add_argument("--angular_speed_max", type=float, default=1.0)

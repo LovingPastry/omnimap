@@ -39,6 +39,7 @@ class FrozenPlannerBackend:
         gaussians: GaussianModel,
         fisher_eval: Any,
         keyviewpoints: List[Any],
+        history_stat: Optional[torch.Tensor],
         scene_center: Optional[torch.Tensor],
         config: dict,
         runtime_device: str,
@@ -46,9 +47,14 @@ class FrozenPlannerBackend:
         self.gaussians = gaussians
         self.fisher_eval = fisher_eval
         self.keyviewpoints = keyviewpoints
+        self.history_stat = history_stat
         self.sence_center = scene_center
         self.config = config
         self._runtime_device = str(runtime_device)
+        if hasattr(self.fisher_eval, "keyviewpoints"):
+            self.fisher_eval.keyviewpoints = self.keyviewpoints
+        if hasattr(self.fisher_eval, "set_precomputed_history_stat"):
+            self.fisher_eval.set_precomputed_history_stat(self.history_stat)
 
     def get_fisher_scene_center(self) -> Optional[torch.Tensor]:
         center = self.sence_center
@@ -82,7 +88,7 @@ class FrozenPlannerBackend:
         return self._runtime_device
 
 
-SNAPSHOT_BUNDLE_VERSION = 1
+SNAPSHOT_BUNDLE_VERSION = 2
 
 
 def _clone_viewpoints(keyviewpoints: List[Any]) -> List[Any]:
@@ -140,9 +146,13 @@ def build_planner_snapshot(
         live_opt_params = munchify(live_config.get("opt_params", {}))
 
     frozen_gaussians = _clone_gaussians(live_backend.gaussians, live_opt_params)
+    frozen_keyviews = _clone_viewpoints(list(getattr(live_backend, "keyviewpoints", [])))
     fisher_eval_cls = type(live_backend.fisher_eval)
     frozen_fisher_eval = fisher_eval_cls(frozen_gaussians, live_config)
-    frozen_keyviews = _clone_viewpoints(list(getattr(live_backend, "keyviewpoints", [])))
+    frozen_fisher_eval.keyviewpoints = frozen_keyviews
+    frozen_history_stat = frozen_fisher_eval.compute_history_stat(frozen_keyviews)
+    if hasattr(frozen_fisher_eval, "set_precomputed_history_stat"):
+        frozen_fisher_eval.set_precomputed_history_stat(frozen_history_stat)
 
     scene_center = getattr(live_backend, "sence_center", None)
     if isinstance(scene_center, torch.Tensor):
@@ -156,6 +166,7 @@ def build_planner_snapshot(
         gaussians=frozen_gaussians,
         fisher_eval=frozen_fisher_eval,
         keyviewpoints=frozen_keyviews,
+        history_stat=frozen_history_stat,
         scene_center=frozen_scene_center,
         config=live_config,
         runtime_device=str(runtime_device),
@@ -202,19 +213,21 @@ def serialize_planner_snapshot(snapshot: PlannerSnapshot) -> Dict[str, Any]:
         "fisher_eval_cls_name": str(fisher_eval_cls.__name__),
         "gaussians": backend.gaussians,
         "keyviewpoints": list(getattr(backend, "keyviewpoints", [])),
+        "history_stat": getattr(backend, "history_stat", None),
     }
 
 
 def deserialize_planner_snapshot(bundle: Dict[str, Any]) -> PlannerSnapshot:
     bundle_version = int(bundle.get("bundle_version", -1))
-    if bundle_version != SNAPSHOT_BUNDLE_VERSION:
+    if bundle_version not in {1, SNAPSHOT_BUNDLE_VERSION}:
         raise ValueError(
-            f"unsupported planner snapshot bundle version={bundle_version}, expected {SNAPSHOT_BUNDLE_VERSION}"
+            f"unsupported planner snapshot bundle version={bundle_version}, expected 1 or {SNAPSHOT_BUNDLE_VERSION}"
         )
 
     config = copy.deepcopy(dict(bundle.get("config", {})))
     gaussians = bundle["gaussians"]
     keyviewpoints = list(bundle.get("keyviewpoints", []))
+    history_stat = bundle.get("history_stat", None) if bundle_version >= 2 else None
     fisher_eval_module = importlib.import_module(bundle["fisher_eval_cls_module"])
     fisher_eval_cls = getattr(fisher_eval_module, bundle["fisher_eval_cls_name"])
     fisher_eval = fisher_eval_cls(gaussians, config)
@@ -234,6 +247,7 @@ def deserialize_planner_snapshot(bundle: Dict[str, Any]) -> PlannerSnapshot:
         gaussians=gaussians,
         fisher_eval=fisher_eval,
         keyviewpoints=keyviewpoints,
+        history_stat=history_stat,
         scene_center=frozen_scene_center,
         config=config,
         runtime_device=str(bundle.get("runtime_device_hint", "cpu")),

@@ -394,19 +394,28 @@ class InfoFlowPlanningNode:
             self._maybe_log_status()
             return
 
-        pose_age = float((rospy.Time.now() - pose_state.stamp).to_sec())
-        if pose_age > self.pose_stale_timeout_sec:
+        stamp_age = float((rospy.Time.now() - pose_state.stamp).to_sec())
+        receipt_age = float(time.monotonic() - pose_state.wall_time)
+        self.profile_logger.debug(
+            "pose_age_check(planner): stamp_age=%.3fs receipt_age=%.3fs stamp=%.3f",
+            float(stamp_age),
+            float(receipt_age),
+            float(pose_state.stamp.to_sec()),
+        )
+        if stamp_age > self.pose_stale_timeout_sec:
             self._planner_log_throttle(
                 "pose_stale",
                 1.0,
                 "warning",
-                "Planning 位姿过期（age=%.3fs > %.3fs），发布 stop command。",
-                pose_age,
+                "Planning 位姿过期（stamp_age=%.3fs receipt_age=%.3fs > %.3fs），发布 stop command。",
+                stamp_age,
+                receipt_age,
                 self.pose_stale_timeout_sec,
             )
             self.profile_logger.info(
-                "pose_stale(planner): pose_age=%.3fs stamp=%.3f",
-                float(pose_age),
+                "pose_stale(planner): stamp_age=%.3fs receipt_age=%.3fs stamp=%.3f",
+                float(stamp_age),
+                float(receipt_age),
                 float(pose_state.stamp.to_sec()),
             )
             self._publish_stop_command(
@@ -482,11 +491,16 @@ class InfoFlowPlanningNode:
         planning_total_ms = (time.perf_counter() - planning_t0) * 1000.0
         mp_timing = getattr(self.motion_policy, "last_timing", {}) or {}
         self.profile_logger.info(
-            "planning耗时：idx=%d total=%.2fms policy=%.2fms fisher=%.2fms s2c=%.2fms model_v=%d",
+            "planning耗时：idx=%d total=%.2fms policy=%.2fms fisher=%.2fms "
+            "history=%.2fms score=%.2fms gradient=%.2fms history_source=%s s2c=%.2fms model_v=%d",
             int(self.planner_tick),
             float(planning_total_ms),
             float(mp_timing.get("policy_total_ms", float("nan"))),
             float(mp_timing.get("fisher_ms", float("nan"))),
+            float(mp_timing.get("history_ms", float("nan"))),
+            float(mp_timing.get("score_ms", float("nan"))),
+            float(mp_timing.get("gradient_ms", float("nan"))),
+            str(mp_timing.get("history_source", "missing")),
             float(mp_timing.get("s2c_ms", float("nan"))),
             int(snapshot.model_version),
         )
