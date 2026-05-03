@@ -260,8 +260,11 @@ class InfoFlowServoRuntime:
             ).reshape(3)
             radius, theta, phi = position_to_spherical(current_position, reference_scene_center)
             e_theta, e_phi, _ = local_frame_from_theta_phi(theta, phi)
-            theta_rate = float(cmd.delta_theta)
-            phi_rate = float(cmd.delta_phi)
+            theta_delta = float(cmd.delta_theta)
+            phi_delta = float(cmd.delta_phi)
+            step_dt = 1.0 / max(float(self.servo_hz), 1e-6)
+            theta_rate = theta_delta / step_dt
+            phi_rate = phi_delta / step_dt
             linear_cmd = radius * (theta_rate * e_theta + phi_rate * e_phi)
             linear_norm_raw = float(np.linalg.norm(linear_cmd))
             if linear_norm_raw > self.linear_vel_max:
@@ -274,7 +277,7 @@ class InfoFlowServoRuntime:
             rotvec_error = R.from_matrix(rotation_error).as_rotvec().astype(np.float64)
             angular_cmd = np.zeros(3, dtype=np.float64)
             if self.enable_angular and float(np.linalg.norm(rotvec_error)) > self.angular_speed_deadband:
-                angular_cmd = rotvec_error / max(float(cmd.dt), 1e-6)
+                angular_cmd = rotvec_error / step_dt
                 omega_norm_raw = float(np.linalg.norm(angular_cmd))
                 if omega_norm_raw > self.angular_speed_max:
                     angular_cmd = angular_cmd * (self.angular_speed_max / max(omega_norm_raw, 1e-12))
@@ -287,11 +290,11 @@ class InfoFlowServoRuntime:
                 stamp=pose_stamp,
             )
             self.profile_logger.debug(
-                "servo_cmd: cmd_age_ms=%.1f timeout_ms=%.1f theta_phi=(%.6f, %.6f) linear_norm=%.6f angular_norm=%.6f",
+                "servo_cmd: cmd_age_ms=%.1f timeout_ms=%.1f delta_theta_phi=(%.6f, %.6f) linear_norm=%.6f angular_norm=%.6f",
                 float(cmd_age * 1000.0),
                 float(effective_timeout_sec * 1000.0),
-                float(theta_rate),
-                float(phi_rate),
+                float(theta_delta),
+                float(phi_delta),
                 float(np.linalg.norm(linear_cmd)),
                 float(np.linalg.norm(angular_cmd)),
             )

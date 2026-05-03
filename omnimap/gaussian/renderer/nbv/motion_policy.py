@@ -838,9 +838,6 @@ class FisherMotionPolicy:
             math.hypot(self.max_delta_theta, self.max_delta_phi)
         )
         spherical_speed_min = float(self.spherical_speed_min)
-        if self.cartesian:
-            scaled_spherical_velocity = scaled_spherical_velocity / self.dt
-            spherical_speed_min = spherical_speed_min / self.dt
         return (
             grad_theta_compressed,
             grad_phi_compressed,
@@ -1305,13 +1302,13 @@ class FisherMotionPolicy:
                 current_position, reference_scene_center
             )
             e_theta, e_phi, _ = _local_frame_from_theta_phi(current_theta, current_phi)
-            theta_rate_unclipped = float(scaled_spherical_velocity[0])
-            phi_rate_unclipped = float(scaled_spherical_velocity[1])
-            theta_rate = float(applied_spherical_velocity[0])
-            phi_rate = float(applied_spherical_velocity[1])
+            delta_theta_unclipped = float(scaled_spherical_velocity[0])
+            delta_phi_unclipped = float(scaled_spherical_velocity[1])
+            delta_theta = float(applied_spherical_velocity[0])
+            delta_phi = float(applied_spherical_velocity[1])
             if self.planner_output_mode == "spherical_delta":
-                next_theta = self._wrap_theta(current_theta + theta_rate * self.dt)
-                next_phi = self._clamp_phi(current_phi + phi_rate * self.dt)
+                next_theta = self._wrap_theta(current_theta + delta_theta)
+                next_phi = self._clamp_phi(current_phi + delta_phi)
                 next_position = (
                     reference_scene_center
                     + current_radius * _spherical_direction(next_theta, next_phi)
@@ -1354,10 +1351,10 @@ class FisherMotionPolicy:
                     grad_norm_compressed=float(grad_norm_compressed),
                     num_gaussians=int(gaussian_count),
                     fisher_score=float(current_result.score),
-                    scaled_theta=theta_rate_unclipped,
-                    scaled_phi=phi_rate_unclipped,
-                    delta_theta_applied=theta_rate,
-                    delta_phi_applied=phi_rate,
+                    scaled_theta=delta_theta_unclipped,
+                    scaled_phi=delta_phi_unclipped,
+                    delta_theta_applied=delta_theta,
+                    delta_phi_applied=delta_phi,
                     velocity_raw_world=np.zeros(3, dtype=np.float64),
                     vt_world=np.zeros(3, dtype=np.float64),
                     vn_world=np.zeros(3, dtype=np.float64),
@@ -1406,6 +1403,8 @@ class FisherMotionPolicy:
                     "history_source": str(grad_timing.get("history_source", "missing")),
                 }
                 return result
+            theta_rate = delta_theta / self.dt
+            phi_rate = delta_phi / self.dt
             vt_world = current_radius * (theta_rate * e_theta + phi_rate * e_phi)
             vn_world, radial_error = self._cal_e_t(
                 current_position=current_position,

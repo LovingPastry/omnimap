@@ -77,10 +77,10 @@ motion_control:
   # Planning 节点专用
   planner_hz: 30.0              # 规划循环频率 (Hz)
   pose_stale_timeout_sec: 0.2   # 位姿过期阈值 (s)
-  fisher_step_scale: 1.0e-5     # Fisher 信息步长缩放
-  angular_gain: 2.0             # 角运动增益
-  radial_gain: 0.2              # 径向运动增益
-  dt: 1.0                       # 运动策略时间步长
+  fisher_step_scale: 1          # Fisher 信息步长缩放
+  angular_gain: 2.0             # 角运动增益，当前分支没用
+  radial_gain: 0.2              # 径向运动增益，当前分支没用
+  dt: 0.02                      # 运动策略时间步长
   grad_eps: 0.01                # 梯度数值微分 epsilon
   spherical_speed_min: 0.0      # 最小球面速度
 
