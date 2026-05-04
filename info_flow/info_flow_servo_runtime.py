@@ -378,10 +378,7 @@ class InfoFlowServoRuntime:
                     radial_speed_raw,
                     self.radial_vel_max,
                 )
-                anti_windup_allows_integral = (
-                    not radial_limited_pre
-                    or radial_speed_raw * radial_error < 0.0
-                )
+                anti_windup_allows_integral = not radial_limited_pre or radial_speed_raw * radial_error < 0.0
                 if anti_windup_allows_integral:
                     self._radial_integral_error = float(
                         np.clip(

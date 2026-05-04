@@ -132,9 +132,7 @@ def import_spherical_command_msg():
     try:
         from omnimap_msgs.msg import SphericalCommand
     except Exception as exc:  # pragma: no cover
-        raise RuntimeError(
-            "failed to import omnimap_msgs.SphericalCommand; build ros_ws and source ros_ws/devel/setup.bash first"
-        ) from exc
+        raise RuntimeError("failed to import omnimap_msgs.SphericalCommand; build ros_ws and source ros_ws/devel/setup.bash first") from exc
     return SphericalCommand
 
 
@@ -201,7 +199,7 @@ def position_to_spherical(
         dtype=np.float64,
     ).reshape(3)
     radius = float(np.linalg.norm(offset))
-    if radius < 1e-12:
+    if radius < 1e-3:
         raise ValueError("position is too close to scene center")
     n_hat = offset / radius
     theta = float(np.arctan2(n_hat[1], n_hat[0]) % (2.0 * np.pi))
@@ -221,25 +219,25 @@ def local_frame_from_theta_phi(theta: float, phi: float) -> Tuple[np.ndarray, np
 def look_at_c2w(eye: np.ndarray, target: np.ndarray) -> np.ndarray:
     eye = np.asarray(eye, dtype=np.float64).reshape(3)
     target = np.asarray(target, dtype=np.float64).reshape(3)
-    up = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+    up = np.array([-1.0, 0.0, 0.0], dtype=np.float64)
 
     forward = target - eye
     forward_norm = np.linalg.norm(forward)
-    if forward_norm < 1e-12:
+    if forward_norm < 1e-3:
         raise ValueError("eye and target are too close")
     forward = forward / forward_norm
 
     right = np.cross(forward, up)
     right_norm = np.linalg.norm(right)
-    if right_norm < 1e-12:
+    if right_norm < 1e-3:
         fallback_up = np.array([0.0, 1.0, 0.0], dtype=np.float64)
         right = np.cross(forward, fallback_up)
         right_norm = np.linalg.norm(right)
-        if right_norm < 1e-12:
+        if right_norm < 1e-3:
             raise ValueError("failed to construct right axis")
     right = right / right_norm
     true_up = np.cross(right, forward)
-    true_up = true_up / max(np.linalg.norm(true_up), 1e-12)
+    true_up = true_up / max(np.linalg.norm(true_up), 1e-3)
     down = -true_up
 
     c2w = np.eye(4, dtype=np.float64)
@@ -273,6 +271,7 @@ def load_servo_motion_config(config_path: str) -> dict:
         return defaults
     try:
         import yaml
+
         with open(config_path, "r") as f:
             raw = yaml.safe_load(f) or {}
         mc = raw.get("motion_control", {}) if isinstance(raw, dict) else {}
@@ -280,4 +279,3 @@ def load_servo_motion_config(config_path: str) -> dict:
         return merged
     except Exception:
         return defaults
-    return c2w
