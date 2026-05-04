@@ -350,12 +350,12 @@ if __name__ == "__main__":
     def _resolve(cli_val, yaml_val):
         return cli_val if cli_val is not None else yaml_val
 
-    args.servo_hz                 = _resolve(args.servo_hz,                 mc["servo_hz"])
+    args.servo_hz = _resolve(args.servo_hz, mc["servo_hz"])
     args.spherical_cmd_timeout_sec = _resolve(args.spherical_cmd_timeout_sec, mc["spherical_cmd_timeout_sec"])
-    args.pose_stale_timeout_sec   = _resolve(args.pose_stale_timeout_sec,   mc["pose_stale_timeout_sec"])
-    args.linear_vel_max           = _resolve(args.linear_vel_max,           mc["linear_vel_max"])
-    args.angular_speed_max        = _resolve(args.angular_speed_max,        mc["angular_speed_max"])
-    args.enable_angular           = _resolve(args.enable_angular,           mc["enable_angular"])
+    args.pose_stale_timeout_sec = _resolve(args.pose_stale_timeout_sec, mc["pose_stale_timeout_sec"])
+    args.linear_vel_max = _resolve(args.linear_vel_max, mc["linear_vel_max"])
+    args.angular_speed_max = _resolve(args.angular_speed_max, mc["angular_speed_max"])
+    args.enable_angular = _resolve(args.enable_angular, mc["enable_angular"])
 
     node = InfoFlowServoRuntime(args)
     rospy.spin()

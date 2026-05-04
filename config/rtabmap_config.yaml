@@ -80,10 +80,10 @@ motion_control:
   fisher_step_scale: 1          # Fisher 信息步长缩放
   angular_gain: 2.0             # 角运动增益，当前分支没用
   radial_gain: 0.2              # 径向运动增益，当前分支没用
-  dt: 0.02                      # 运动策略时间步长
+  dt: 0.02                      # 运动策略时间步长，当前分支没用
   grad_eps: 0.01                # 梯度数值微分 epsilon
   spherical_speed_min: 0.0      # 最小球面速度
 
   # Servo 节点专用
   servo_hz: 50.0                # Servo 循环频率 (Hz)
-  spherical_cmd_timeout_sec: 0.25  # 命令超时阈值 (s)
+  spherical_cmd_timeout_sec: 1.25  # 命令超时阈值 (s)
