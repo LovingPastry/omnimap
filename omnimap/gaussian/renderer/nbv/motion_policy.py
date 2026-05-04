@@ -222,8 +222,8 @@ class MotionPolicyResult:
     fisher_score: float
     scaled_theta: float
     scaled_phi: float
-    delta_theta_applied: float
-    delta_phi_applied: float
+    theta_rate_applied: float
+    phi_rate_applied: float
     velocity_raw_world: np.ndarray
     vt_world: np.ndarray
     vn_world: np.ndarray
@@ -284,7 +284,7 @@ class FisherMotionPolicy:
     }
     _SUPPORTED_PLANNER_OUTPUT_MODES = {
         "cartesian_legacy",
-        "spherical_delta",
+        "spherical_rate",
     }
 
     def __init__(
@@ -300,8 +300,8 @@ class FisherMotionPolicy:
         enable_angular: bool = True,
         grad_eps: float = 0.01,
         spherical_speed_min: float = 1e-4,
-        max_delta_theta: float = 0.20,
-        max_delta_phi: float = 0.15,
+        max_theta_rate: float = 0.20,
+        max_phi_rate: float = 0.15,
         phi_min: float = 1e-3,
         phi_max: float | None = None,
         orientation_roll_mode: str = "world_up_lookat",
@@ -335,8 +335,8 @@ class FisherMotionPolicy:
             raise ValueError(
                 f"spherical_speed_min must be non-negative and finite, got {spherical_speed_min}"
             )
-        if max_delta_theta <= 0 or max_delta_phi <= 0:
-            raise ValueError("max deltas must be positive")
+        if max_theta_rate <= 0 or max_phi_rate <= 0:
+            raise ValueError("max spherical rates must be positive")
         if orientation_roll_mode not in self._SUPPORTED_ORIENTATION_ROLL_MODES:
             raise ValueError(
                 "orientation_roll_mode must be one of "
@@ -369,8 +369,8 @@ class FisherMotionPolicy:
         self.enable_angular = bool(enable_angular)
         self.grad_eps = float(grad_eps)
         self.spherical_speed_min = float(spherical_speed_min)
-        self.max_delta_theta = float(max_delta_theta)
-        self.max_delta_phi = float(max_delta_phi)
+        self.max_theta_rate = float(max_theta_rate)
+        self.max_phi_rate = float(max_phi_rate)
         self.phi_min = float(phi_min)
         self.phi_max = float(math.pi / 2.0 - 1e-3 if phi_max is None else phi_max)
         self.orientation_roll_mode = str(orientation_roll_mode)
@@ -524,8 +524,8 @@ class FisherMotionPolicy:
             fisher_score=float(fisher_score),
             scaled_theta=float(scaled_spherical_velocity[0]),
             scaled_phi=float(scaled_spherical_velocity[1]),
-            delta_theta_applied=0.0,
-            delta_phi_applied=0.0,
+            theta_rate_applied=0.0,
+            phi_rate_applied=0.0,
             velocity_raw_world=np.zeros(3, dtype=np.float64),
             vt_world=np.zeros(3, dtype=np.float64),
             vn_world=np.zeros(3, dtype=np.float64),
@@ -679,8 +679,8 @@ class FisherMotionPolicy:
             fisher_score=fisher_score,
             scaled_theta=theta_rate_unclipped,
             scaled_phi=phi_rate_unclipped,
-            delta_theta_applied=theta_rate,
-            delta_phi_applied=phi_rate,
+            theta_rate_applied=theta_rate,
+            phi_rate_applied=phi_rate,
             velocity_raw_world=velocity_raw_world.astype(np.float64),
             vt_world=vt_world.astype(np.float64),
             vn_world=vn_world.astype(np.float64),
@@ -835,7 +835,7 @@ class FisherMotionPolicy:
             dtype=np.float64,
         )
         spherical_speed_limit = float(
-            math.hypot(self.max_delta_theta, self.max_delta_phi)
+            math.hypot(self.max_theta_rate, self.max_phi_rate)
         )
         spherical_speed_min = float(self.spherical_speed_min)
         return (
@@ -1201,7 +1201,7 @@ class FisherMotionPolicy:
         radius = float(hemi_cam.radius)
         gaussian_count = self._count_gaussians(gs_backend)
 
-        # 2) Compute desired tangential velocity (includes /num_gaussians + log compression).
+        # 2) Compute desired spherical angular rate (includes /num_gaussians + log compression).
         (
             grad_theta_compressed,
             grad_phi_compressed,
@@ -1295,32 +1295,24 @@ class FisherMotionPolicy:
             )
 
         if self.cartesian:
-            # 3) Cartesian branch: tangential speed -> radial correction -> linear speed clip.
+            # 3) Cartesian branch: spherical rate -> tangential speed -> radial correction.
             s2c_t0 = time.perf_counter()
             current_position = np.asarray(current_c2w[:3, 3], dtype=np.float64)
             current_radius, _, _ = _position_to_spherical(
                 current_position, reference_scene_center
             )
             e_theta, e_phi, _ = _local_frame_from_theta_phi(current_theta, current_phi)
-            delta_theta_unclipped = float(scaled_spherical_velocity[0])
-            delta_phi_unclipped = float(scaled_spherical_velocity[1])
-            delta_theta = float(applied_spherical_velocity[0])
-            delta_phi = float(applied_spherical_velocity[1])
-            if self.planner_output_mode == "spherical_delta":
-                next_theta = self._wrap_theta(current_theta + delta_theta)
-                next_phi = self._clamp_phi(current_phi + delta_phi)
-                next_position = (
-                    reference_scene_center
-                    + current_radius * _spherical_direction(next_theta, next_phi)
-                )
+            theta_rate_unclipped = float(scaled_spherical_velocity[0])
+            phi_rate_unclipped = float(scaled_spherical_velocity[1])
+            theta_rate = float(applied_spherical_velocity[0])
+            phi_rate = float(applied_spherical_velocity[1])
+            if self.planner_output_mode == "spherical_rate":
                 desired_c2w = self._compute_desired_orientation(
                     current_position=current_position,
                     reference_scene_center=reference_scene_center,
                     current_c2w=current_c2w,
                 )
                 next_c2w = current_c2w.copy()
-                next_c2w[:3, 3] = next_position
-                next_c2w[:3, :3] = desired_c2w[:3, :3]
                 radial_error = float(current_radius - reference_radius)
                 s2c_ms = (time.perf_counter() - s2c_t0) * 1000.0
                 result = MotionPolicyResult(
@@ -1341,8 +1333,8 @@ class FisherMotionPolicy:
                     dt=self.dt,
                     current_theta=current_theta,
                     current_phi=current_phi,
-                    next_theta=next_theta,
-                    next_phi=next_phi,
+                    next_theta=current_theta,
+                    next_phi=current_phi,
                     grad_theta_raw=grad_theta,
                     grad_phi_raw=grad_phi,
                     grad_norm_raw=grad_norm,
@@ -1351,10 +1343,10 @@ class FisherMotionPolicy:
                     grad_norm_compressed=float(grad_norm_compressed),
                     num_gaussians=int(gaussian_count),
                     fisher_score=float(current_result.score),
-                    scaled_theta=delta_theta_unclipped,
-                    scaled_phi=delta_phi_unclipped,
-                    delta_theta_applied=delta_theta,
-                    delta_phi_applied=delta_phi,
+                    scaled_theta=theta_rate_unclipped,
+                    scaled_phi=phi_rate_unclipped,
+                    theta_rate_applied=theta_rate,
+                    phi_rate_applied=phi_rate,
                     velocity_raw_world=np.zeros(3, dtype=np.float64),
                     vt_world=np.zeros(3, dtype=np.float64),
                     vn_world=np.zeros(3, dtype=np.float64),
@@ -1365,7 +1357,7 @@ class FisherMotionPolicy:
                     angular_speed_applied=0.0,
                     angular_gain=float(self.angular_gain),
                     enable_angular=bool(self.enable_angular),
-                    next_position=next_position.astype(np.float64).tolist(),
+                    next_position=current_position.astype(np.float64).tolist(),
                     step_scale_theta=float(effective_step_scale),
                     step_scale_phi=float(effective_step_scale),
                     linear_speed_limit=float(self.linear_vel_max),
@@ -1380,16 +1372,16 @@ class FisherMotionPolicy:
                     speed_clipped=bool(clipped_spherical_speed),
                     should_stop=False,
                     stop_reason="normal_step",
-                    planner_output_mode="spherical_delta",
+                    planner_output_mode="spherical_rate",
                 )
                 if self.verbose:
                     self.logger.debug(
-                        "idx=%d mode=%s src=%s spherical_delta=(%.6f, %.6f) stop=%s",
+                        "idx=%d mode=%s src=%s spherical_rate=(%.6f, %.6f) stop=%s",
                         result.idx,
                         result.controller_mode,
                         result.viewpoint_source,
-                        result.delta_theta_applied,
-                        result.delta_phi_applied,
+                        result.theta_rate_applied,
+                        result.phi_rate_applied,
                         result.should_stop,
                     )
                 policy_total_ms = (time.perf_counter() - policy_t0) * 1000.0
@@ -1403,8 +1395,6 @@ class FisherMotionPolicy:
                     "history_source": str(grad_timing.get("history_source", "missing")),
                 }
                 return result
-            theta_rate = delta_theta / self.dt
-            phi_rate = delta_phi / self.dt
             vt_world = current_radius * (theta_rate * e_theta + phi_rate * e_phi)
             vn_world, radial_error = self._cal_e_t(
                 current_position=current_position,
@@ -1516,8 +1506,8 @@ class FisherMotionPolicy:
                     grad_phi_compressed,
                     result.scaled_theta,
                     result.scaled_phi,
-                    result.delta_theta_applied,
-                    result.delta_phi_applied,
+                    result.theta_rate_applied,
+                    result.phi_rate_applied,
                     result.spherical_speed_raw,
                     result.spherical_speed_scaled,
                     result.radial_error,
@@ -1545,10 +1535,10 @@ class FisherMotionPolicy:
             }
             return result
 
-        delta_theta = float(applied_spherical_velocity[0])
-        delta_phi = float(applied_spherical_velocity[1])
-        next_theta = self._wrap_theta(current_theta + delta_theta)
-        next_phi = self._clamp_phi(current_phi + delta_phi)
+        theta_rate = float(applied_spherical_velocity[0])
+        phi_rate = float(applied_spherical_velocity[1])
+        next_theta = self._wrap_theta(current_theta + theta_rate * self.dt)
+        next_phi = self._clamp_phi(current_phi + phi_rate * self.dt)
         next_c2w = _spherical_c2w(
             scene_center=scene_center_np,
             radius=radius,
@@ -1586,8 +1576,8 @@ class FisherMotionPolicy:
             fisher_score=float(current_result.score),
             scaled_theta=float(scaled_spherical_velocity[0]),
             scaled_phi=float(scaled_spherical_velocity[1]),
-            delta_theta_applied=delta_theta,
-            delta_phi_applied=delta_phi,
+            theta_rate_applied=theta_rate,
+            phi_rate_applied=phi_rate,
             velocity_raw_world=np.zeros(3, dtype=np.float64),
             vt_world=np.zeros(3, dtype=np.float64),
             vn_world=np.zeros(3, dtype=np.float64),
@@ -1635,8 +1625,8 @@ class FisherMotionPolicy:
                 result.grad_phi_compressed,
                 result.scaled_theta,
                 result.scaled_phi,
-                result.delta_theta_applied,
-                result.delta_phi_applied,
+                result.theta_rate_applied,
+                result.phi_rate_applied,
                 result.spherical_speed_raw,
                 result.spherical_speed_scaled,
                 result.spherical_speed_applied,

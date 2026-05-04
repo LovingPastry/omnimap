@@ -67,7 +67,15 @@ class InfoFlowServoRuntime:
         self.linear_vel_max = float(args.linear_vel_max)
         self.angular_speed_max = float(args.angular_speed_max)
         self.enable_angular = bool(args.enable_angular)
-        self.angular_speed_deadband = 1e-3
+        self.radial_gain = float(args.radial_gain)
+        self.radial_i_gain = max(0.0, float(args.radial_i_gain))
+        self.radial_deadband = max(0.0, float(args.radial_deadband))
+        self.radial_integral_limit = max(0.0, float(args.radial_integral_limit))
+        self.radial_vel_max = max(0.0, float(args.radial_vel_max))
+        self.angular_gain = float(args.angular_gain)
+        self.angular_deadband = max(0.0, float(args.angular_deadband))
+        self.linear_accel_max = max(0.0, float(args.linear_accel_max))
+        self.angular_accel_max = max(0.0, float(args.angular_accel_max))
         self.status_log_interval_sec = max(0.2, float(args.status_log_interval_sec))
 
         self.tf_buffer = tf2_ros.Buffer()
@@ -76,6 +84,10 @@ class InfoFlowServoRuntime:
         self.latest_cmd: Optional[CachedSphericalCommand] = None
         self._last_cmd_receipt_wall: Optional[float] = None
         self._cmd_interval_ema_sec: Optional[float] = None
+        self._last_linear_cmd = np.zeros(3, dtype=np.float64)
+        self._last_angular_cmd = np.zeros(3, dtype=np.float64)
+        self._last_servo_wall: Optional[float] = None
+        self._radial_integral_error = 0.0
 
         self.cmd_sub = rospy.Subscriber(
             args.spherical_cmd_topic,
@@ -103,6 +115,25 @@ class InfoFlowServoRuntime:
             float(self.adaptive_cmd_timeout_scale),
             float(self.adaptive_cmd_timeout_cap_sec),
         )
+        self.main_logger.info(
+            (
+                "Servo 控制参数：linear_vel_max=%.4f radial_gain=%.4f radial_i_gain=%.4f "
+                "radial_vel_max=%.4f radial_deadband=%.4f radial_integral_limit=%.4f "
+                "angular_gain=%.4f angular_deadband=%.4f angular_speed_max=%.4f "
+                "linear_accel_max=%.4f angular_accel_max=%.4f"
+            ),
+            float(self.linear_vel_max),
+            float(self.radial_gain),
+            float(self.radial_i_gain),
+            float(self.radial_vel_max),
+            float(self.radial_deadband),
+            float(self.radial_integral_limit),
+            float(self.angular_gain),
+            float(self.angular_deadband),
+            float(self.angular_speed_max),
+            float(self.linear_accel_max),
+            float(self.angular_accel_max),
+        )
 
     def _planner_log_throttle(self, key: str, interval_sec: float, level: str, msg: str, *args):
         now = float(time.monotonic())
@@ -111,6 +142,59 @@ class InfoFlowServoRuntime:
             return
         self._throttle_last[key] = now
         getattr(self.planner_logger, str(level).lower())(msg, *args)
+
+    @staticmethod
+    def _clip_vector_norm(vec: np.ndarray, max_norm: float) -> tuple[np.ndarray, float]:
+        vec = np.asarray(vec, dtype=np.float64).reshape(3)
+        norm = float(np.linalg.norm(vec))
+        limit = float(max_norm)
+        if norm <= 1e-12 or limit <= 0.0 or norm <= limit:
+            return vec, norm
+        clipped = vec * (limit / norm)
+        return clipped, float(np.linalg.norm(clipped))
+
+    @staticmethod
+    def _slew_limit_vector(
+        desired: np.ndarray,
+        previous: np.ndarray,
+        max_delta_norm: float,
+    ) -> np.ndarray:
+        desired = np.asarray(desired, dtype=np.float64).reshape(3)
+        previous = np.asarray(previous, dtype=np.float64).reshape(3)
+        max_delta = float(max_delta_norm)
+        if max_delta <= 0.0:
+            return desired
+        delta = desired - previous
+        delta_norm = float(np.linalg.norm(delta))
+        if delta_norm <= max_delta or delta_norm <= 1e-12:
+            return desired
+        return previous + delta * (max_delta / delta_norm)
+
+    @staticmethod
+    def _clip_scalar(value: float, limit: float) -> tuple[float, bool]:
+        limit = max(0.0, float(limit))
+        value = float(value)
+        if limit <= 0.0:
+            return 0.0, abs(value) > 1e-12
+        clipped = float(np.clip(value, -limit, limit))
+        return clipped, bool(abs(clipped - value) > 1e-12)
+
+    def _reset_slew_state(self) -> None:
+        self._last_linear_cmd = np.zeros(3, dtype=np.float64)
+        self._last_angular_cmd = np.zeros(3, dtype=np.float64)
+        self._last_servo_wall = float(time.monotonic())
+        self._radial_integral_error = 0.0
+
+    def _servo_dt_sec(self) -> float:
+        now = float(time.monotonic())
+        default_dt = 1.0 / max(float(self.servo_hz), 1e-6)
+        if self._last_servo_wall is None:
+            dt_sec = default_dt
+        else:
+            dt_sec = now - float(self._last_servo_wall)
+            dt_sec = min(max(dt_sec, 1e-6), 0.1)
+        self._last_servo_wall = now
+        return float(dt_sec)
 
     def spherical_cmd_callback(self, msg) -> None:
         receipt_wall_time = float(time.monotonic())
@@ -173,6 +257,7 @@ class InfoFlowServoRuntime:
         cmd_cache = self.latest_cmd
         if cmd_cache is None:
             publish_zero_twist(self.cmd_pub, cmd_frame=self.cmd_frame)
+            self._reset_slew_state()
             self.stats.servo_zero_missing_cmd += 1
             self._maybe_log_status()
             return
@@ -192,6 +277,7 @@ class InfoFlowServoRuntime:
                 float(self._cmd_interval_ema_sec if self._cmd_interval_ema_sec is not None else -1.0),
             )
             publish_zero_twist(self.cmd_pub, cmd_frame=self.cmd_frame)
+            self._reset_slew_state()
             self.stats.servo_zero_cmd_stale += 1
             self._maybe_log_status()
             return
@@ -221,6 +307,7 @@ class InfoFlowServoRuntime:
                 exc,
             )
             publish_zero_twist(self.cmd_pub, cmd_frame=self.cmd_frame)
+            self._reset_slew_state()
             self.stats.servo_zero_tf_fail += 1
             self._maybe_log_status()
             return
@@ -242,33 +329,81 @@ class InfoFlowServoRuntime:
                 float(pose_stamp.to_sec()),
             )
             publish_zero_twist(self.cmd_pub, cmd_frame=self.cmd_frame, stamp=pose_stamp)
+            self._reset_slew_state()
             self.stats.servo_zero_pose_stale += 1
             self._maybe_log_status()
             return
 
         if bool(cmd.should_stop):
             publish_zero_twist(self.cmd_pub, cmd_frame=self.cmd_frame, stamp=pose_stamp)
+            self._reset_slew_state()
             self.stats.servo_zero_policy_stop += 1
             self._maybe_log_status()
             return
 
         try:
+            servo_dt_sec = self._servo_dt_sec()
             current_position = np.asarray(current_c2w[:3, 3], dtype=np.float64)
             reference_scene_center = np.asarray(
                 cmd.reference_scene_center,
                 dtype=np.float64,
             ).reshape(3)
             radius, theta, phi = position_to_spherical(current_position, reference_scene_center)
-            e_theta, e_phi, _ = local_frame_from_theta_phi(theta, phi)
-            theta_delta = float(cmd.delta_theta)
-            phi_delta = float(cmd.delta_phi)
-            step_dt = 1.0 / max(float(self.servo_hz), 1e-6)
-            theta_rate = theta_delta / step_dt
-            phi_rate = phi_delta / step_dt
-            linear_cmd = radius * (theta_rate * e_theta + phi_rate * e_phi)
-            linear_norm_raw = float(np.linalg.norm(linear_cmd))
-            if linear_norm_raw > self.linear_vel_max:
-                linear_cmd = linear_cmd * (self.linear_vel_max / max(linear_norm_raw, 1e-12))
+            e_theta, e_phi, n_hat = local_frame_from_theta_phi(theta, phi)
+            theta_rate = float(cmd.theta_rate)
+            phi_rate = float(cmd.phi_rate)
+            v_t = radius * (theta_rate * e_theta + phi_rate * e_phi)
+
+            reference_radius = float(cmd.reference_radius)
+            radial_error = float(reference_radius - radius)
+            radial_p_term = self.radial_gain * radial_error
+            radial_i_term = self.radial_i_gain * self._radial_integral_error
+            radial_speed_raw = radial_p_term + radial_i_term
+            radial_speed_cmd = 0.0
+            radial_limited = False
+            radial_integral_accepted = False
+            if abs(radial_error) > self.radial_deadband:
+                _, radial_limited_pre = self._clip_scalar(
+                    radial_speed_raw,
+                    self.radial_vel_max,
+                )
+                anti_windup_allows_integral = (
+                    not radial_limited_pre
+                    or radial_speed_raw * radial_error < 0.0
+                )
+                if anti_windup_allows_integral:
+                    self._radial_integral_error = float(
+                        np.clip(
+                            self._radial_integral_error + radial_error * servo_dt_sec,
+                            -self.radial_integral_limit,
+                            self.radial_integral_limit,
+                        )
+                    )
+                    radial_integral_accepted = True
+                radial_i_term = self.radial_i_gain * self._radial_integral_error
+                radial_speed_raw = radial_p_term + radial_i_term
+                radial_speed_cmd, radial_limited = self._clip_scalar(
+                    radial_speed_raw,
+                    self.radial_vel_max,
+                )
+                v_r = radial_speed_cmd * n_hat
+            else:
+                self._radial_integral_error = 0.0
+                radial_i_term = 0.0
+                radial_speed_raw = radial_p_term
+                v_r = np.zeros(3, dtype=np.float64)
+
+            linear_raw = v_t + v_r
+            linear_raw_norm = float(np.linalg.norm(linear_raw))
+            linear_cmd, linear_limited_norm = self._clip_vector_norm(
+                linear_raw,
+                self.linear_vel_max,
+            )
+            linear_cmd = self._slew_limit_vector(
+                linear_cmd,
+                self._last_linear_cmd,
+                self.linear_accel_max * servo_dt_sec,
+            )
 
             desired_c2w = look_at_c2w(current_position, reference_scene_center)
             current_rotation = np.asarray(current_c2w[:3, :3], dtype=np.float64)
@@ -276,11 +411,23 @@ class InfoFlowServoRuntime:
             rotation_error = desired_rotation @ current_rotation.T
             rotvec_error = R.from_matrix(rotation_error).as_rotvec().astype(np.float64)
             angular_cmd = np.zeros(3, dtype=np.float64)
-            if self.enable_angular and float(np.linalg.norm(rotvec_error)) > self.angular_speed_deadband:
-                angular_cmd = rotvec_error / step_dt
-                omega_norm_raw = float(np.linalg.norm(angular_cmd))
-                if omega_norm_raw > self.angular_speed_max:
-                    angular_cmd = angular_cmd * (self.angular_speed_max / max(omega_norm_raw, 1e-12))
+            angular_raw_norm = 0.0
+            angular_limited_norm = 0.0
+            rotvec_error_norm = float(np.linalg.norm(rotvec_error))
+            if self.enable_angular and rotvec_error_norm > self.angular_deadband:
+                angular_raw = self.angular_gain * rotvec_error
+                angular_raw_norm = float(np.linalg.norm(angular_raw))
+                angular_cmd, angular_limited_norm = self._clip_vector_norm(
+                    angular_raw,
+                    self.angular_speed_max,
+                )
+            angular_cmd = self._slew_limit_vector(
+                angular_cmd,
+                self._last_angular_cmd,
+                self.angular_accel_max * servo_dt_sec,
+            )
+            self._last_linear_cmd = linear_cmd.copy()
+            self._last_angular_cmd = angular_cmd.copy()
 
             publish_motion_components(
                 self.cmd_pub,
@@ -290,12 +437,35 @@ class InfoFlowServoRuntime:
                 stamp=pose_stamp,
             )
             self.profile_logger.debug(
-                "servo_cmd: cmd_age_ms=%.1f timeout_ms=%.1f delta_theta_phi=(%.6f, %.6f) linear_norm=%.6f angular_norm=%.6f",
+                (
+                    "servo_cmd: cmd_age_ms=%.1f timeout_ms=%.1f dt=%.4f "
+                    "theta_phi_rate=(%.6f, %.6f) |vt|=%.6f |vr|=%.6f "
+                    "radial_error=%.6f radial_p=%.6f radial_i=%.6f radial_integral=%.6f "
+                    "radial_raw=%.6f radial_cmd=%.6f radial_limited=%s radial_i_accept=%s "
+                    "linear_raw=%.6f linear_limited=%.6f linear_out=%.6f "
+                    "rotvec_error=%.6f angular_raw=%.6f angular_limited=%.6f angular_out=%.6f"
+                ),
                 float(cmd_age * 1000.0),
                 float(effective_timeout_sec * 1000.0),
-                float(theta_delta),
-                float(phi_delta),
+                float(servo_dt_sec),
+                float(theta_rate),
+                float(phi_rate),
+                float(np.linalg.norm(v_t)),
+                float(np.linalg.norm(v_r)),
+                float(radial_error),
+                float(radial_p_term),
+                float(radial_i_term),
+                float(self._radial_integral_error),
+                float(radial_speed_raw),
+                float(radial_speed_cmd),
+                bool(radial_limited),
+                bool(radial_integral_accepted),
+                float(linear_raw_norm),
+                float(linear_limited_norm),
                 float(np.linalg.norm(linear_cmd)),
+                float(rotvec_error_norm),
+                float(angular_raw_norm),
+                float(angular_limited_norm),
                 float(np.linalg.norm(angular_cmd)),
             )
             self.stats.servo_nonzero += 1
@@ -308,6 +478,7 @@ class InfoFlowServoRuntime:
                 exc,
             )
             publish_zero_twist(self.cmd_pub, cmd_frame=self.cmd_frame, stamp=pose_stamp)
+            self._reset_slew_state()
             self.stats.servo_exception += 1
         self._maybe_log_status()
 
@@ -329,6 +500,15 @@ def build_argparser():
     parser.add_argument("--pose_stale_timeout_sec", type=float, default=None)
     parser.add_argument("--linear_vel_max", type=float, default=None)
     parser.add_argument("--angular_speed_max", type=float, default=None)
+    parser.add_argument("--radial_gain", type=float, default=None)
+    parser.add_argument("--radial_i_gain", type=float, default=None)
+    parser.add_argument("--radial_deadband", type=float, default=None)
+    parser.add_argument("--radial_integral_limit", type=float, default=None)
+    parser.add_argument("--radial_vel_max", type=float, default=None)
+    parser.add_argument("--angular_gain", type=float, default=None)
+    parser.add_argument("--angular_deadband", type=float, default=None)
+    parser.add_argument("--linear_accel_max", type=float, default=None)
+    parser.add_argument("--angular_accel_max", type=float, default=None)
     parser.add_argument("--enable_angular", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("-o", "--output", type=str, default=f"replica/output/{time.strftime('%Y%m%d_%H%M%S')}")
     parser.add_argument("--log_level", type=str, default="INFO")
@@ -355,6 +535,15 @@ if __name__ == "__main__":
     args.pose_stale_timeout_sec = _resolve(args.pose_stale_timeout_sec, mc["pose_stale_timeout_sec"])
     args.linear_vel_max = _resolve(args.linear_vel_max, mc["linear_vel_max"])
     args.angular_speed_max = _resolve(args.angular_speed_max, mc["angular_speed_max"])
+    args.radial_gain = _resolve(args.radial_gain, mc["radial_gain"])
+    args.radial_i_gain = _resolve(args.radial_i_gain, mc["radial_i_gain"])
+    args.radial_deadband = _resolve(args.radial_deadband, mc["radial_deadband"])
+    args.radial_integral_limit = _resolve(args.radial_integral_limit, mc["radial_integral_limit"])
+    args.radial_vel_max = _resolve(args.radial_vel_max, mc["radial_vel_max"])
+    args.angular_gain = _resolve(args.angular_gain, mc["angular_gain"])
+    args.angular_deadband = _resolve(args.angular_deadband, mc["angular_deadband"])
+    args.linear_accel_max = _resolve(args.linear_accel_max, mc["linear_accel_max"])
+    args.angular_accel_max = _resolve(args.angular_accel_max, mc["angular_accel_max"])
     args.enable_angular = _resolve(args.enable_angular, mc["enable_angular"])
 
     node = InfoFlowServoRuntime(args)

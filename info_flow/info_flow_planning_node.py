@@ -78,7 +78,7 @@ class InfoFlowPlanningNode:
             enable_angular=args.enable_angular,
             grad_eps=args.grad_eps,
             spherical_speed_min=args.spherical_speed_min,
-            planner_output_mode="spherical_delta",
+            planner_output_mode="spherical_rate",
             verbose=True,
         )
         self.motion_policy_lock = threading.Lock()
@@ -242,9 +242,8 @@ class InfoFlowPlanningNode:
         model_version: int,
         planner_tick: int,
         dt: float,
-        delta_theta: float,
-        delta_phi: float,
-        delta_r: float,
+        theta_rate: float,
+        phi_rate: float,
         reference_radius: float,
         reference_scene_center: np.ndarray,
         fisher_score: float,
@@ -257,9 +256,8 @@ class InfoFlowPlanningNode:
         msg.model_version = int(model_version)
         msg.planner_tick = int(planner_tick)
         msg.dt = float(dt)
-        msg.delta_theta = float(delta_theta)
-        msg.delta_phi = float(delta_phi)
-        msg.delta_r = float(delta_r)
+        msg.theta_rate = float(theta_rate)
+        msg.phi_rate = float(phi_rate)
         msg.reference_radius = float(reference_radius)
         msg.reference_scene_center = [
             float(reference_scene_center[0]),
@@ -283,9 +281,8 @@ class InfoFlowPlanningNode:
             model_version=model_version,
             planner_tick=self.planner_tick,
             dt=float(self.motion_policy.dt),
-            delta_theta=0.0,
-            delta_phi=0.0,
-            delta_r=0.0,
+            theta_rate=0.0,
+            phi_rate=0.0,
             reference_radius=float(getattr(self.motion_policy, "reference_radius", 0.0) or 0.0),
             reference_scene_center=np.asarray(
                 getattr(self.motion_policy, "reference_scene_center", np.zeros(3)),
@@ -475,9 +472,8 @@ class InfoFlowPlanningNode:
             model_version=int(snapshot.model_version),
             planner_tick=int(self.planner_tick),
             dt=float(getattr(motion_result, "dt", self.motion_policy.dt)),
-            delta_theta=float(getattr(motion_result, "delta_theta_applied", 0.0)),
-            delta_phi=float(getattr(motion_result, "delta_phi_applied", 0.0)),
-            delta_r=0.0,
+            theta_rate=float(getattr(motion_result, "theta_rate_applied", 0.0)),
+            phi_rate=float(getattr(motion_result, "phi_rate_applied", 0.0)),
             reference_radius=float(getattr(motion_result, "reference_radius", 0.0)),
             reference_scene_center=np.asarray(
                 getattr(motion_result, "reference_scene_center", [0.0, 0.0, 0.0]),

@@ -59,6 +59,9 @@ class InfoFlowServoNode:
         self.linear_vel_max = float(args.linear_vel_max)
         self.angular_speed_max = float(args.angular_speed_max)
         self.enable_angular = bool(args.enable_angular)
+        self.radial_gain = float(args.radial_gain)
+        self.radial_deadband = max(0.0, float(args.radial_deadband))
+        self.angular_gain = float(args.angular_gain)
         self.angular_speed_deadband = 1e-3
         self.status_log_interval_sec = max(0.2, float(args.status_log_interval_sec))
 
@@ -226,10 +229,16 @@ class InfoFlowServoNode:
             current_position = np.asarray(current_c2w[:3, 3], dtype=np.float64)
             reference_scene_center = np.asarray(cmd.reference_scene_center, dtype=np.float64).reshape(3)
             radius, theta, phi = position_to_spherical(current_position, reference_scene_center)
-            e_theta, e_phi, _ = local_frame_from_theta_phi(theta, phi)
-            theta_rate = float(cmd.delta_theta)
-            phi_rate = float(cmd.delta_phi)
-            linear_cmd = radius * (theta_rate * e_theta + phi_rate * e_phi)
+            e_theta, e_phi, n_hat = local_frame_from_theta_phi(theta, phi)
+            theta_rate = float(cmd.theta_rate)
+            phi_rate = float(cmd.phi_rate)
+            v_t = radius * (theta_rate * e_theta + phi_rate * e_phi)
+            radial_error = float(cmd.reference_radius - radius)
+            if abs(radial_error) > self.radial_deadband:
+                v_r = self.radial_gain * radial_error * n_hat
+            else:
+                v_r = np.zeros(3, dtype=np.float64)
+            linear_cmd = v_t + v_r
             linear_norm_raw = float(np.linalg.norm(linear_cmd))
             if linear_norm_raw > self.linear_vel_max:
                 linear_cmd = linear_cmd * (self.linear_vel_max / max(linear_norm_raw, 1e-12))
@@ -241,7 +250,7 @@ class InfoFlowServoNode:
             rotvec_error = R.from_matrix(rotation_error).as_rotvec().astype(np.float64)
             angular_cmd = np.zeros(3, dtype=np.float64)
             if self.enable_angular and float(np.linalg.norm(rotvec_error)) > self.angular_speed_deadband:
-                angular_cmd = rotvec_error / max(float(cmd.dt), 1e-6)
+                angular_cmd = self.angular_gain * rotvec_error
                 omega_norm_raw = float(np.linalg.norm(angular_cmd))
                 if omega_norm_raw > self.angular_speed_max:
                     angular_cmd = angular_cmd * (
@@ -256,7 +265,7 @@ class InfoFlowServoNode:
                 stamp=pose_stamp,
             )
             self.profile_logger.debug(
-                "servo_cmd: cmd_age_ms=%.1f theta_phi=(%.6f, %.6f) linear_norm=%.6f angular_norm=%.6f",
+                "servo_cmd: cmd_age_ms=%.1f theta_phi_rate=(%.6f, %.6f) linear_norm=%.6f angular_norm=%.6f",
                 float(cmd_age * 1000.0),
                 float(theta_rate),
                 float(phi_rate),
@@ -287,12 +296,15 @@ def build_argparser():
     parser.add_argument("--cmd_frame", type=str, default="base_link")
     parser.add_argument("--world_frame", type=str, default="base_link")
     parser.add_argument("--camera_frame", type=str, default="cam_1_color_optical_frame")
-    parser.add_argument("--servo_hz", type=float, default=50.0)
-    parser.add_argument("--spherical_cmd_timeout_sec", type=float, default=0.25)
-    parser.add_argument("--pose_stale_timeout_sec", type=float, default=0.2)
-    parser.add_argument("--linear_vel_max", type=float, default=0.05)
-    parser.add_argument("--angular_speed_max", type=float, default=1.0)
-    parser.add_argument("--enable_angular", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--servo_hz", type=float, default=None)
+    parser.add_argument("--spherical_cmd_timeout_sec", type=float, default=None)
+    parser.add_argument("--pose_stale_timeout_sec", type=float, default=None)
+    parser.add_argument("--linear_vel_max", type=float, default=None)
+    parser.add_argument("--angular_speed_max", type=float, default=None)
+    parser.add_argument("--radial_gain", type=float, default=None)
+    parser.add_argument("--radial_deadband", type=float, default=None)
+    parser.add_argument("--angular_gain", type=float, default=None)
+    parser.add_argument("--enable_angular", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("-o", "--output", type=str, default=f"replica/output/{time.strftime('%Y%m%d_%H%M%S')}")
     parser.add_argument("--log_profile", choices=("quiet", "default", "debug"), default="default")
     parser.add_argument("--log_level", type=str, default=None)
@@ -318,5 +330,20 @@ if __name__ == "__main__":
     set_nofile_limit()
     configure_entry_logging(args)
     config = load_runtime_config(args.config)
+
+    mc = config["motion_control"]
+
+    def _resolve(cli_val, yaml_val):
+        return cli_val if cli_val is not None else yaml_val
+
+    args.servo_hz = _resolve(args.servo_hz, mc["servo_hz"])
+    args.spherical_cmd_timeout_sec = _resolve(args.spherical_cmd_timeout_sec, mc["spherical_cmd_timeout_sec"])
+    args.pose_stale_timeout_sec = _resolve(args.pose_stale_timeout_sec, mc["pose_stale_timeout_sec"])
+    args.linear_vel_max = _resolve(args.linear_vel_max, mc["linear_vel_max"])
+    args.angular_speed_max = _resolve(args.angular_speed_max, mc["angular_speed_max"])
+    args.radial_gain = _resolve(args.radial_gain, mc["radial_gain"])
+    args.radial_deadband = _resolve(args.radial_deadband, mc["radial_deadband"])
+    args.angular_gain = _resolve(args.angular_gain, mc["angular_gain"])
+    args.enable_angular = _resolve(args.enable_angular, mc["enable_angular"])
     node = InfoFlowServoNode(args, config)
     rospy.spin()

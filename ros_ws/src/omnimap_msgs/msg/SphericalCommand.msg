@@ -2,9 +2,8 @@ std_msgs/Header header
 uint32 model_version
 uint32 planner_tick
 float64 dt
-float64 delta_theta
-float64 delta_phi
-float64 delta_r
+float64 theta_rate
+float64 phi_rate
 float64 reference_radius
 float64[3] reference_scene_center
 float64 fisher_score

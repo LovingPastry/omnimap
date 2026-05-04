@@ -75,9 +75,8 @@ class SphericalCommand:
     model_version: int
     idx: int
     dt: float
-    delta_theta: float
-    delta_phi: float
-    delta_r: float
+    theta_rate: float
+    phi_rate: float
     reference_radius: float
     reference_scene_center: np.ndarray
     should_stop: bool
@@ -377,7 +376,7 @@ class InfoFlowROSNode:
             rospy.Duration(1.0 / max(self.planner_hz, 1e-6)),
             self._planning_timer_callback,
         )
-        if self.planner_output_mode == "spherical_delta":
+        if self.planner_output_mode == "spherical_rate":
             self.servo_timer = rospy.Timer(
                 rospy.Duration(1.0 / max(self.servo_hz, 1e-6)),
                 self._servo_timer_callback,
@@ -967,7 +966,7 @@ class InfoFlowROSNode:
             with self.stats_lock:
                 self.stats.planner_zero += 1
                 self.stats.planner_zero_policy_stop += 1
-            if self.planner_output_mode == "spherical_delta":
+            if self.planner_output_mode == "spherical_rate":
                 self._cache_spherical_command(
                     motion_result=motion_result,
                     stamp=pose_state.stamp,
@@ -977,7 +976,7 @@ class InfoFlowROSNode:
             return
 
         publish_ms = 0.0
-        if self.planner_output_mode == "spherical_delta":
+        if self.planner_output_mode == "spherical_rate":
             self._cache_spherical_command(
                 motion_result=motion_result,
                 stamp=pose_state.stamp,
@@ -1013,8 +1012,8 @@ class InfoFlowROSNode:
             "planner_cmd: mode=%s idx=%d theta_phi_cmd=(%.6f, %.6f) spherical_cmd_age_ms=0.0 cartesian_cmd_norm=%.6f",
             self.planner_output_mode,
             int(self.planner_tick),
-            float(getattr(motion_result, "delta_theta_applied", 0.0)),
-            float(getattr(motion_result, "delta_phi_applied", 0.0)),
+            float(getattr(motion_result, "theta_rate_applied", 0.0)),
+            float(getattr(motion_result, "phi_rate_applied", 0.0)),
             float(np.linalg.norm(np.asarray(getattr(motion_result, "velocity_world", np.zeros(3)), dtype=np.float64))),
         )
         with self.stats_lock:
@@ -1034,9 +1033,8 @@ class InfoFlowROSNode:
             model_version=int(model_version),
             idx=int(getattr(motion_result, "idx", self.planner_tick)),
             dt=float(getattr(motion_result, "dt", self.motion_policy.dt)),
-            delta_theta=float(getattr(motion_result, "delta_theta_applied", 0.0)),
-            delta_phi=float(getattr(motion_result, "delta_phi_applied", 0.0)),
-            delta_r=0.0,
+            theta_rate=float(getattr(motion_result, "theta_rate_applied", 0.0)),
+            phi_rate=float(getattr(motion_result, "phi_rate_applied", 0.0)),
             reference_radius=float(getattr(motion_result, "reference_radius", 0.0)),
             reference_scene_center=np.asarray(
                 getattr(motion_result, "reference_scene_center", [0.0, 0.0, 0.0]),
@@ -1053,8 +1051,8 @@ class InfoFlowROSNode:
         msg = TwistStamped()
         msg.header.stamp = stamp if stamp is not None else rospy.Time.now()
         msg.header.frame_id = self.cmd_frame
-        msg.twist.angular.x = float(getattr(motion_result, "delta_theta_applied", 0.0))
-        msg.twist.angular.y = float(getattr(motion_result, "delta_phi_applied", 0.0))
+        msg.twist.angular.x = float(getattr(motion_result, "theta_rate_applied", 0.0))
+        msg.twist.angular.y = float(getattr(motion_result, "phi_rate_applied", 0.0))
         msg.twist.angular.z = float(getattr(motion_result, "dt", self.motion_policy.dt))
         msg.twist.linear.x = float(getattr(motion_result, "reference_radius", 0.0))
         msg.twist.linear.y = float(getattr(motion_result, "fisher_score", 0.0))
@@ -1193,10 +1191,16 @@ class InfoFlowROSNode:
                 current_position,
                 reference_scene_center,
             )
-            e_theta, e_phi, _ = self._local_frame_from_theta_phi(theta, phi)
-            theta_rate = float(cmd.delta_theta)
-            phi_rate = float(cmd.delta_phi)
-            linear_cmd = radius * (theta_rate * e_theta + phi_rate * e_phi)
+            e_theta, e_phi, n_hat = self._local_frame_from_theta_phi(theta, phi)
+            theta_rate = float(cmd.theta_rate)
+            phi_rate = float(cmd.phi_rate)
+            v_t = radius * (theta_rate * e_theta + phi_rate * e_phi)
+            radial_error = float(cmd.reference_radius - radius)
+            if abs(radial_error) > float(self.motion_policy.radial_deadband):
+                v_r = float(self.motion_policy.radial_gain) * radial_error * n_hat
+            else:
+                v_r = np.zeros(3, dtype=np.float64)
+            linear_cmd = v_t + v_r
             linear_norm_raw = float(np.linalg.norm(linear_cmd))
             linear_scale = 1.0
             if linear_norm_raw > float(self.motion_policy.linear_vel_max):
@@ -1216,7 +1220,7 @@ class InfoFlowROSNode:
                 and float(np.linalg.norm(rotvec_error))
                 > float(self.motion_policy.angular_speed_deadband)
             ):
-                angular_cmd = rotvec_error / max(float(cmd.dt), 1e-6)
+                angular_cmd = float(self.motion_policy.angular_gain) * rotvec_error
                 omega_norm_raw = float(np.linalg.norm(angular_cmd))
                 if omega_norm_raw > float(self.motion_policy.angular_speed_max):
                     angular_cmd = angular_cmd * (
@@ -1507,7 +1511,7 @@ class InfoFlowROSNode:
             self.publish_zero_twist(stamp)
             return
 
-        if self.planner_output_mode == "spherical_delta":
+        if self.planner_output_mode == "spherical_rate":
             self._cache_spherical_command(
                 motion_result=motion_result,
                 stamp=stamp,
@@ -1846,14 +1850,14 @@ def build_argparser():
         "--servo_hz",
         type=float,
         default=50.0,
-        help="servo publish loop frequency (Hz) used in spherical_delta mode",
+        help="servo publish loop frequency (Hz) used in spherical_rate mode",
     )
     parser.add_argument(
         "--planner_output_mode",
         type=str,
         default="cartesian_legacy",
-        choices=("cartesian_legacy", "spherical_delta"),
-        help="planner output mode: legacy cartesian Twist or spherical delta command",
+        choices=("cartesian_legacy", "spherical_rate"),
+        help="planner output mode: legacy cartesian Twist or spherical rate command",
     )
     parser.add_argument(
         "--spherical_cmd_timeout_sec",
