@@ -82,8 +82,8 @@ class InfoFlowPlanningNode:
             verbose=True,
         )
         self.motion_policy_lock = threading.Lock()
-        self.fixed_hemisphere_center, self.fixed_hemisphere_radius_m = fixed_hemisphere_from_config(
-            config
+        self.fixed_hemisphere_center, self.fixed_hemisphere_radius_m = (
+            fixed_hemisphere_from_config(config)
         )
         if self.fixed_hemisphere_center is not None:
             self.main_logger.warning(
@@ -111,7 +111,9 @@ class InfoFlowPlanningNode:
             queue_size=1,
         )
 
-        self.pose_sub = rospy.Subscriber(args.pose_topic, PoseStamped, self.pose_callback, queue_size=1)
+        self.pose_sub = rospy.Subscriber(
+            args.pose_topic, PoseStamped, self.pose_callback, queue_size=1
+        )
         SnapshotRefMsg, _ = import_omnimap_msgs()
         self.snapshot_ref_sub = rospy.Subscriber(
             args.snapshot_ref_topic,
@@ -140,7 +142,9 @@ class InfoFlowPlanningNode:
             float(self.planner_hz),
         )
 
-    def _planner_log_throttle(self, key: str, interval_sec: float, level: str, msg: str, *args):
+    def _planner_log_throttle(
+        self, key: str, interval_sec: float, level: str, msg: str, *args
+    ):
         now = float(time.monotonic())
         last = float(self._throttle_last.get(key, -1e18))
         if (now - last) < float(interval_sec):
@@ -194,7 +198,10 @@ class InfoFlowPlanningNode:
             snapshot_ref = self.latest_snapshot_ref
         if snapshot_ref is None:
             return self.loaded_snapshot
-        if self.loaded_snapshot is not None and self.loaded_snapshot_version == snapshot_ref.model_version:
+        if (
+            self.loaded_snapshot is not None
+            and self.loaded_snapshot_version == snapshot_ref.model_version
+        ):
             return self.loaded_snapshot
 
         load_t0 = time.perf_counter()
@@ -283,7 +290,9 @@ class InfoFlowPlanningNode:
             dt=float(self.motion_policy.dt),
             theta_rate=0.0,
             phi_rate=0.0,
-            reference_radius=float(getattr(self.motion_policy, "reference_radius", 0.0) or 0.0),
+            reference_radius=float(
+                getattr(self.motion_policy, "reference_radius", 0.0) or 0.0
+            ),
             reference_scene_center=np.asarray(
                 getattr(self.motion_policy, "reference_scene_center", np.zeros(3)),
                 dtype=np.float64,
@@ -326,17 +335,21 @@ class InfoFlowPlanningNode:
         )
 
     def _planning_timer_callback(self, _event):
+        # 周期性规划入口：
+        # 按固定 tick 执行一次“状态检查 -> 策略求解 -> 指令发布”。
         self.planner_tick += 1
         planning_t0 = time.perf_counter()
         with self.stats_lock:
             self.stats.planner_steps += 1
 
+        # 读取最新位姿与最新 snapshot 引用（均为跨回调共享状态，需加锁）。
         with self.pose_lock:
             pose_state = self.latest_pose
         snapshot = self._ensure_latest_snapshot_loaded()
         with self.snapshot_ref_lock:
             snapshot_ref = self.latest_snapshot_ref
 
+        # 无位姿：规划不安全，发布 stop command 等待上游恢复。
         if pose_state is None:
             self._planner_log_throttle(
                 "missing_pose",
@@ -345,7 +358,11 @@ class InfoFlowPlanningNode:
                 "规划等待 pose topic：%s",
                 self.args.pose_topic,
             )
-            self._publish_stop_command(reason="missing_pose", stamp=None, model_version=max(self.loaded_snapshot_version, 0))
+            self._publish_stop_command(
+                reason="missing_pose",
+                stamp=None,
+                model_version=max(self.loaded_snapshot_version, 0),
+            )
             with self.stats_lock:
                 self.stats.planner_stop_missing_pose += 1
             self.profile_logger.info(
@@ -356,7 +373,10 @@ class InfoFlowPlanningNode:
             self._maybe_log_status()
             return
 
-        if snapshot_ref is not None and self.snapshot_load_failed_version == int(snapshot_ref.model_version):
+        # snapshot 加载曾失败且版本未变化：直接保持停机，避免重复尝试造成抖动。
+        if snapshot_ref is not None and self.snapshot_load_failed_version == int(
+            snapshot_ref.model_version
+        ):
             self._publish_stop_command(
                 reason=f"snapshot_load_failure:{self.snapshot_load_failed_reason}",
                 stamp=pose_state.stamp,
@@ -372,6 +392,7 @@ class InfoFlowPlanningNode:
             self._maybe_log_status()
             return
 
+        # 尚无可用地图快照：无法规划，发布 stop command。
         if snapshot is None:
             self._planner_log_throttle(
                 "missing_snapshot",
@@ -380,7 +401,9 @@ class InfoFlowPlanningNode:
                 "规划等待 snapshot ref：%s",
                 self.args.snapshot_ref_topic,
             )
-            self._publish_stop_command(reason="missing_snapshot", stamp=pose_state.stamp, model_version=0)
+            self._publish_stop_command(
+                reason="missing_snapshot", stamp=pose_state.stamp, model_version=0
+            )
             with self.stats_lock:
                 self.stats.planner_stop_missing_snapshot += 1
             self.profile_logger.info(
@@ -391,6 +414,9 @@ class InfoFlowPlanningNode:
             self._maybe_log_status()
             return
 
+        # 双重新鲜度检查：
+        # - stamp_age: ROS 时间戳到当前时刻的延迟
+        # - receipt_age: 本进程收到该位姿后的墙钟时间
         stamp_age = float((rospy.Time.now() - pose_state.stamp).to_sec())
         receipt_age = float(time.monotonic() - pose_state.wall_time)
         self.profile_logger.debug(
@@ -399,6 +425,7 @@ class InfoFlowPlanningNode:
             float(receipt_age),
             float(pose_state.stamp.to_sec()),
         )
+        # 位姿过期：宁可停车，不输出基于陈旧状态的运动指令。
         if stamp_age > self.pose_stale_timeout_sec:
             self._planner_log_throttle(
                 "pose_stale",
@@ -432,11 +459,13 @@ class InfoFlowPlanningNode:
 
         try:
             with self.motion_policy_lock:
+                # 固定半球参考约束会在每个 tick 重新施加，确保策略边界一致。
                 apply_fixed_hemisphere_reference(
                     self.motion_policy,
                     self.fixed_hemisphere_center,
                     self.fixed_hemisphere_radius_m,
                 )
+                # 用当前位姿 + 最新 GS 快照执行一步策略求解。
                 motion_result = self.motion_policy.next_pose_from_c2w(
                     gs_backend=snapshot.backend,
                     current_c2w=np.asarray(pose_state.pose_4x4, dtype=np.float64),
@@ -445,6 +474,7 @@ class InfoFlowPlanningNode:
                     idx=self.planner_tick,
                 )
         except Exception as exc:
+            # 策略异常时立即降级为 stop command，避免异常传播为危险动作。
             self._planner_log_throttle(
                 "policy_exception",
                 1.0,
@@ -467,6 +497,7 @@ class InfoFlowPlanningNode:
             self._maybe_log_status()
             return
 
+        # 将策略输出统一封装为球坐标控制指令发布给 servo。
         self._publish_spherical_command(
             stamp=pose_state.stamp,
             model_version=int(snapshot.model_version),
@@ -484,6 +515,7 @@ class InfoFlowPlanningNode:
             stop_reason=str(getattr(motion_result, "stop_reason", "unknown")),
         )
 
+        # 记录端到端与策略内部耗时，便于在线性能诊断。
         planning_total_ms = (time.perf_counter() - planning_t0) * 1000.0
         mp_timing = getattr(self.motion_policy, "last_timing", {}) or {}
         self.profile_logger.info(
@@ -500,6 +532,7 @@ class InfoFlowPlanningNode:
             float(mp_timing.get("s2c_ms", float("nan"))),
             int(snapshot.model_version),
         )
+        # 按是否 stop 归类统计，用于评估策略稳定性与有效动作比例。
         if bool(getattr(motion_result, "should_stop", False)):
             with self.stats_lock:
                 self.stats.planner_stop_policy += 1
@@ -513,15 +546,28 @@ def build_argparser():
     parser = argparse.ArgumentParser(
         description="Distributed InfoFlow planning node (compute side).",
     )
-    parser.add_argument("-c", "--config", type=str, default="config/rtabmap_config.yaml")
-    parser.add_argument("--camera_info_topic", type=str, default="/cam_1/color/camera_info")
+    parser.add_argument(
+        "-c", "--config", type=str, default="config/rtabmap_config.yaml"
+    )
+    parser.add_argument(
+        "--camera_info_topic", type=str, default="/cam_1/color/camera_info"
+    )
     parser.add_argument("--pose_topic", type=str, default="/omnimap/pose_state")
-    parser.add_argument("--snapshot_ref_topic", type=str, default="/omnimap/planner_snapshot_ref")
-    parser.add_argument("--spherical_cmd_topic", type=str, default="/omnimap/spherical_cmd")
+    parser.add_argument(
+        "--snapshot_ref_topic", type=str, default="/omnimap/planner_snapshot_ref"
+    )
+    parser.add_argument(
+        "--spherical_cmd_topic", type=str, default="/omnimap/spherical_cmd"
+    )
     parser.add_argument("--world_frame", type=str, default="base_link")
     parser.add_argument("--planner_hz", type=float, default=None)
     parser.add_argument("--pose_stale_timeout_sec", type=float, default=None)
-    parser.add_argument("-o", "--output", type=str, default=f"replica/output/{time.strftime('%Y%m%d_%H%M%S')}")
+    parser.add_argument(
+        "-o",
+        "--output",
+        type=str,
+        default=f"replica/output/{time.strftime('%Y%m%d_%H%M%S')}",
+    )
     parser.add_argument("--fisher_step_scale", type=float, default=None)
     parser.add_argument("--linear_vel_max", type=float, default=None)
     parser.add_argument("--angular_gain", type=float, default=None)
@@ -529,9 +575,13 @@ def build_argparser():
     parser.add_argument("--dt", type=float, default=None)
     parser.add_argument("--grad_eps", type=float, default=None)
     parser.add_argument("--spherical_speed_min", type=float, default=None)
-    parser.add_argument("--enable_angular", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument(
+        "--enable_angular", action=argparse.BooleanOptionalAction, default=None
+    )
     parser.add_argument("--angular_speed_max", type=float, default=None)
-    parser.add_argument("--log_profile", choices=("quiet", "default", "debug"), default="default")
+    parser.add_argument(
+        "--log_profile", choices=("quiet", "default", "debug"), default="default"
+    )
     parser.add_argument("--log_level", type=str, default=None)
     parser.add_argument(
         "--log_section",
@@ -539,7 +589,9 @@ def build_argparser():
         choices=("all", "main", "tsdf", "gaussian", "fisher", "planner", "profile"),
         default=None,
     )
-    parser.add_argument("--log_min_level", choices=("DEBUG", "INFO", "WARNING"), default="INFO")
+    parser.add_argument(
+        "--log_min_level", choices=("DEBUG", "INFO", "WARNING"), default="INFO"
+    )
     parser.add_argument("--log_every", type=int, default=10)
     parser.add_argument("--status_log_interval_sec", type=float, default=1.0)
     parser.add_argument(
@@ -561,17 +613,21 @@ if __name__ == "__main__":
     def _resolve(cli_val, yaml_val):
         return cli_val if cli_val is not None else yaml_val
 
-    args.planner_hz           = _resolve(args.planner_hz,            mc["planner_hz"])
-    args.pose_stale_timeout_sec = _resolve(args.pose_stale_timeout_sec, mc["pose_stale_timeout_sec"])
-    args.fisher_step_scale    = _resolve(args.fisher_step_scale,     mc["fisher_step_scale"])
-    args.linear_vel_max       = _resolve(args.linear_vel_max,        mc["linear_vel_max"])
-    args.angular_gain         = _resolve(args.angular_gain,          mc["angular_gain"])
-    args.radial_gain          = _resolve(args.radial_gain,           mc["radial_gain"])
-    args.dt                   = _resolve(args.dt,                    mc["dt"])
-    args.grad_eps             = _resolve(args.grad_eps,              mc["grad_eps"])
-    args.spherical_speed_min  = _resolve(args.spherical_speed_min,   mc["spherical_speed_min"])
-    args.enable_angular       = _resolve(args.enable_angular,        mc["enable_angular"])
-    args.angular_speed_max    = _resolve(args.angular_speed_max,     mc["angular_speed_max"])
+    args.planner_hz = _resolve(args.planner_hz, mc["planner_hz"])
+    args.pose_stale_timeout_sec = _resolve(
+        args.pose_stale_timeout_sec, mc["pose_stale_timeout_sec"]
+    )
+    args.fisher_step_scale = _resolve(args.fisher_step_scale, mc["fisher_step_scale"])
+    args.linear_vel_max = _resolve(args.linear_vel_max, mc["linear_vel_max"])
+    args.angular_gain = _resolve(args.angular_gain, mc["angular_gain"])
+    args.radial_gain = _resolve(args.radial_gain, mc["radial_gain"])
+    args.dt = _resolve(args.dt, mc["dt"])
+    args.grad_eps = _resolve(args.grad_eps, mc["grad_eps"])
+    args.spherical_speed_min = _resolve(
+        args.spherical_speed_min, mc["spherical_speed_min"]
+    )
+    args.enable_angular = _resolve(args.enable_angular, mc["enable_angular"])
+    args.angular_speed_max = _resolve(args.angular_speed_max, mc["angular_speed_max"])
 
     node = InfoFlowPlanningNode(args, config)
     rospy.spin()

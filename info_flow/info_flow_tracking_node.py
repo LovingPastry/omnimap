@@ -260,6 +260,10 @@ class InfoFlowTrackingNode:
         )
 
     def tf_native_callback(self, rgb_msg, depth_msg):
+        # RGB-D 同步回调（原生 TF 路径）：
+        # 1) 用图像时间戳查询相机位姿；
+        # 2) 进行关键帧门控；
+        # 3) 通过门控后解码图像并入队给 tracking 后端。
         if self.shutdown_requested:
             return
         stamp = rgb_msg.header.stamp
@@ -271,6 +275,7 @@ class InfoFlowTrackingNode:
             float(now_sec - stamp_sec),
         )
         try:
+            # 按图像时间戳查询 world->camera 位姿，保证时序对齐。
             tf_t0 = time.perf_counter()
             pose_w2c, pose_4x4, _ = lookup_pose_from_tf(
                 self.tf_buffer,
@@ -293,6 +298,7 @@ class InfoFlowTrackingNode:
                 "tf_lookup_failure",
                 1.0,
                 "warning",
+                # 节流告警：避免 TF 问题在高帧率下刷屏。
                 "按图像时间戳查询 TF 失败：rgb_stamp=%.3f now=%.3f lag=%.3fs err=%s",
                 float(stamp_sec),
                 float(now_sec),
@@ -301,6 +307,7 @@ class InfoFlowTrackingNode:
             )
             return
 
+        # 发布当前帧位姿供外部可视化/监控，并更新统计。
         pose_msg = pose_stamped_from_c2w(
             c2w=pose_4x4,
             stamp=stamp,
@@ -315,6 +322,7 @@ class InfoFlowTrackingNode:
             self.request_shutdown(f"达到跟踪帧上限（{self.max_frames}），停止 tracking 节点。")
             return
 
+        # 关键帧门控：根据时间间隔、位姿运动量等条件决定是否送入 tracking。
         decision = self.keyframe_gate.decide(
             pose_4x4=pose_4x4,
             stamp_sec=stamp_sec,
@@ -340,11 +348,13 @@ class InfoFlowTrackingNode:
             self.stats.gated_passed += 1
 
         try:
+            # 仅对通过门控的帧做解码，降低无效 CPU 开销。
             rgb_image, depth_image = self._decode_compressed_rgbd(rgb_msg, depth_msg)
         except Exception as exc:
             self.main_logger.error("压缩图像解码失败：%s", exc)
             return
 
+        # 构造 tracking 任务并入队，source 记录触发关键帧的原因，便于回溯分析。
         task = self._build_track_task(
             idx=self.next_track_index,
             stamp=stamp,

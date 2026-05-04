@@ -252,10 +252,15 @@ class InfoFlowServoRuntime:
         )
 
     def _servo_timer_callback(self, _event) -> None:
+        # 周期伺服主循环：
+        # 1) 读取最新 planner 命令与本机位姿；
+        # 2) 通过多重安全门（缺命令/过期/TF失败/位姿过期/策略要求停止）；
+        # 3) 将球坐标速度指令转换为 Twist 并发布。
         self.stats.servo_steps += 1
 
         cmd_cache = self.latest_cmd
         if cmd_cache is None:
+            # 尚未收到任何规划命令：主动发布零速，保证执行侧静止安全。
             publish_zero_twist(self.cmd_pub, cmd_frame=self.cmd_frame)
             self._reset_slew_state()
             self.stats.servo_zero_missing_cmd += 1
@@ -266,6 +271,7 @@ class InfoFlowServoRuntime:
         cmd_age = float(time.monotonic() - cmd_cache.receipt_wall_time)
         effective_timeout_sec = self._effective_cmd_timeout_sec()
         if cmd_age > effective_timeout_sec:
+            # 命令超时：避免执行陈旧控制量，降级为零速。
             self._planner_log_throttle(
                 "cmd_stale",
                 1.0,
@@ -283,6 +289,7 @@ class InfoFlowServoRuntime:
             return
 
         try:
+            # 从本机 TF 获取当前相机位姿（执行侧闭环反馈）。
             tf_t0 = time.perf_counter()
             current_c2w, pose_stamp = lookup_latest_pose_from_tf(
                 self.tf_buffer,
@@ -314,6 +321,7 @@ class InfoFlowServoRuntime:
 
         pose_age = float((rospy.Time.now() - pose_stamp).to_sec())
         if pose_age > self.pose_stale_timeout_sec:
+            # 位姿过期：停止输出运动，防止基于过时状态运动。
             self._planner_log_throttle(
                 "pose_stale",
                 1.0,
@@ -335,6 +343,7 @@ class InfoFlowServoRuntime:
             return
 
         if bool(cmd.should_stop):
+            # planner 明确要求 stop（如策略收敛/风险条件触发）。
             publish_zero_twist(self.cmd_pub, cmd_frame=self.cmd_frame, stamp=pose_stamp)
             self._reset_slew_state()
             self.stats.servo_zero_policy_stop += 1
@@ -352,10 +361,12 @@ class InfoFlowServoRuntime:
             e_theta, e_phi, n_hat = local_frame_from_theta_phi(theta, phi)
             theta_rate = float(cmd.theta_rate)
             phi_rate = float(cmd.phi_rate)
+            # 切向速度：沿球面切平面的角速度分量。
             v_t = radius * (theta_rate * e_theta + phi_rate * e_phi)
 
             reference_radius = float(cmd.reference_radius)
             radial_error = float(reference_radius - radius)
+            # 径向 PI：负责把当前半径收敛到参考半径，带抗积分饱和与速度限幅。
             radial_p_term = self.radial_gain * radial_error
             radial_i_term = self.radial_i_gain * self._radial_integral_error
             radial_speed_raw = radial_p_term + radial_i_term
@@ -388,11 +399,13 @@ class InfoFlowServoRuntime:
                 )
                 v_r = radial_speed_cmd * n_hat
             else:
+                # 在 deadband 内清零积分，避免微小抖动长期累积。
                 self._radial_integral_error = 0.0
                 radial_i_term = 0.0
                 radial_speed_raw = radial_p_term
                 v_r = np.zeros(3, dtype=np.float64)
 
+            # 平移速度 = 切向 + 径向，再做速度上限与加速度斜率限制（slew rate）。
             linear_raw = v_t + v_r
             linear_raw_norm = float(np.linalg.norm(linear_raw))
             linear_cmd, linear_limited_norm = self._clip_vector_norm(
@@ -414,6 +427,7 @@ class InfoFlowServoRuntime:
             angular_raw_norm = 0.0
             angular_limited_norm = 0.0
             rotvec_error_norm = float(np.linalg.norm(rotvec_error))
+            # 角速度控制：将朝向误差 rotvec 比例映射为角速度，并进行限幅。
             if self.enable_angular and rotvec_error_norm > self.angular_deadband:
                 angular_raw = self.angular_gain * rotvec_error
                 angular_raw_norm = float(np.linalg.norm(angular_raw))
@@ -421,6 +435,7 @@ class InfoFlowServoRuntime:
                     angular_raw,
                     self.angular_speed_max,
                 )
+            # 同样施加角加速度斜率限制，减小控制突变。
             angular_cmd = self._slew_limit_vector(
                 angular_cmd,
                 self._last_angular_cmd,
@@ -477,6 +492,7 @@ class InfoFlowServoRuntime:
                 "servo 执行异常，发布零速度：%s",
                 exc,
             )
+            # 任意异常都 fail-safe 到零速，保护执行侧。
             publish_zero_twist(self.cmd_pub, cmd_frame=self.cmd_frame, stamp=pose_stamp)
             self._reset_slew_state()
             self.stats.servo_exception += 1
