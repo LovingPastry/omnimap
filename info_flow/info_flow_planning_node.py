@@ -4,7 +4,7 @@ import argparse
 import threading
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
 
 import numpy as np
 import rospy
@@ -88,11 +88,21 @@ class InfoFlowPlanningNode:
         self.fixed_hemisphere_center, self.fixed_hemisphere_radius_m = (
             fixed_hemisphere_from_config(config)
         )
+        (
+            self.reference_center_online_enabled,
+            self.reference_center_ema_alpha,
+            self.reference_bounds_min,
+            self.reference_bounds_max,
+            self.reference_radius_source,
+        ) = self._reference_runtime_settings_from_config(config)
         if self.fixed_hemisphere_center is not None:
             self.main_logger.warning(
-                "临时策略启用：半球中心固定为 spatial_bounds 中心=%s，参考半径固定为 %.3fm",
+                "参考球策略：center_init=spatial_bounds_center=%s radius=%.3fm source=%s center_online=%s ema_alpha=%.3f",
                 self.fixed_hemisphere_center.tolist(),
                 float(self.fixed_hemisphere_radius_m),
+                self.reference_radius_source,
+                bool(self.reference_center_online_enabled),
+                float(self.reference_center_ema_alpha),
             )
             apply_fixed_hemisphere_reference(
                 self.motion_policy,
@@ -156,6 +166,74 @@ class InfoFlowPlanningNode:
             return
         self._throttle_last[key] = now
         getattr(self.planner_logger, str(level).lower())(msg, *args)
+
+    @staticmethod
+    def _reference_runtime_settings_from_config(
+        config: dict,
+    ) -> Tuple[bool, float, Optional[np.ndarray], Optional[np.ndarray], str]:
+        tsdf_cfg = config.get("tsdf", {}) if isinstance(config, dict) else {}
+        bounds = tsdf_cfg.get("spatial_bounds", None) if isinstance(tsdf_cfg, dict) else None
+        use_adaptive_radius = bool(tsdf_cfg.get("reference_radius_use_adaptive", False))
+        center_online = bool(tsdf_cfg.get("reference_center_online_update", True))
+        ema_alpha = float(tsdf_cfg.get("reference_center_ema_alpha", 0.1))
+        ema_alpha = float(np.clip(ema_alpha, 0.0, 1.0))
+        if isinstance(bounds, (list, tuple)) and len(bounds) == 6:
+            x_min, x_max, y_min, y_max, z_min, z_max = [float(v) for v in bounds]
+            bmin = np.array([x_min, y_min, z_min], dtype=np.float64)
+            bmax = np.array([x_max, y_max, z_max], dtype=np.float64)
+            return center_online, ema_alpha, bmin, bmax, ("adaptive" if use_adaptive_radius else "default")
+        return center_online, ema_alpha, None, None, "default_no_bounds"
+
+    @staticmethod
+    def _extract_live_center_from_backend(snapshot_backend) -> Optional[np.ndarray]:
+        tsdfs = getattr(snapshot_backend, "tsdfs", None)
+        if tsdfs is None or not hasattr(tsdfs, "get_pointcloud_center"):
+            return None
+        try:
+            center = tsdfs.get_pointcloud_center()
+        except Exception:
+            return None
+        if center is None:
+            return None
+        if isinstance(center, torch.Tensor):
+            center_np = center.detach().cpu().numpy().astype(np.float64).reshape(3)
+        else:
+            center_np = np.asarray(center, dtype=np.float64).reshape(3)
+        if not np.isfinite(center_np).all():
+            return None
+        return center_np
+
+    def _update_reference_center_online(self, live_center: np.ndarray) -> None:
+        if self.fixed_hemisphere_center is None:
+            return
+        alpha = float(self.reference_center_ema_alpha)
+        if alpha <= 0.0:
+            return
+        prev_center = np.asarray(self.fixed_hemisphere_center, dtype=np.float64).reshape(3)
+        new_center = (1.0 - alpha) * prev_center + alpha * np.asarray(
+            live_center, dtype=np.float64
+        ).reshape(3)
+        if self.reference_bounds_min is not None and self.reference_bounds_max is not None:
+            new_center = np.minimum(
+                np.maximum(new_center, self.reference_bounds_min),
+                self.reference_bounds_max,
+            )
+        self.fixed_hemisphere_center = new_center
+        self._planner_log_throttle(
+            "reference_center_update",
+            1.0,
+            "info",
+            "reference_center_online: prev=[%.3f %.3f %.3f] live=[%.3f %.3f %.3f] new=[%.3f %.3f %.3f]",
+            float(prev_center[0]),
+            float(prev_center[1]),
+            float(prev_center[2]),
+            float(live_center[0]),
+            float(live_center[1]),
+            float(live_center[2]),
+            float(new_center[0]),
+            float(new_center[1]),
+            float(new_center[2]),
+        )
 
     def pose_callback(self, msg: PoseStamped) -> None:
         c2w = c2w_from_pose_stamped(msg)
@@ -458,7 +536,11 @@ class InfoFlowPlanningNode:
 
         try:
             with self.motion_policy_lock:
-                # 固定半球参考约束会在每个 tick 重新施加，确保策略边界一致。
+                # 半球参考约束每个 tick 施加；球心可按在线估计做 EMA 更新。
+                if self.reference_center_online_enabled:
+                    live_center = self._extract_live_center_from_backend(snapshot.backend)
+                    if live_center is not None:
+                        self._update_reference_center_online(live_center)
                 apply_fixed_hemisphere_reference(
                     self.motion_policy,
                     self.fixed_hemisphere_center,

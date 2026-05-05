@@ -292,6 +292,12 @@ def fixed_hemisphere_from_config(config: dict) -> Tuple[Optional[np.ndarray], fl
     radius = 0.35
     tsdf_cfg = config.get("tsdf", {}) if isinstance(config, dict) else {}
     bounds = tsdf_cfg.get("spatial_bounds", None) if isinstance(tsdf_cfg, dict) else None
+    use_adaptive_radius = bool(tsdf_cfg.get("reference_radius_use_adaptive", False))
+    radius_default_m = float(tsdf_cfg.get("reference_radius_default_m", radius))
+    radius_diag_scale = float(tsdf_cfg.get("reference_radius_diag_scale", 0.2))
+    radius_min_m = float(tsdf_cfg.get("reference_radius_min_m", 0.25))
+    radius_max_m = float(tsdf_cfg.get("reference_radius_max_m", 0.8))
+    radius = float(radius_default_m)
     if isinstance(bounds, (list, tuple)) and len(bounds) == 6:
         x_min, x_max, y_min, y_max, z_min, z_max = [float(v) for v in bounds]
         center = np.array(
@@ -302,6 +308,13 @@ def fixed_hemisphere_from_config(config: dict) -> Tuple[Optional[np.ndarray], fl
             ],
             dtype=np.float64,
         )
+        if use_adaptive_radius:
+            spans = np.array(
+                [x_max - x_min, y_max - y_min, z_max - z_min],
+                dtype=np.float64,
+            )
+            diag = float(np.linalg.norm(spans))
+            radius = float(np.clip(radius_diag_scale * diag, radius_min_m, radius_max_m))
     return center, float(radius)
 
 

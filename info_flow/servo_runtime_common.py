@@ -230,7 +230,7 @@ def look_at_c2w(eye: np.ndarray, target: np.ndarray) -> np.ndarray:
     right = np.cross(forward, up)
     right_norm = np.linalg.norm(right)
     if right_norm < 1e-3:
-        fallback_up = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+        fallback_up = np.array([0.0, 0.0, 1.0], dtype=np.float64)
         right = np.cross(forward, fallback_up)
         right_norm = np.linalg.norm(right)
         if right_norm < 1e-3:

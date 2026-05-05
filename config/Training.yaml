@@ -44,6 +44,13 @@ tsdf:
   block_resolution: 8           # 保持
   block_count: 30000            # 保持
   unregistered_threshold: 0.05  # 保持
+  reference_radius_default_m: 0.35
+  reference_radius_use_adaptive: true
+  reference_radius_diag_scale: 0.20
+  reference_radius_min_m: 0.25
+  reference_radius_max_m: 0.80
+  reference_center_online_update: true
+  reference_center_ema_alpha: 0.10
 
   
 instance:
