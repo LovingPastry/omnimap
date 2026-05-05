@@ -59,6 +59,9 @@ class InfoFlowPlanningNode:
         self.world_frame = str(getattr(args, "world_frame", ""))
         self.planner_hz = float(args.planner_hz)
         self.pose_stale_timeout_sec = float(args.pose_stale_timeout_sec)
+        # 使用双阈值 stale 判定；按需求将阈值设置得非常大，尽量避免因短时时延触发停车。
+        self.pose_stamp_stale_timeout_sec = 1e6
+        self.pose_receipt_stale_timeout_sec = 1e6
         self.status_log_interval_sec = max(0.2, float(args.status_log_interval_sec))
 
         self.main_logger.info("正在等待相机内参消息...")
@@ -135,11 +138,13 @@ class InfoFlowPlanningNode:
         self._throttle_last = {}
 
         self.main_logger.info(
-            "Planning 节点已启动：pose_topic=%s snapshot_ref_topic=%s spherical_cmd_topic=%s planner_hz=%.1f",
+            "Planning 节点已启动：pose_topic=%s snapshot_ref_topic=%s spherical_cmd_topic=%s planner_hz=%.1f stale(T1=%.1fs,T2=%.1fs)",
             args.pose_topic,
             args.snapshot_ref_topic,
             args.spherical_cmd_topic,
             float(self.planner_hz),
+            float(self.pose_stamp_stale_timeout_sec),
+            float(self.pose_receipt_stale_timeout_sec),
         )
 
     def _planner_log_throttle(
@@ -349,7 +354,7 @@ class InfoFlowPlanningNode:
         with self.snapshot_ref_lock:
             snapshot_ref = self.latest_snapshot_ref
 
-        # 无位姿：规划不安全，发布 stop command 等待上游恢复。
+        # 无位姿：等待上游恢复；不主动发布 stop，避免初始化阶段高频 0 速刷屏。
         if pose_state is None:
             self._planner_log_throttle(
                 "missing_pose",
@@ -357,11 +362,6 @@ class InfoFlowPlanningNode:
                 "warning",
                 "规划等待 pose topic：%s",
                 self.args.pose_topic,
-            )
-            self._publish_stop_command(
-                reason="missing_pose",
-                stamp=None,
-                model_version=max(self.loaded_snapshot_version, 0),
             )
             with self.stats_lock:
                 self.stats.planner_stop_missing_pose += 1
@@ -373,15 +373,10 @@ class InfoFlowPlanningNode:
             self._maybe_log_status()
             return
 
-        # snapshot 加载曾失败且版本未变化：直接保持停机，避免重复尝试造成抖动。
+        # snapshot 加载曾失败且版本未变化：等待版本更新重试；不主动发布 stop。
         if snapshot_ref is not None and self.snapshot_load_failed_version == int(
             snapshot_ref.model_version
         ):
-            self._publish_stop_command(
-                reason=f"snapshot_load_failure:{self.snapshot_load_failed_reason}",
-                stamp=pose_state.stamp,
-                model_version=max(self.loaded_snapshot_version, 0),
-            )
             with self.stats_lock:
                 self.stats.planner_stop_snapshot_load += 1
             self.profile_logger.info(
@@ -392,7 +387,7 @@ class InfoFlowPlanningNode:
             self._maybe_log_status()
             return
 
-        # 尚无可用地图快照：无法规划，发布 stop command。
+        # 尚无可用地图快照：等待 snapshot；不主动发布 stop，避免初始化阶段高频 0 速。
         if snapshot is None:
             self._planner_log_throttle(
                 "missing_snapshot",
@@ -400,9 +395,6 @@ class InfoFlowPlanningNode:
                 "warning",
                 "规划等待 snapshot ref：%s",
                 self.args.snapshot_ref_topic,
-            )
-            self._publish_stop_command(
-                reason="missing_snapshot", stamp=pose_state.stamp, model_version=0
             )
             with self.stats_lock:
                 self.stats.planner_stop_missing_snapshot += 1
@@ -426,15 +418,22 @@ class InfoFlowPlanningNode:
             float(pose_state.stamp.to_sec()),
         )
         # 位姿过期：宁可停车，不输出基于陈旧状态的运动指令。
-        if stamp_age > self.pose_stale_timeout_sec:
+        # 双阈值判定：stamp_age > T1 或 receipt_age > T2。
+        if (stamp_age > self.pose_stamp_stale_timeout_sec) or (
+            receipt_age > self.pose_receipt_stale_timeout_sec
+        ):
             self._planner_log_throttle(
                 "pose_stale",
                 1.0,
                 "warning",
-                "Planning 位姿过期（stamp_age=%.3fs receipt_age=%.3fs > %.3fs），发布 stop command。",
+                (
+                    "Planning 位姿过期（stamp_age=%.3fs/T1=%.3fs receipt_age=%.3fs/T2=%.3fs），"
+                    "发布 stop command。"
+                ),
                 stamp_age,
+                self.pose_stamp_stale_timeout_sec,
                 receipt_age,
-                self.pose_stale_timeout_sec,
+                self.pose_receipt_stale_timeout_sec,
             )
             self.profile_logger.info(
                 "pose_stale(planner): stamp_age=%.3fs receipt_age=%.3fs stamp=%.3f",

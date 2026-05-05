@@ -37,6 +37,7 @@ class CachedSphericalCommand:
 class ServoStats:
     servo_steps: int = 0
     servo_nonzero: int = 0
+    cmd_rx_total: int = 0
     servo_zero_missing_cmd: int = 0
     servo_zero_cmd_stale: int = 0
     servo_zero_pose_stale: int = 0
@@ -114,6 +115,12 @@ class InfoFlowServoRuntime:
             float(self.spherical_cmd_timeout_sec),
             float(self.adaptive_cmd_timeout_scale),
             float(self.adaptive_cmd_timeout_cap_sec),
+        )
+        self.main_logger.info(
+            "ROS 环境：ROS_MASTER_URI=%s ROS_IP=%s ROS_HOSTNAME=%s",
+            os.environ.get("ROS_MASTER_URI", ""),
+            os.environ.get("ROS_IP", ""),
+            os.environ.get("ROS_HOSTNAME", ""),
         )
         self.main_logger.info(
             (
@@ -209,6 +216,7 @@ class InfoFlowServoRuntime:
             msg=msg,
             receipt_wall_time=receipt_wall_time,
         )
+        self.stats.cmd_rx_total += 1
         self.profile_logger.debug(
             "cmd_rx: model_v=%d tick=%d stop=%s reason=%s ema_interval=%.3fs",
             int(msg.model_version),
@@ -238,9 +246,15 @@ class InfoFlowServoRuntime:
         self._last_status_steps = int(stats.servo_steps)
         self._last_status_nonzero = int(stats.servo_nonzero)
         self.planner_logger.info(
-            ("Servo 状态：servo_hz=%.1f cmd_hz=%.1f 累计(steps=%d nonzero=%d missing_cmd=%d cmd_stale=%d pose_stale=%d tf_fail=%d policy_stop=%d exc=%d)"),
+            (
+                "Servo 状态：servo_hz=%.1f cmd_hz=%.1f "
+                "conn(sub=%d pub=%d) 累计(rx=%d steps=%d nonzero=%d missing_cmd=%d cmd_stale=%d pose_stale=%d tf_fail=%d policy_stop=%d exc=%d)"
+            ),
             float(d_steps / max(elapsed, 1e-6)),
             float(d_nonzero / max(elapsed, 1e-6)),
+            int(self.cmd_sub.get_num_connections()),
+            int(self.cmd_pub.get_num_connections()),
+            int(stats.cmd_rx_total),
             int(stats.servo_steps),
             int(stats.servo_nonzero),
             int(stats.servo_zero_missing_cmd),
