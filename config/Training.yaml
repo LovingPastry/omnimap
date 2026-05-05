@@ -49,6 +49,7 @@ tsdf:
   reference_radius_diag_scale: 0.20
   reference_radius_min_m: 0.25
   reference_radius_max_m: 0.80
+  reference_center_mode: dynamic
   reference_center_online_update: true
   reference_center_ema_alpha: 0.10
 

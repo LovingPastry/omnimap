@@ -89,6 +89,7 @@ class InfoFlowPlanningNode:
             fixed_hemisphere_from_config(config)
         )
         (
+            self.reference_center_mode,
             self.reference_center_online_enabled,
             self.reference_center_ema_alpha,
             self.reference_bounds_min,
@@ -101,6 +102,7 @@ class InfoFlowPlanningNode:
                 self.fixed_hemisphere_center.tolist(),
                 float(self.fixed_hemisphere_radius_m),
                 self.reference_radius_source,
+                self.reference_center_mode,
                 bool(self.reference_center_online_enabled),
                 float(self.reference_center_ema_alpha),
             )
@@ -170,19 +172,30 @@ class InfoFlowPlanningNode:
     @staticmethod
     def _reference_runtime_settings_from_config(
         config: dict,
-    ) -> Tuple[bool, float, Optional[np.ndarray], Optional[np.ndarray], str]:
+    ) -> Tuple[str, bool, float, Optional[np.ndarray], Optional[np.ndarray], str]:
         tsdf_cfg = config.get("tsdf", {}) if isinstance(config, dict) else {}
         bounds = tsdf_cfg.get("spatial_bounds", None) if isinstance(tsdf_cfg, dict) else None
         use_adaptive_radius = bool(tsdf_cfg.get("reference_radius_use_adaptive", False))
-        center_online = bool(tsdf_cfg.get("reference_center_online_update", True))
+        center_mode = str(tsdf_cfg.get("reference_center_mode", "dynamic")).strip().lower()
+        if center_mode not in {"fixed", "dynamic"}:
+            center_mode = "dynamic"
+        center_online_cfg = bool(tsdf_cfg.get("reference_center_online_update", True))
+        center_online = bool(center_online_cfg and center_mode == "dynamic")
         ema_alpha = float(tsdf_cfg.get("reference_center_ema_alpha", 0.1))
         ema_alpha = float(np.clip(ema_alpha, 0.0, 1.0))
         if isinstance(bounds, (list, tuple)) and len(bounds) == 6:
             x_min, x_max, y_min, y_max, z_min, z_max = [float(v) for v in bounds]
             bmin = np.array([x_min, y_min, z_min], dtype=np.float64)
             bmax = np.array([x_max, y_max, z_max], dtype=np.float64)
-            return center_online, ema_alpha, bmin, bmax, ("adaptive" if use_adaptive_radius else "default")
-        return center_online, ema_alpha, None, None, "default_no_bounds"
+            return (
+                center_mode,
+                center_online,
+                ema_alpha,
+                bmin,
+                bmax,
+                ("adaptive" if use_adaptive_radius else "default"),
+            )
+        return center_mode, center_online, ema_alpha, None, None, "default_no_bounds"
 
     @staticmethod
     def _extract_live_center_from_backend(snapshot_backend) -> Optional[np.ndarray]:
