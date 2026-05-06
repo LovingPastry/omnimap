@@ -66,6 +66,7 @@ class InfoFlowServoRuntime:
             float(args.adaptive_cmd_timeout_cap_sec),
         )
         self.linear_vel_max = float(args.linear_vel_max)
+        self.linear_deadband = max(0.0, float(args.linear_deadband))
         self.angular_speed_max = float(args.angular_speed_max)
         self.enable_angular = bool(args.enable_angular)
         self.radial_gain = float(args.radial_gain)
@@ -127,7 +128,7 @@ class InfoFlowServoRuntime:
                 "Servo 控制参数：linear_vel_max=%.4f radial_gain=%.4f radial_i_gain=%.4f "
                 "radial_vel_max=%.4f radial_deadband=%.4f radial_integral_limit=%.4f "
                 "angular_gain=%.4f angular_deadband=%.4f angular_speed_max=%.4f "
-                "linear_accel_max=%.4f angular_accel_max=%.4f"
+                "linear_accel_max=%.4f angular_accel_max=%.4f linear_deadband=%.4f"
             ),
             float(self.linear_vel_max),
             float(self.radial_gain),
@@ -140,6 +141,7 @@ class InfoFlowServoRuntime:
             float(self.angular_speed_max),
             float(self.linear_accel_max),
             float(self.angular_accel_max),
+            float(self.linear_deadband),
         )
 
     def _planner_log_throttle(self, key: str, interval_sec: float, level: str, msg: str, *args):
@@ -429,6 +431,11 @@ class InfoFlowServoRuntime:
                 self._last_linear_cmd,
                 self.linear_accel_max * servo_dt_sec,
             )
+            # 线速度死区：当输出线速度足够小则直接清零，避免机械臂长期“慢爬”。
+            linear_cmd_norm = float(np.linalg.norm(linear_cmd))
+            if linear_cmd_norm < self.linear_deadband:
+                linear_cmd = np.zeros(3, dtype=np.float64)
+                linear_cmd_norm = 0.0
 
             desired_c2w = look_at_c2w(current_position, reference_scene_center)
             current_rotation = np.asarray(current_c2w[:3, :3], dtype=np.float64)
@@ -470,6 +477,7 @@ class InfoFlowServoRuntime:
                     "radial_error=%.6f radial_p=%.6f radial_i=%.6f radial_integral=%.6f "
                     "radial_raw=%.6f radial_cmd=%.6f radial_limited=%s radial_i_accept=%s "
                     "linear_raw=%.6f linear_limited=%.6f linear_out=%.6f "
+                    "linear_deadband=%.6f "
                     "rotvec_error=%.6f angular_raw=%.6f angular_limited=%.6f angular_out=%.6f"
                 ),
                 float(cmd_age * 1000.0),
@@ -489,7 +497,8 @@ class InfoFlowServoRuntime:
                 bool(radial_integral_accepted),
                 float(linear_raw_norm),
                 float(linear_limited_norm),
-                float(np.linalg.norm(linear_cmd)),
+                float(linear_cmd_norm),
+                float(self.linear_deadband),
                 float(rotvec_error_norm),
                 float(angular_raw_norm),
                 float(angular_limited_norm),
@@ -527,6 +536,7 @@ def build_argparser():
     parser.add_argument("--adaptive_cmd_timeout_cap_sec", type=float, default=0.5)
     parser.add_argument("--pose_stale_timeout_sec", type=float, default=None)
     parser.add_argument("--linear_vel_max", type=float, default=None)
+    parser.add_argument("--linear_deadband", type=float, default=None)
     parser.add_argument("--angular_speed_max", type=float, default=None)
     parser.add_argument("--radial_gain", type=float, default=None)
     parser.add_argument("--radial_i_gain", type=float, default=None)
@@ -562,6 +572,7 @@ if __name__ == "__main__":
     args.spherical_cmd_timeout_sec = _resolve(args.spherical_cmd_timeout_sec, mc["spherical_cmd_timeout_sec"])
     args.pose_stale_timeout_sec = _resolve(args.pose_stale_timeout_sec, mc["pose_stale_timeout_sec"])
     args.linear_vel_max = _resolve(args.linear_vel_max, mc["linear_vel_max"])
+    args.linear_deadband = _resolve(args.linear_deadband, mc["linear_deadband"])
     args.angular_speed_max = _resolve(args.angular_speed_max, mc["angular_speed_max"])
     args.radial_gain = _resolve(args.radial_gain, mc["radial_gain"])
     args.radial_i_gain = _resolve(args.radial_i_gain, mc["radial_i_gain"])

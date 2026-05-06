@@ -252,6 +252,7 @@ def load_servo_motion_config(config_path: str) -> dict:
     """从 YAML 配置文件中读取 motion_control 块，返回合并了默认值的字典。"""
     defaults = {
         "linear_vel_max": 0.05,
+        "linear_deadband": 0.0,
         "angular_speed_max": 1.0,
         "enable_angular": True,
         "radial_gain": 0.2,

@@ -79,7 +79,8 @@ fisher_local_velocity_only: false
 motion_control:
   # 共享参数（Planning + Servo 共用）
   linear_vel_max: 0.05          # 最大线速度 (m/s)
-  angular_speed_max: 0.05        # 最大角速度 (rad/s)
+  linear_deadband: 0.0          # Servo 线速度死区 (m/s)，低于该速度直接置零
+  angular_speed_max: -0.05        # 最大角速度 (rad/s)
   enable_angular: true          # 是否启用角运动
   radial_gain: 2.0              # Servo 径向半径误差增益 (1/s)
   radial_i_gain: 0.0            # Servo 径向半径误差积分增益 (1/s^2)，0 表示退化为纯 P
