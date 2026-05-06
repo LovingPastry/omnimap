@@ -317,17 +317,17 @@ class FisherMotionPolicy:
             raise ValueError(
                 f"radial_gain must be non-negative and finite, got {radial_gain}"
             )
-        if linear_vel_max <= 0 or not np.isfinite(linear_vel_max):
+        if not np.isfinite(linear_vel_max):
             raise ValueError(
-                f"linear_vel_max must be positive and finite, got {linear_vel_max}"
+                f"linear_vel_max must be finite, got {linear_vel_max}"
             )
         if angular_gain < 0 or not np.isfinite(angular_gain):
             raise ValueError(
                 f"angular_gain must be non-negative and finite, got {angular_gain}"
             )
-        if angular_speed_max <= 0 or not np.isfinite(angular_speed_max):
+        if not np.isfinite(angular_speed_max):
             raise ValueError(
-                f"angular_speed_max must be positive and finite, got {angular_speed_max}"
+                f"angular_speed_max must be finite, got {angular_speed_max}"
             )
         if grad_eps <= 0:
             raise ValueError(f"grad_eps must be positive, got {grad_eps}")
@@ -362,10 +362,16 @@ class FisherMotionPolicy:
         self.dt = float(dt)
         self.radial_gain = float(radial_gain)
         self.radial_deadband = 1e-3
-        self.linear_vel_max = float(linear_vel_max)
+        # <=0 语义统一为“禁用该限幅”。
+        self.linear_vel_max = (
+            float("inf") if float(linear_vel_max) <= 0.0 else float(linear_vel_max)
+        )
         self.angular_gain = float(angular_gain)
         self.angular_speed_deadband = 1e-3
-        self.angular_speed_max = float(angular_speed_max)
+        # <=0 语义统一为“禁用该限幅”。
+        self.angular_speed_max = (
+            float("inf") if float(angular_speed_max) <= 0.0 else float(angular_speed_max)
+        )
         self.enable_angular = bool(enable_angular)
         self.grad_eps = float(grad_eps)
         self.spherical_speed_min = float(spherical_speed_min)
