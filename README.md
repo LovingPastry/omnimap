@@ -330,13 +330,18 @@ We would like to express our gratitude to the open-source projects and their con
 
 
 ## TODO
-* [ ] 空间约束：把位于 `spatial_bounds` 之外的点对应的像素，深度值和RGB值全置0，相当于让深度无效化，背景为黑色。
+* [X] 空间约束：把位于 `spatial_bounds` 之外的点对应的像素，深度值和RGB值全置0，相当于让深度无效化，背景为黑色。
   * 方案二：硬约束删除。把xyz坐标位于spatial bounds之外的高斯球直接删除。
 
-* [ ] RGBD压缩与解压
+* [X] RGBD压缩与解压
   * [X] 把Realsense相机发布的RGBD压缩，发布到新话题 `/cam_1/color/image_raw/compressed` 和 `/cam_1/aligned_depth_to_color/image_raw/compressed`
   * [X] 订阅新话题，解压
 
-* [ ] 信息增益尺度平均化：当前使用相机速度正比与信息增益梯度，但二者之间的尺度缩放没有考虑信息增益与参数数量（正比于高斯球数量）的关系。可以考虑让令缩放系数除以高斯球数量。
+* [X] 信息增益尺度平均化：当前使用相机速度正比与信息增益梯度，但二者之间的尺度缩放没有考虑信息增益与参数数量（正比于高斯球数量）的关系。可以考虑让令缩放系数除以高斯球数量。
 
-* [X] 法向速度与角速度计算：为什么不直接设计为error/dt？
+* [X] 法向速度与角速度计算：使用PI/P控制
+
+* [ ] 三环控制
+  * [ ] 动态调整center、radius
+    * [X] 代码实现
+    * [ ] 测试效果

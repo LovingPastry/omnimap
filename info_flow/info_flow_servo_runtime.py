@@ -182,7 +182,8 @@ class InfoFlowServoRuntime:
         limit = max(0.0, float(limit))
         value = float(value)
         if limit <= 0.0:
-            return 0.0, abs(value) > 1e-12
+            # <=0 表示禁用该标量限幅（保持原值直通）。
+            return value, False
         clipped = float(np.clip(value, -limit, limit))
         return clipped, bool(abs(clipped - value) > 1e-12)
 

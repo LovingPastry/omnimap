@@ -53,7 +53,7 @@ tsdf:
   reference_radius_diag_scale: 0.20
   reference_radius_min_m: 0.3
   reference_radius_max_m: 0.4
-  reference_center_mode: dynamic
+  reference_center_mode: dynamic  # fix表示中心不会移动
   reference_center_online_update: true
   reference_center_ema_alpha: 0.10
   
@@ -79,9 +79,9 @@ fisher_local_velocity_only: false
 motion_control:
   # 共享参数（Planning + Servo 共用）
   linear_vel_max: 0.05          # 最大线速度 (m/s)
-  angular_speed_max: 0.5        # 最大角速度 (rad/s)
+  angular_speed_max: 0.05        # 最大角速度 (rad/s)
   enable_angular: true          # 是否启用角运动
-  radial_gain: 0.2              # Servo 径向半径误差增益 (1/s)
+  radial_gain: 2.0              # Servo 径向半径误差增益 (1/s)
   radial_i_gain: 0.0            # Servo 径向半径误差积分增益 (1/s^2)，0 表示退化为纯 P
   radial_deadband: 0.001        # Servo 径向半径误差死区 (m)
   radial_integral_limit: 0.05   # Servo 径向积分状态限幅 (m*s)
