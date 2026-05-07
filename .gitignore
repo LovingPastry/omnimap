@@ -41,6 +41,7 @@ runs/
 wandb/
 lightning_logs/
 tensorboard/
+videos/
 
 # 数据 / 模型（按需保留）
 data/
@@ -98,6 +99,7 @@ Thumbs.db
 
 # Logs
 *.log
+*.mkv
 sim/sim_outputs/
 ros_ws/build/
 ros_ws/devel/
