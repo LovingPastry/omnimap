@@ -214,3 +214,73 @@ python info_flow/info_flow_servo_runtime.py \
 - `OMNI.track`
 - `Fisher planner`
 - snapshot / gaussian backend
+
+## 三环控制流程图
+
+```mermaid
+flowchart LR
+    subgraph Sensors["传感器 / TF"]
+        RGBD["RGB-D compressed topics<br/>/cam_1/color + aligned_depth"]
+        TF["TF: world_frame -> camera_frame<br/>按图像时间戳查询位姿"]
+    end
+
+    subgraph Tracking["Tracking 环：info_flow_tracking_node.py"]
+        Sync["ApproximateTimeSynchronizer<br/>同步 RGB + Depth"]
+        PosePub["发布 PoseStamped<br/>/omnimap/pose_state"]
+        Gate["RTabMapKeyframeGate<br/>间隔 / 位移 / 转角 / forced_gap"]
+        Queue["DropOldestQueue<br/>track_queue_size=2"]
+        Track["OMNI.track<br/>更新 3DGS / TSDF / semantic backend"]
+        Snapshot["build_planner_snapshot<br/>落盘到 snapshot_store"]
+        SnapshotRef["发布 PlannerSnapshotRef<br/>/omnimap/planner_snapshot_ref<br/>只传 run_id / model_version / uri"]
+    end
+
+    subgraph Planning["Planning 环：info_flow_planning_node.py"]
+        PoseCache["缓存最新 PoseStamped<br/>pose_callback"]
+        SnapshotCache["加载最新 PlannerSnapshot<br/>snapshot_ref_callback + load file"]
+        Freshness["规划安全门<br/>missing pose / missing snapshot<br/>snapshot load fail / pose stale"]
+        Fisher["FisherMotionPolicy.next_pose_from_c2w<br/>当前位姿 + 最新地图快照"]
+        SphericalCmd["发布 SphericalCommand<br/>/omnimap/spherical_cmd<br/>theta_rate / phi_rate / radius / stop"]
+    end
+
+    subgraph Servo["Servo 环：info_flow_servo_runtime.py"]
+        CmdCache["缓存最新 SphericalCommand<br/>自适应 cmd timeout"]
+        LocalTF["执行侧查询本机 TF<br/>latest world -> camera"]
+        ServoGuard["执行安全门<br/>missing cmd / cmd stale / TF fail<br/>pose stale / policy stop"]
+        Convert["球坐标速率 -> Twist<br/>切向速度 + 径向 PI + 朝向控制<br/>限速 / 加速度斜率 / deadband"]
+        Twist["发布 TwistStamped<br/>/servo_server/delta_twist_camera"]
+        Zero["发布零速<br/>fail-safe stop"]
+    end
+
+    Robot["执行器 / servo server / robot"]
+
+    RGBD --> Sync
+    TF --> Sync
+    Sync --> PosePub
+    Sync --> Gate
+    Gate -->|"通过关键帧门控"| Queue
+    Gate -.->|"拒绝：低间隔/低运动"| Sync
+    Queue --> Track
+    Track --> Snapshot
+    Snapshot --> SnapshotRef
+
+    PosePub --> PoseCache
+    SnapshotRef --> SnapshotCache
+    PoseCache --> Freshness
+    SnapshotCache --> Freshness
+    Freshness -->|"状态有效"| Fisher
+    Freshness -.->|"等待或 stop command"| SphericalCmd
+    Fisher --> SphericalCmd
+
+    SphericalCmd --> CmdCache
+    CmdCache --> ServoGuard
+    LocalTF --> ServoGuard
+    ServoGuard -->|"命令与位姿有效"| Convert
+    ServoGuard -.->|"任一安全门触发"| Zero
+    Convert --> Twist
+    Zero --> Twist
+    Twist --> Robot
+    Robot -.->|"TF 闭环反馈"| TF
+    Robot -.->|"执行侧 TF 闭环反馈"| LocalTF
+```
+
+三环之间只通过 ROS topic 和 snapshot 文件引用同步：Tracking 负责把每个有效关键帧融合进地图并发布新版本快照引用；Planning 以固定频率消费最新位姿与地图快照，输出球坐标 NBV 速率；Servo 在执行侧用本机 TF 闭环把球坐标速率转换为 `TwistStamped`，任何命令/位姿/TF/策略异常都会降级为零速。
