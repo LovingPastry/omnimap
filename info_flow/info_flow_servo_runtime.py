@@ -470,6 +470,18 @@ class InfoFlowServoRuntime:
                 angular_cmd=angular_cmd,
                 stamp=pose_stamp,
             )
+            self._planner_log_throttle(
+                "reference_sphere_servo",
+                1.0,
+                "info",
+                "reference_sphere_servo: center=[%.3f %.3f %.3f] reference_radius=%.3fm current_radius=%.3fm radial_error=%.3fm",
+                float(reference_scene_center[0]),
+                float(reference_scene_center[1]),
+                float(reference_scene_center[2]),
+                float(reference_radius),
+                float(radius),
+                float(radial_error),
+            )
             self.profile_logger.debug(
                 (
                     "servo_cmd: cmd_age_ms=%.1f timeout_ms=%.1f dt=%.4f "

@@ -98,7 +98,7 @@ class InfoFlowPlanningNode:
         ) = self._reference_runtime_settings_from_config(config)
         if self.fixed_hemisphere_center is not None:
             self.main_logger.warning(
-                "参考球策略：center_init=spatial_bounds_center=%s radius=%.3fm source=%s center_online=%s ema_alpha=%.3f",
+                "参考球策略：center_init=spatial_bounds_center=%s radius=%.3fm source=%s center_mode=%s center_online=%s ema_alpha=%.3f",
                 self.fixed_hemisphere_center.tolist(),
                 float(self.fixed_hemisphere_radius_m),
                 self.reference_radius_source,
@@ -592,6 +592,11 @@ class InfoFlowPlanningNode:
             return
 
         # 将策略输出统一封装为球坐标控制指令发布给 servo。
+        reference_radius = float(getattr(motion_result, "reference_radius", 0.0))
+        reference_scene_center = np.asarray(
+            getattr(motion_result, "reference_scene_center", [0.0, 0.0, 0.0]),
+            dtype=np.float64,
+        ).reshape(3)
         self._publish_spherical_command(
             stamp=pose_state.stamp,
             model_version=int(snapshot.model_version),
@@ -599,14 +604,24 @@ class InfoFlowPlanningNode:
             dt=float(getattr(motion_result, "dt", self.motion_policy.dt)),
             theta_rate=float(getattr(motion_result, "theta_rate_applied", 0.0)),
             phi_rate=float(getattr(motion_result, "phi_rate_applied", 0.0)),
-            reference_radius=float(getattr(motion_result, "reference_radius", 0.0)),
-            reference_scene_center=np.asarray(
-                getattr(motion_result, "reference_scene_center", [0.0, 0.0, 0.0]),
-                dtype=np.float64,
-            ).reshape(3),
+            reference_radius=reference_radius,
+            reference_scene_center=reference_scene_center,
             fisher_score=float(getattr(motion_result, "fisher_score", 0.0)),
             should_stop=bool(getattr(motion_result, "should_stop", False)),
             stop_reason=str(getattr(motion_result, "stop_reason", "unknown")),
+        )
+        self._planner_log_throttle(
+            "reference_sphere_publish",
+            1.0,
+            "info",
+            "reference_sphere_publish: tick=%d center=[%.3f %.3f %.3f] radius=%.3fm mode=%s radius_source=%s",
+            int(self.planner_tick),
+            float(reference_scene_center[0]),
+            float(reference_scene_center[1]),
+            float(reference_scene_center[2]),
+            float(reference_radius),
+            self.reference_center_mode,
+            self.reference_radius_source,
         )
 
         # 记录端到端与策略内部耗时，便于在线性能诊断。
