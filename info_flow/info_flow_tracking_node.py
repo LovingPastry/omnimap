@@ -37,6 +37,7 @@ from slam_frontend import DropOldestQueue, RTabMapKeyframeGate
 class TrackTask:
     index: int
     stamp: rospy.Time
+    enqueue_wall_time: float
     pose_w2c: np.ndarray
     pose_4x4: np.ndarray
     image: torch.Tensor
@@ -187,6 +188,7 @@ class InfoFlowTrackingNode:
         return TrackTask(
             index=int(idx),
             stamp=stamp,
+            enqueue_wall_time=float(time.perf_counter()),
             pose_w2c=np.asarray(pose_w2c, dtype=np.float64),
             pose_4x4=np.asarray(pose_4x4, dtype=np.float64),
             image=image,
@@ -242,12 +244,14 @@ class InfoFlowTrackingNode:
         self.main_logger.info(
             (
                 "Tracking 状态：pose_hz=%.1f track_hz=%.1f snapshot_hz=%.1f "
-                "累计(pose=%d candidates=%d gate_passed=%d enqueued=%d dropped=%d "
+                "queue=%d/%d 累计(pose=%d candidates=%d gate_passed=%d enqueued=%d dropped=%d "
                 "track_ok=%d track_fail=%d snapshot_ok=%d snapshot_fail=%d)"
             ),
             float(d_pose_pub / max(elapsed, 1e-6)),
             float(d_track_ok / max(elapsed, 1e-6)),
             float(d_snapshot_ok / max(elapsed, 1e-6)),
+            int(self.track_queue.qsize()),
+            int(self.track_queue.maxsize),
             int(stats.pose_published),
             int(stats.frame_candidates),
             int(stats.gated_passed),
@@ -397,7 +401,10 @@ class InfoFlowTrackingNode:
 
             pose_tensor = torch.as_tensor(task.pose_w2c)
             pose_4x4_tensor = torch.as_tensor(task.pose_4x4)
+            worker_t0 = time.perf_counter()
+            queue_wait_ms = float((worker_t0 - task.enqueue_wall_time) * 1000.0)
             try:
+                track_t0 = time.perf_counter()
                 self.omni.track(
                     task.index,
                     task.image[None],
@@ -409,6 +416,7 @@ class InfoFlowTrackingNode:
                     pose_44=pose_4x4_tensor[None],
                     update_rate=self.log_every,
                 )
+                track_ms = float((time.perf_counter() - track_t0) * 1000.0)
             except Exception as exc:
                 self.main_logger.error("跟踪阶段 OMNI.track 执行失败：%s", exc)
                 with self.stats_lock:
@@ -418,6 +426,7 @@ class InfoFlowTrackingNode:
 
             with self.stats_lock:
                 next_version = int(self.model_version) + 1
+            snapshot_ms = 0.0
             try:
                 snapshot = build_planner_snapshot(
                     live_backend=self.omni.gs,
@@ -426,11 +435,12 @@ class InfoFlowTrackingNode:
                 )
                 save_t0 = time.perf_counter()
                 snapshot_path = self.snapshot_store.save(snapshot)
+                snapshot_ms = float((time.perf_counter() - save_t0) * 1000.0)
                 self.profile_logger.info(
                     "snapshot_save: model_v=%d frame=%d save_ms=%.2f path=%s",
                     int(snapshot.model_version),
                     int(task.index),
-                    float((time.perf_counter() - save_t0) * 1000.0),
+                    snapshot_ms,
                     str(snapshot_path),
                 )
                 with self.stats_lock:
@@ -451,13 +461,31 @@ class InfoFlowTrackingNode:
                 tracked_ok = int(self.stats.track_success)
 
             if should_log_step(task.index, self.log_every):
+                total_worker_ms = float((time.perf_counter() - worker_t0) * 1000.0)
+                self.profile_logger.info(
+                    (
+                        "tracking_timing: frame=%d queue_wait_ms=%.2f "
+                        "track_ms=%.2f snapshot_ms=%.2f total_worker_ms=%.2f "
+                        "queue=%d/%d dropped=%d over_1hz=%s"
+                    ),
+                    int(task.index),
+                    queue_wait_ms,
+                    track_ms,
+                    snapshot_ms,
+                    total_worker_ms,
+                    int(self.track_queue.qsize()),
+                    int(self.track_queue.maxsize),
+                    int(self.stats.queue_dropped),
+                    str(bool(track_ms > 1000.0 or total_worker_ms > 1000.0)),
+                )
                 self.main_logger.info(
-                    "跟踪状态：frame=%d source=%s depth_valid_ratio=%.3f model_v=%d queue=%d dropped=%d",
+                    "跟踪状态：frame=%d source=%s depth_valid_ratio=%.3f model_v=%d queue=%d/%d dropped=%d",
                     int(task.index),
                     task.source,
                     float(task.depth_valid_ratio),
                     int(self.model_version),
                     int(self.track_queue.qsize()),
+                    int(self.track_queue.maxsize),
                     int(self.stats.queue_dropped),
                 )
             self._maybe_log_status()
