@@ -901,6 +901,28 @@ class TSDFBackEnd():
         # 计算几何中心（均值）
         return points.mean(dim=0)
 
+    def get_pointcloud_geometry(self):
+        """Return lightweight geometry metadata for the current valid TSDF point cloud."""
+        points, _, _, _, _, _, _ = self.get_all_voxels(if_confidence=False)
+        if points.shape[0] == 0:
+            return None
+        finite_mask = torch.isfinite(points).all(dim=1)
+        points = points[finite_mask]
+        if points.shape[0] == 0:
+            return None
+        bounds_min = points.min(dim=0).values
+        bounds_max = points.max(dim=0).values
+        diag = torch.linalg.norm(bounds_max - bounds_min)
+        if not torch.isfinite(diag):
+            return None
+        return {
+            "center": points.mean(dim=0).detach().float(),
+            "bounds_min": bounds_min.detach().float(),
+            "bounds_max": bounds_max.detach().float(),
+            "diag": float(diag.detach().cpu().item()),
+            "num_points": int(points.shape[0]),
+        }
+
     def vis_ply_final(self, vis=False):        
         points, pc_colors, ins_colors, max_pro_instance_id, confidence_colors, unique_labels, labels_to_remove = self.get_all_voxels(if_confidence=True)
         self.logger.info(

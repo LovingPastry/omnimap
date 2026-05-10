@@ -4,11 +4,10 @@ import argparse
 import threading
 import time
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import rospy
-import torch
 from geometry_msgs.msg import PoseStamped
 
 from distributed_common import (
@@ -95,7 +94,12 @@ class InfoFlowPlanningNode:
             self.reference_bounds_min,
             self.reference_bounds_max,
             self.reference_radius_source,
+            self.reference_radius_use_adaptive,
+            self.reference_radius_diag_scale,
+            self.reference_radius_min_m,
+            self.reference_radius_max_m,
         ) = self._reference_runtime_settings_from_config(config)
+        self.reference_radius_source_current = self.reference_radius_source
         if self.fixed_hemisphere_center is not None:
             self.main_logger.warning(
                 "参考球策略：center_init=spatial_bounds_center=%s radius=%.3fm source=%s center_mode=%s center_online=%s ema_alpha=%.3f",
@@ -172,10 +176,26 @@ class InfoFlowPlanningNode:
     @staticmethod
     def _reference_runtime_settings_from_config(
         config: dict,
-    ) -> Tuple[str, bool, float, Optional[np.ndarray], Optional[np.ndarray], str]:
+    ) -> Tuple[
+        str,
+        bool,
+        float,
+        Optional[np.ndarray],
+        Optional[np.ndarray],
+        str,
+        bool,
+        float,
+        float,
+        float,
+    ]:
         tsdf_cfg = config.get("tsdf", {}) if isinstance(config, dict) else {}
         bounds = tsdf_cfg.get("spatial_bounds", None) if isinstance(tsdf_cfg, dict) else None
         use_adaptive_radius = bool(tsdf_cfg.get("reference_radius_use_adaptive", False))
+        radius_diag_scale = float(tsdf_cfg.get("reference_radius_diag_scale", 0.2))
+        radius_min_m = float(tsdf_cfg.get("reference_radius_min_m", 0.25))
+        radius_max_m = float(tsdf_cfg.get("reference_radius_max_m", 0.8))
+        if radius_max_m < radius_min_m:
+            radius_min_m, radius_max_m = radius_max_m, radius_min_m
         center_mode = str(tsdf_cfg.get("reference_center_mode", "dynamic")).strip().lower()
         if center_mode not in {"fixed", "dynamic"}:
             center_mode = "dynamic"
@@ -193,60 +213,127 @@ class InfoFlowPlanningNode:
                 ema_alpha,
                 bmin,
                 bmax,
-                ("adaptive" if use_adaptive_radius else "default"),
+                (
+                    "fixed_config"
+                    if abs(radius_max_m - radius_min_m) <= 1e-12
+                    else ("static_bounds" if use_adaptive_radius else "fixed_config")
+                ),
+                use_adaptive_radius,
+                radius_diag_scale,
+                radius_min_m,
+                radius_max_m,
             )
-        return center_mode, center_online, ema_alpha, None, None, "default_no_bounds"
+        return (
+            center_mode,
+            center_online,
+            ema_alpha,
+            None,
+            None,
+            "fixed_config",
+            use_adaptive_radius,
+            radius_diag_scale,
+            radius_min_m,
+            radius_max_m,
+        )
 
     @staticmethod
-    def _extract_live_center_from_backend(snapshot_backend) -> Optional[np.ndarray]:
-        tsdfs = getattr(snapshot_backend, "tsdfs", None)
-        if tsdfs is None or not hasattr(tsdfs, "get_pointcloud_center"):
+    def _geometry_vec3(value: Any) -> Optional[np.ndarray]:
+        if value is None:
             return None
         try:
-            center = tsdfs.get_pointcloud_center()
+            if hasattr(value, "detach"):
+                vec = value.detach().cpu().numpy().astype(np.float64).reshape(3)
+            else:
+                vec = np.asarray(value, dtype=np.float64).reshape(3)
         except Exception:
             return None
-        if center is None:
+        if not np.isfinite(vec).all():
             return None
-        if isinstance(center, torch.Tensor):
-            center_np = center.detach().cpu().numpy().astype(np.float64).reshape(3)
-        else:
-            center_np = np.asarray(center, dtype=np.float64).reshape(3)
-        if not np.isfinite(center_np).all():
-            return None
-        return center_np
+        return vec
 
-    def _update_reference_center_online(self, live_center: np.ndarray) -> None:
+    @classmethod
+    def _extract_snapshot_tsdf_geometry(
+        cls, snapshot_backend
+    ) -> Optional[Dict[str, Any]]:
+        geometry = getattr(snapshot_backend, "tsdf_geometry", None)
+        if not isinstance(geometry, dict):
+            return None
+        center = cls._geometry_vec3(geometry.get("center"))
+        bounds_min = cls._geometry_vec3(geometry.get("bounds_min"))
+        bounds_max = cls._geometry_vec3(geometry.get("bounds_max"))
+        if center is None or bounds_min is None or bounds_max is None:
+            return None
+        diag = geometry.get("diag", None)
+        if diag is None:
+            diag = float(np.linalg.norm(bounds_max - bounds_min))
+        elif hasattr(diag, "detach"):
+            diag = float(diag.detach().cpu().item())
+        else:
+            diag = float(diag)
+        if not np.isfinite(diag) or diag <= 0.0:
+            return None
+        return {
+            "center": center,
+            "bounds_min": bounds_min,
+            "bounds_max": bounds_max,
+            "diag": diag,
+            "num_points": int(geometry.get("num_points", 0) or 0),
+        }
+
+    def _update_reference_sphere_online(
+        self, geometry: Optional[Dict[str, Any]]
+    ) -> None:
+        if geometry is None:
+            if self.reference_radius_use_adaptive:
+                self.reference_radius_source_current = (
+                    "fixed_config"
+                    if abs(self.reference_radius_max_m - self.reference_radius_min_m) <= 1e-12
+                    else "missing_fallback"
+                )
+            return
+        live_center = np.asarray(geometry["center"], dtype=np.float64).reshape(3)
         if self.fixed_hemisphere_center is None:
-            return
+            self.fixed_hemisphere_center = live_center.copy()
         alpha = float(self.reference_center_ema_alpha)
-        if alpha <= 0.0:
-            return
-        prev_center = np.asarray(self.fixed_hemisphere_center, dtype=np.float64).reshape(3)
-        new_center = (1.0 - alpha) * prev_center + alpha * np.asarray(
-            live_center, dtype=np.float64
-        ).reshape(3)
-        if self.reference_bounds_min is not None and self.reference_bounds_max is not None:
-            new_center = np.minimum(
-                np.maximum(new_center, self.reference_bounds_min),
-                self.reference_bounds_max,
+        if self.reference_center_online_enabled and alpha > 0.0:
+            prev_center = np.asarray(self.fixed_hemisphere_center, dtype=np.float64).reshape(3)
+            new_center = (1.0 - alpha) * prev_center + alpha * live_center
+            if self.reference_bounds_min is not None and self.reference_bounds_max is not None:
+                new_center = np.minimum(
+                    np.maximum(new_center, self.reference_bounds_min),
+                    self.reference_bounds_max,
+                )
+            self.fixed_hemisphere_center = new_center
+            self._planner_log_throttle(
+                "reference_center_update",
+                1.0,
+                "info",
+                "reference_center_online: prev=[%.3f %.3f %.3f] live=[%.3f %.3f %.3f] new=[%.3f %.3f %.3f]",
+                float(prev_center[0]),
+                float(prev_center[1]),
+                float(prev_center[2]),
+                float(live_center[0]),
+                float(live_center[1]),
+                float(live_center[2]),
+                float(new_center[0]),
+                float(new_center[1]),
+                float(new_center[2]),
             )
-        self.fixed_hemisphere_center = new_center
-        self._planner_log_throttle(
-            "reference_center_update",
-            1.0,
-            "info",
-            "reference_center_online: prev=[%.3f %.3f %.3f] live=[%.3f %.3f %.3f] new=[%.3f %.3f %.3f]",
-            float(prev_center[0]),
-            float(prev_center[1]),
-            float(prev_center[2]),
-            float(live_center[0]),
-            float(live_center[1]),
-            float(live_center[2]),
-            float(new_center[0]),
-            float(new_center[1]),
-            float(new_center[2]),
-        )
+        if self.reference_radius_use_adaptive:
+            radius_is_fixed = abs(self.reference_radius_max_m - self.reference_radius_min_m) <= 1e-12
+            target_radius = (
+                float(self.reference_radius_min_m)
+                if radius_is_fixed
+                else float(
+                    np.clip(
+                        self.reference_radius_diag_scale * float(geometry["diag"]),
+                        self.reference_radius_min_m,
+                        self.reference_radius_max_m,
+                    )
+                )
+            )
+            self.fixed_hemisphere_radius_m = target_radius
+            self.reference_radius_source_current = "fixed_config" if radius_is_fixed else "tsdf_snapshot"
 
     def pose_callback(self, msg: PoseStamped) -> None:
         c2w = c2w_from_pose_stamped(msg)
@@ -549,11 +636,9 @@ class InfoFlowPlanningNode:
 
         try:
             with self.motion_policy_lock:
-                # 半球参考约束每个 tick 施加；球心可按在线估计做 EMA 更新。
-                if self.reference_center_online_enabled:
-                    live_center = self._extract_live_center_from_backend(snapshot.backend)
-                    if live_center is not None:
-                        self._update_reference_center_online(live_center)
+                # 半球参考约束每个 tick 施加；动态值来自 snapshot 中的 TSDF 几何元数据。
+                tsdf_geometry = self._extract_snapshot_tsdf_geometry(snapshot.backend)
+                self._update_reference_sphere_online(tsdf_geometry)
                 apply_fixed_hemisphere_reference(
                     self.motion_policy,
                     self.fixed_hemisphere_center,
@@ -621,7 +706,7 @@ class InfoFlowPlanningNode:
             float(reference_scene_center[2]),
             float(reference_radius),
             self.reference_center_mode,
-            self.reference_radius_source,
+            self.reference_radius_source_current,
         )
 
         # 记录端到端与策略内部耗时，便于在线性能诊断。

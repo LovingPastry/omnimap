@@ -297,6 +297,8 @@ def fixed_hemisphere_from_config(config: dict) -> Tuple[Optional[np.ndarray], fl
     radius_diag_scale = float(tsdf_cfg.get("reference_radius_diag_scale", 0.2))
     radius_min_m = float(tsdf_cfg.get("reference_radius_min_m", 0.25))
     radius_max_m = float(tsdf_cfg.get("reference_radius_max_m", 0.8))
+    if radius_max_m < radius_min_m:
+        radius_min_m, radius_max_m = radius_max_m, radius_min_m
     radius = float(radius_default_m)
     if isinstance(bounds, (list, tuple)) and len(bounds) == 6:
         x_min, x_max, y_min, y_max, z_min, z_max = [float(v) for v in bounds]

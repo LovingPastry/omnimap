@@ -41,6 +41,7 @@ class FrozenPlannerBackend:
         keyviewpoints: List[Any],
         history_stat: Optional[torch.Tensor],
         scene_center: Optional[torch.Tensor],
+        tsdf_geometry: Optional[Dict[str, Any]],
         config: dict,
         runtime_device: str,
     ) -> None:
@@ -49,6 +50,7 @@ class FrozenPlannerBackend:
         self.keyviewpoints = keyviewpoints
         self.history_stat = history_stat
         self.sence_center = scene_center
+        self.tsdf_geometry = _normalize_tsdf_geometry(tsdf_geometry)
         self.config = config
         self._runtime_device = str(runtime_device)
         if hasattr(self.fisher_eval, "keyviewpoints"):
@@ -88,7 +90,74 @@ class FrozenPlannerBackend:
         return self._runtime_device
 
 
-SNAPSHOT_BUNDLE_VERSION = 2
+SNAPSHOT_BUNDLE_VERSION = 3
+
+
+def _tensor_vec3_or_none(value: Any) -> Optional[torch.Tensor]:
+    if value is None:
+        return None
+    tensor = value.detach().clone().float() if isinstance(value, torch.Tensor) else torch.as_tensor(np.asarray(value), dtype=torch.float32)
+    tensor = tensor.reshape(3)
+    if not torch.isfinite(tensor).all():
+        return None
+    return tensor
+
+
+def _normalize_tsdf_geometry(geometry: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not isinstance(geometry, dict):
+        return None
+    center = _tensor_vec3_or_none(geometry.get("center"))
+    bounds_min = _tensor_vec3_or_none(geometry.get("bounds_min"))
+    bounds_max = _tensor_vec3_or_none(geometry.get("bounds_max"))
+    if center is None or bounds_min is None or bounds_max is None:
+        return None
+    diag = geometry.get("diag", None)
+    if diag is None:
+        diag = torch.linalg.norm(bounds_max - bounds_min)
+    diag = float(diag.detach().cpu().item()) if isinstance(diag, torch.Tensor) else float(diag)
+    if not np.isfinite(diag) or diag <= 0.0:
+        return None
+    return {
+        "center": center,
+        "bounds_min": bounds_min,
+        "bounds_max": bounds_max,
+        "diag": diag,
+        "num_points": int(geometry.get("num_points", 0) or 0),
+    }
+
+
+def _extract_live_tsdf_geometry(live_backend: Any) -> Optional[Dict[str, Any]]:
+    tsdfs = getattr(live_backend, "tsdfs", None)
+    if tsdfs is None:
+        return None
+    if hasattr(tsdfs, "get_pointcloud_geometry"):
+        try:
+            return _normalize_tsdf_geometry(tsdfs.get_pointcloud_geometry())
+        except Exception:
+            return None
+    if not hasattr(tsdfs, "get_all_voxels"):
+        return None
+    try:
+        points, _, _, _, _, _, _ = tsdfs.get_all_voxels(if_confidence=False)
+    except Exception:
+        return None
+    if points is None or points.shape[0] == 0:
+        return None
+    finite_mask = torch.isfinite(points).all(dim=1)
+    points = points[finite_mask]
+    if points.shape[0] == 0:
+        return None
+    bounds_min = points.min(dim=0).values
+    bounds_max = points.max(dim=0).values
+    return _normalize_tsdf_geometry(
+        {
+            "center": points.mean(dim=0),
+            "bounds_min": bounds_min,
+            "bounds_max": bounds_max,
+            "diag": torch.linalg.norm(bounds_max - bounds_min),
+            "num_points": int(points.shape[0]),
+        }
+    )
 
 
 def _clone_viewpoints(keyviewpoints: List[Any]) -> List[Any]:
@@ -161,6 +230,7 @@ def build_planner_snapshot(
         frozen_scene_center = None
     else:
         frozen_scene_center = torch.as_tensor(np.asarray(scene_center), dtype=torch.float32)
+    tsdf_geometry = _extract_live_tsdf_geometry(live_backend)
 
     frozen_backend = FrozenPlannerBackend(
         gaussians=frozen_gaussians,
@@ -168,6 +238,7 @@ def build_planner_snapshot(
         keyviewpoints=frozen_keyviews,
         history_stat=frozen_history_stat,
         scene_center=frozen_scene_center,
+        tsdf_geometry=tsdf_geometry,
         config=live_config,
         runtime_device=str(runtime_device),
     )
@@ -178,6 +249,27 @@ def build_planner_snapshot(
         created_wall_time=float(time.monotonic()),
         backend=frozen_backend,
     )
+    if tsdf_geometry is not None:
+        logger.info(
+            "snapshot_tsdf_geometry: model_version=%d points=%d center=[%.3f %.3f %.3f] bounds_min=[%.3f %.3f %.3f] bounds_max=[%.3f %.3f %.3f] diag=%.3fm",
+            int(snapshot.model_version),
+            int(tsdf_geometry.get("num_points", 0)),
+            float(tsdf_geometry["center"][0]),
+            float(tsdf_geometry["center"][1]),
+            float(tsdf_geometry["center"][2]),
+            float(tsdf_geometry["bounds_min"][0]),
+            float(tsdf_geometry["bounds_min"][1]),
+            float(tsdf_geometry["bounds_min"][2]),
+            float(tsdf_geometry["bounds_max"][0]),
+            float(tsdf_geometry["bounds_max"][1]),
+            float(tsdf_geometry["bounds_max"][2]),
+            float(tsdf_geometry["diag"]),
+        )
+    else:
+        logger.info(
+            "snapshot_tsdf_geometry: model_version=%d missing",
+            int(snapshot.model_version),
+        )
     logger.debug(
         "已构建规划快照：model_version=%d keyframe_idx=%d keyviews=%d",
         int(snapshot.model_version),
@@ -208,6 +300,9 @@ def serialize_planner_snapshot(snapshot: PlannerSnapshot) -> Dict[str, Any]:
         "created_wall_time": float(snapshot.created_wall_time),
         "config": copy.deepcopy(dict(getattr(backend, "config", {}))),
         "scene_center": scene_center_bundle,
+        "tsdf_geometry": _normalize_tsdf_geometry(
+            getattr(backend, "tsdf_geometry", None)
+        ),
         "runtime_device_hint": str(backend.get_runtime_device()),
         "fisher_eval_cls_module": str(fisher_eval_cls.__module__),
         "fisher_eval_cls_name": str(fisher_eval_cls.__name__),
@@ -219,9 +314,9 @@ def serialize_planner_snapshot(snapshot: PlannerSnapshot) -> Dict[str, Any]:
 
 def deserialize_planner_snapshot(bundle: Dict[str, Any]) -> PlannerSnapshot:
     bundle_version = int(bundle.get("bundle_version", -1))
-    if bundle_version not in {1, SNAPSHOT_BUNDLE_VERSION}:
+    if bundle_version not in {1, 2, SNAPSHOT_BUNDLE_VERSION}:
         raise ValueError(
-            f"unsupported planner snapshot bundle version={bundle_version}, expected 1 or {SNAPSHOT_BUNDLE_VERSION}"
+            f"unsupported planner snapshot bundle version={bundle_version}, expected 1, 2, or {SNAPSHOT_BUNDLE_VERSION}"
         )
 
     config = copy.deepcopy(dict(bundle.get("config", {})))
@@ -242,6 +337,7 @@ def deserialize_planner_snapshot(bundle: Dict[str, Any]) -> PlannerSnapshot:
             np.asarray(scene_center),
             dtype=torch.float32,
         ).reshape(3)
+    tsdf_geometry = _normalize_tsdf_geometry(bundle.get("tsdf_geometry", None))
 
     backend = FrozenPlannerBackend(
         gaussians=gaussians,
@@ -249,6 +345,7 @@ def deserialize_planner_snapshot(bundle: Dict[str, Any]) -> PlannerSnapshot:
         keyviewpoints=keyviewpoints,
         history_stat=history_stat,
         scene_center=frozen_scene_center,
+        tsdf_geometry=tsdf_geometry,
         config=config,
         runtime_device=str(bundle.get("runtime_device_hint", "cpu")),
     )

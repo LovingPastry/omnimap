@@ -165,12 +165,14 @@ rosrun tf tf_echo base_link cam_1_color_optical_frame
 1. 在算力端运行Tracking节点
 ```bash
 source source_env.sh
-python info_flow/info_flow_tracking_node.py \
+OMNIMAP_TIMEIT_EVERY=1 python3 info_flow/info_flow_tracking_node.py \
   --config config/rtabmap_config.yaml \
   --log_profile debug \
-  --log_section profile \
   --log_section main \
-  --log_min_level DEBUG
+  --log_section profile \
+  --log_min_level DEBUG \
+  --log_every 1 \
+  --status_log_interval_sec 1.0
 ```
 
 2. 在算力端运行Planning节点
@@ -180,7 +182,7 @@ python info_flow/info_flow_planning_node.py \
   --config config/rtabmap_config.yaml \
   --log_section planner \
   --log_section profile \
-  --log_min_level DEBUG \
+  --log_min_level INFO \
   --log_profile debug
 ```
 
