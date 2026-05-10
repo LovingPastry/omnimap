@@ -12,6 +12,10 @@ Primary focus is `info_flow/`, specifically the three loops:
 - planning
 - servo
 
+## Build/Test Environment Note
+- For quick compile/sanity checks, use conda env `InfoFlow`.
+- Ignore `open3d`/`torch` import or package errors during these checks; exec-side and compute-side envs differ.
+
 ## Mandatory Git Step After Code Changes
 After any code edit in this workspace, run:
 
