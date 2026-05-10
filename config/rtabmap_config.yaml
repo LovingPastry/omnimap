@@ -53,8 +53,7 @@ tsdf:
   reference_radius_diag_scale: 0.20
   reference_radius_min_m: 0.35
   reference_radius_max_m: 0.35
-  reference_center_mode: fix  # fix表示中心不会移动
-  reference_center_online_update: true
+  reference_center_mode: fixed  # fixed表示中心不会移动,dynamic表示动态移动 
   reference_center_ema_alpha: 0.10
   
 instance:

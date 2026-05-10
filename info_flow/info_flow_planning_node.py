@@ -89,7 +89,6 @@ class InfoFlowPlanningNode:
         )
         (
             self.reference_center_mode,
-            self.reference_center_online_enabled,
             self.reference_center_ema_alpha,
             self.reference_bounds_min,
             self.reference_bounds_max,
@@ -102,12 +101,11 @@ class InfoFlowPlanningNode:
         self.reference_radius_source_current = self.reference_radius_source
         if self.fixed_hemisphere_center is not None:
             self.main_logger.warning(
-                "参考球策略：center_init=spatial_bounds_center=%s radius=%.3fm source=%s center_mode=%s center_online=%s ema_alpha=%.3f",
+                "参考球策略：center_init=spatial_bounds_center=%s radius=%.3fm source=%s center_mode=%s ema_alpha=%.3f",
                 self.fixed_hemisphere_center.tolist(),
                 float(self.fixed_hemisphere_radius_m),
                 self.reference_radius_source,
                 self.reference_center_mode,
-                bool(self.reference_center_online_enabled),
                 float(self.reference_center_ema_alpha),
             )
             apply_fixed_hemisphere_reference(
@@ -178,7 +176,6 @@ class InfoFlowPlanningNode:
         config: dict,
     ) -> Tuple[
         str,
-        bool,
         float,
         Optional[np.ndarray],
         Optional[np.ndarray],
@@ -199,8 +196,6 @@ class InfoFlowPlanningNode:
         center_mode = str(tsdf_cfg.get("reference_center_mode", "dynamic")).strip().lower()
         if center_mode not in {"fixed", "dynamic"}:
             center_mode = "dynamic"
-        center_online_cfg = bool(tsdf_cfg.get("reference_center_online_update", True))
-        center_online = bool(center_online_cfg and center_mode == "dynamic")
         ema_alpha = float(tsdf_cfg.get("reference_center_ema_alpha", 0.1))
         ema_alpha = float(np.clip(ema_alpha, 0.0, 1.0))
         if isinstance(bounds, (list, tuple)) and len(bounds) == 6:
@@ -209,7 +204,6 @@ class InfoFlowPlanningNode:
             bmax = np.array([x_max, y_max, z_max], dtype=np.float64)
             return (
                 center_mode,
-                center_online,
                 ema_alpha,
                 bmin,
                 bmax,
@@ -225,7 +219,6 @@ class InfoFlowPlanningNode:
             )
         return (
             center_mode,
-            center_online,
             ema_alpha,
             None,
             None,
@@ -295,7 +288,7 @@ class InfoFlowPlanningNode:
         if self.fixed_hemisphere_center is None:
             self.fixed_hemisphere_center = live_center.copy()
         alpha = float(self.reference_center_ema_alpha)
-        if self.reference_center_online_enabled and alpha > 0.0:
+        if self.reference_center_mode == "dynamic" and alpha > 0.0:
             prev_center = np.asarray(self.fixed_hemisphere_center, dtype=np.float64).reshape(3)
             new_center = (1.0 - alpha) * prev_center + alpha * live_center
             if self.reference_bounds_min is not None and self.reference_bounds_max is not None:
