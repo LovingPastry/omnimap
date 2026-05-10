@@ -46,7 +46,7 @@ tsdf:
   block_count: 30000
   unregistered_threshold: 0.005
   use_spatial_bounds: true
-  spatial_bounds: [-1.0, -0.2, -0.3, 0.3, -0.2, 0.6]  
+  spatial_bounds: [-1.0, -0.2, -0.4, 0.4, -0.2, 0.2]  
   # spatial_bounds: [-5.0, 5.0, -5.0, 5.0, -5.0, 5.0]  
   reference_radius_default_m: 0.35
   reference_radius_use_adaptive: false
