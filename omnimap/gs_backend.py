@@ -22,9 +22,9 @@ from gaussian.renderer import render
 from gaussian.utils.loss_utils import l1_loss, ssim
 from gaussian.scene.gaussian_model import GaussianModel
 
-# from gaussian.renderer.nbv.legacy_fisher import LegacyFisherEvaluator as FisherEvaluator
+from gaussian.renderer.nbv.legacy_fisher import LegacyFisherEvaluator as FisherEvaluator
 # from gaussian.renderer.nbv.diag_fisher import DiagFisherEvaluator, LogFisherEvaluator, LogSquareFisherEvaluator as FisherEvaluator
-from gaussian.renderer.nbv.diag_fisher import LogFisherEvaluator as FisherEvaluator
+# from gaussian.renderer.nbv.diag_fisher import LogFisherEvaluator as FisherEvaluator
 
 from gaussian.renderer.nbv.visualization import FisherVisualizer
 
@@ -57,9 +57,7 @@ from tsdf_backend import TSDFBackEnd
 
 
 class GSBackEnd(mp.Process):
-    def __init__(
-        self, config, tsdfs: TSDFBackEnd, save_dir: str, vis_gui: bool = False
-    ):
+    def __init__(self, config, tsdfs: TSDFBackEnd, save_dir: str, vis_gui: bool = False):
         super().__init__()
         self.config = config
         self.logger = get_section_logger("gs.backend", "gaussian")
@@ -104,9 +102,7 @@ class GSBackEnd(mp.Process):
         self.latest_fisher_velocity_dir = None
         self._fisher_visgui_notice_logged = False
         self.fisher_eval = FisherEvaluator(self.gaussians, self.config)
-        self.fisher_visualizer = FisherVisualizer(
-            self.gaussians, self.config, self.save_dir, self.vis_gui
-        )
+        self.fisher_visualizer = FisherVisualizer(self.gaussians, self.config, self.save_dir, self.vis_gui)
         self.last_camera_pose = None
 
     @staticmethod
@@ -188,9 +184,7 @@ class GSBackEnd(mp.Process):
     def set_gui(self):
         # OpenCV window name
         self.window_name = "omnimap - Visualization"
-        self.images = [
-            np.zeros((self.vis_h, self.vis_w, 3), dtype=np.uint8)
-        ] * 5  # Placeholder for 4 images
+        self.images = [np.zeros((self.vis_h, self.vis_w, 3), dtype=np.uint8)] * 5  # Placeholder for 4 images
         # self.texts = ["", "", "", ""]  # Placeholder for 4 text lines
         # Initialize OpenCV window (First time)
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
@@ -201,21 +195,13 @@ class GSBackEnd(mp.Process):
             dtype=np.uint8,
         )  # Create a blank canvas
         if self.vis_w >= 600:
-            self.font = ImageFont.truetype(
-                "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Bold.ttf", 50
-            )
+            self.font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Bold.ttf", 50)
         else:
-            self.font = ImageFont.truetype(
-                "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Bold.ttf", 42
-            )
+            self.font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Bold.ttf", 42)
 
         fisher_window_mode = str(self.config.get("fisher_window_mode", "combined"))
-        heatmap_window_name = str(
-            self.config.get("fisher_heatmap_window_name", "Fisher Heatmap Viewer")
-        )
-        velocity_window_name = str(
-            self.config.get("fisher_velocity_window_name", "Fisher Velocity Viewer")
-        )
+        heatmap_window_name = str(self.config.get("fisher_heatmap_window_name", "Fisher Heatmap Viewer"))
+        velocity_window_name = str(self.config.get("fisher_velocity_window_name", "Fisher Velocity Viewer"))
 
         self.gs_o3d_window = self._create_o3d_window(
             window_name="3DGS Point Viewer",
@@ -262,27 +248,19 @@ class GSBackEnd(mp.Process):
             self.gs_o3d_window.remove_geometry(self.cam_traj)
         self.gs_o3d_window.add_geometry(self.cam_traj)
         if self.gs_pc_geometries is not None:
-            self.gs_o3d_window.remove_geometry(
-                self.gs_pc_geometries, reset_bounding_box=False
-            )
+            self.gs_o3d_window.remove_geometry(self.gs_pc_geometries, reset_bounding_box=False)
 
         opacity = self.gaussians.get_opacity.detach().squeeze().cpu().numpy()
         mask = opacity > 0.3
         pc = o3d.geometry.PointCloud()
-        pc.points = o3d.utility.Vector3dVector(
-            self.gaussians.get_xyz.detach().cpu().numpy()[mask]
-        )
+        pc.points = o3d.utility.Vector3dVector(self.gaussians.get_xyz.detach().cpu().numpy()[mask])
         rgbs = SH2RGB(self.gaussians.get_features.detach()).squeeze().cpu().numpy()
         pc.colors = o3d.utility.Vector3dVector(rgbs[mask])
         self._last_gs_points = np.asarray(pc.points).copy()
         self._last_gs_colors = np.asarray(pc.colors).copy()
-        self.fisher_visualizer.update_gaussian_cache(
-            self._last_gs_points, self._last_gs_colors
-        )
+        self.fisher_visualizer.update_gaussian_cache(self._last_gs_points, self._last_gs_colors)
         if self.config["scene"] == "room_0":
-            bbox = o3d.geometry.AxisAlignedBoundingBox(
-                min_bound=(-np.inf, -np.inf, -np.inf), max_bound=(np.inf, np.inf, 0.7)
-            )
+            bbox = o3d.geometry.AxisAlignedBoundingBox(min_bound=(-np.inf, -np.inf, -np.inf), max_bound=(np.inf, np.inf, 0.7))
             pc = pc.crop(bbox)
         # debug
         # o3d.visualization.draw_geometries([pc])
@@ -362,9 +340,7 @@ class GSBackEnd(mp.Process):
 
         gaussian_count = len(self.gaussians.get_xyz)
         kf_len = len(self.keyframe_stamps)
-        formatted_text = (
-            f" Frame: {tstamp:4d}    Gaussians: {gaussian_count:6d}    KFs: {kf_len:3d}"
-        )
+        formatted_text = f" Frame: {tstamp:4d}    Gaussians: {gaussian_count:6d}    KFs: {kf_len:3d}"
 
         img_pil = Image.fromarray(self.img_display)
         draw = ImageDraw.Draw(img_pil)
@@ -391,9 +367,7 @@ class GSBackEnd(mp.Process):
         self.init_gaussian_update = self.config["Training"]["init_gaussian_update"]
         self.init_gaussian_reset = self.config["Training"]["init_gaussian_reset"]
         self.init_gaussian_th = self.config["Training"]["init_gaussian_th"]
-        self.init_gaussian_extent = (
-            self.cameras_extent * self.config["Training"]["init_gaussian_extent"]
-        )
+        self.init_gaussian_extent = self.cameras_extent * self.config["Training"]["init_gaussian_extent"]
         self.gaussian_update_every = self.config["Training"]["gaussian_update_every"]
         self.gaussian_th = self.config["Training"]["gaussian_th"]
         self.gaussian_reset = self.config["Training"]["gaussian_reset"]
@@ -401,9 +375,7 @@ class GSBackEnd(mp.Process):
         self.window_size = self.config["Training"]["window_size"]
         self.frame_itr = self.config["Training"]["frame_itr"]
         self.size_threshold = self.config["Training"]["size_threshold"]
-        self.gaussian_extent = (
-            self.cameras_extent * self.config["Training"]["gaussian_extent"]
-        )
+        self.gaussian_extent = self.cameras_extent * self.config["Training"]["gaussian_extent"]
         self.use_omni_normal = self.config["Training"]["use_omni_normal"]
         self.normal_weight = self.config["Training"]["normal_weight"]
         self.use_post_refine = self.config["opt_params"]["post_refine"]
@@ -446,9 +418,7 @@ class GSBackEnd(mp.Process):
                 render_pkg = render(viewpoint, self.gaussians, self.background)
                 image, depth = render_pkg["render"], render_pkg["depth"]
                 image = (torch.exp(viewpoint.exposure_a)) * image + viewpoint.exposure_b
-                loss += get_loss_mapping_rgbd(
-                    self.config, image, depth, viewpoint, self.deblur
-                )
+                loss += get_loss_mapping_rgbd(self.config, image, depth, viewpoint, self.deblur)
                 if self.use_omni_normal:
                     loss += self.normal_weight * get_loss_normal(depth, viewpoint)
                 else:
@@ -466,9 +436,7 @@ class GSBackEnd(mp.Process):
                 if self.config["Training"]["compensate_exposure"]:
                     self.exposure_optimizers.step()
                     self.exposure_optimizers.zero_grad(set_to_none=True)
-            pbar.set_description(
-                f"Global GS Refinement lr {lr:.3E} loss {loss.item():.3f}"
-            )
+            pbar.set_description(f"Global GS Refinement lr {lr:.3E} loss {loss.item():.3f}")
 
     @timeit
     def finalize(self):
@@ -480,9 +448,7 @@ class GSBackEnd(mp.Process):
     @torch.no_grad()
     @timeit
     def eval_fast(self, gtimages, traj, depth_scale=1000.0):
-        self.cam_params = set_all_camera_deblur(
-            gtimages, self.keyframe_stamps, self.keyviewpoints, self.save_dir
-        )
+        self.cam_params = set_all_camera_deblur(gtimages, self.keyframe_stamps, self.keyviewpoints, self.save_dir)
         eval_fast(
             gtimages,
             traj,
@@ -541,9 +507,7 @@ class GSBackEnd(mp.Process):
             if self.use_omni_normal:
                 loss_init += self.normal_weight * get_loss_normal(depth, viewpoint)
             else:
-                loss_init += self.normal_weight * get_loss_depth_normal(
-                    depth, viewpoint
-                )
+                loss_init += self.normal_weight * get_loss_depth_normal(depth, viewpoint)
             loss_init.backward()
 
             with torch.no_grad():
@@ -551,9 +515,7 @@ class GSBackEnd(mp.Process):
                     self.gaussians.max_radii2D[visibility_filter],
                     radii[visibility_filter],
                 )
-                self.gaussians.add_densification_stats(
-                    viewspace_point_tensor, visibility_filter
-                )
+                self.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
                 if mapping_iteration % self.init_gaussian_update == 0:
                     self.gaussians.densify_and_prune(
                         self.opt_params.densify_grad_threshold,
@@ -600,9 +562,7 @@ class GSBackEnd(mp.Process):
                     render_pkg["depth"],
                     render_pkg["n_touched"],
                 )
-                loss_this = get_loss_mapping_rgbd(
-                    self.config, image, depth, viewpoint, self.deblur
-                )
+                loss_this = get_loss_mapping_rgbd(self.config, image, depth, viewpoint, self.deblur)
                 if self.use_omni_normal:
                     loss_this += self.normal_weight * get_loss_normal(depth, viewpoint)
                 else:
@@ -629,15 +589,11 @@ class GSBackEnd(mp.Process):
                 if self.vis_gui:
                     if iter == iters - 1 and view_id == 0:
                         pre_image = image.permute(1, 2, 0).clone().detach()
-                        self.images[1] = (
-                            torch.clamp(pre_image, 0, 1).cpu().numpy()[:, :, ::-1] * 255
-                        )
+                        self.images[1] = torch.clamp(pre_image, 0, 1).cpu().numpy()[:, :, ::-1] * 255
                         depth_vis = depth[0].clone().detach().cpu().numpy()
                         min_depth, max_depth = 0.1, 5.0
                         depth_vis = np.clip(depth_vis, 0.1, 5.0)
-                        depth_norm = (
-                            (depth_vis - min_depth) / (max_depth - min_depth)
-                        ) * 255
+                        depth_norm = ((depth_vis - min_depth) / (max_depth - min_depth)) * 255
                         depth_norm = depth_norm.astype(np.uint8)
                         self.images[3] = cv2.applyColorMap(depth_norm, cv2.COLORMAP_JET)
                         self.images[4] = depth[0].clone().detach()
@@ -676,25 +632,15 @@ class GSBackEnd(mp.Process):
         packet_depths = packet["depths"]
         spatial_keep_mask = packet.get("spatial_keep_mask", None)
         if spatial_keep_mask is not None:
-            spatial_keep_mask = torch.as_tensor(
-                spatial_keep_mask, dtype=torch.bool, device=packet_depths.device
-            )
+            spatial_keep_mask = torch.as_tensor(spatial_keep_mask, dtype=torch.bool, device=packet_depths.device)
             if spatial_keep_mask.shape == packet_depths.shape:
                 packet_images = packet_images.clone()
                 packet_depths = packet_depths.clone()
                 packet_depths[~spatial_keep_mask] = 0
                 packet_images[:, ~spatial_keep_mask] = 0
                 if should_log_step(int(packet["tstamp"]), self._diag_log_every):
-                    masked_ratio = (
-                        float((~spatial_keep_mask).sum().item())
-                        / float(spatial_keep_mask.numel())
-                        * 100.0
-                    )
-                    depth_nonzero_ratio = (
-                        float((packet_depths > 0).sum().item())
-                        / float(packet_depths.numel())
-                        * 100.0
-                    )
+                    masked_ratio = float((~spatial_keep_mask).sum().item()) / float(spatial_keep_mask.numel()) * 100.0
+                    depth_nonzero_ratio = float((packet_depths > 0).sum().item()) / float(packet_depths.numel()) * 100.0
                     self.logger.debug(
                         "frame=%d GS 重新应用空间掩码 masked_ratio=%.2f%% depth_nonzero_ratio=%.2f%%",
                         int(packet["tstamp"]),
@@ -713,13 +659,7 @@ class GSBackEnd(mp.Process):
         if not hasattr(self, "projection_matrix"):
             H, W = packet_images.shape[-2:]
             self.K = K = list(packet["intrinsics"]) + [W, H]
-            self.projection_matrix = (
-                getProjectionMatrix2(
-                    znear=0.01, zfar=100.0, fx=K[0], fy=K[1], cx=K[2], cy=K[3], W=W, H=H
-                )
-                .transpose(0, 1)
-                .cuda()
-            )
+            self.projection_matrix = getProjectionMatrix2(znear=0.01, zfar=100.0, fx=K[0], fy=K[1], cx=K[2], cy=K[3], W=W, H=H).transpose(0, 1).cuda()
         # 2. 从数据包中提取当前帧信息
         w2c = SE3(packet["poses"]).matrix().cuda()
         tstamp = packet["tstamp"]
@@ -744,9 +684,7 @@ class GSBackEnd(mp.Process):
             new_points, new_coplors, is_keyframe = self.tsdfs.initializing_check()
 
             # 将TSDF中的几何信息转换为3D高斯点（使用较小的初始尺度）
-            self.gaussians.extend_from_tsdfs(
-                new_points, new_coplors, self.tsdfs.voxel_size / 5
-            )
+            self.gaussians.extend_from_tsdfs(new_points, new_coplors, self.tsdfs.voxel_size / 5)
             # initialize map for a large amount of iterations
             self.initialize_map(0, viewpoint)
             self.initialized = True
@@ -761,9 +699,7 @@ class GSBackEnd(mp.Process):
             # 非初始化阶段，检查是否需要添加新的几何点
             new_points, new_coplors, is_keyframe = self.tsdfs.initializing_check()
             # 将TSDF中的新几何点转换为3D高斯点（使用较大的尺度）
-            self.gaussians.extend_from_tsdfs(
-                new_points, new_coplors, self.tsdfs.voxel_size / 2
-            )
+            self.gaussians.extend_from_tsdfs(new_points, new_coplors, self.tsdfs.voxel_size / 2)
 
         # # --- 新增：只在 keyframe 才扩展新高斯（初始化阶段已做过）---
         # if self.initialized and is_keyframe:
@@ -867,12 +803,8 @@ class GSBackEnd(mp.Process):
                     self.camera_optimizer.add_param_group(param_group)
 
         # 8. 构建优化窗口：随机选择历史关键帧 + 当前帧
-        use_indices = torch.randperm(len(self.keyframe_stamps))[
-            : self.window_size
-        ]  # 随机选择指定数量的关键帧索引
-        viewpoints = [viewpoint] + [
-            self.keyviewpoints[random_id] for random_id in use_indices
-        ]  # 构建优化视点列表
+        use_indices = torch.randperm(len(self.keyframe_stamps))[: self.window_size]  # 随机选择指定数量的关键帧索引
+        viewpoints = [viewpoint] + [self.keyviewpoints[random_id] for random_id in use_indices]  # 构建优化视点列表
 
         # 9. 执行地图优化：使用选定的视点窗口优化3D高斯参数
         self.map(viewpoints, self.frame_itr, idx, is_keyframe)
@@ -964,25 +896,14 @@ class GSBackEnd(mp.Process):
         self.latest_fisher_velocity_dir = getattr(field_result, "current_vel_dir", None)
 
         if bool(self.config.get("fisher_local_velocity_only", False)) and not force_full_field:
-            if (
-                not self._fisher_visgui_notice_logged
-                and (
-                    bool(self.config.get("show_fisher_heatmap", False))
-                    or bool(self.config.get("show_velocity_field", False))
-                )
-            ):
-                self.fisher_logger.info(
-                    "fisher_local_velocity_only=True：跳过半球采样、插值与可视化。"
-                )
+            if not self._fisher_visgui_notice_logged and (bool(self.config.get("show_fisher_heatmap", False)) or bool(self.config.get("show_velocity_field", False))):
+                self.fisher_logger.info("fisher_local_velocity_only=True：跳过半球采样、插值与可视化。")
                 self._fisher_visgui_notice_logged = True
             grad = field_result.current_grad_theta_phi
             vel_dir = field_result.current_vel_dir
             if grad is not None:
                 self.fisher_logger.debug(
-                    (
-                        "Fisher 局部速度已更新：frame=%d score=%.6f "
-                        "dtheta=%.6f dphi=%.6f vel_dir=%s"
-                    ),
+                    ("Fisher 局部速度已更新：frame=%d score=%.6f dtheta=%.6f dphi=%.6f vel_dir=%s"),
                     idx,
                     float(field_result.current_score),
                     float(grad[0].item()),
@@ -997,12 +918,8 @@ class GSBackEnd(mp.Process):
         for message in field_result.debug_stats.get("messages", []):
             self.fisher_logger.debug("信息场调试信息：%s", message)
 
-        if bool(self.config.get("show_velocity_field", False)) and not bool(
-            self.config.get("enable_velocity_field", False)
-        ):
-            self.fisher_logger.warning(
-                "show_velocity_field=True 但 enable_velocity_field=False，已跳过速度箭头。"
-            )
+        if bool(self.config.get("show_velocity_field", False)) and not bool(self.config.get("enable_velocity_field", False)):
+            self.fisher_logger.warning("show_velocity_field=True 但 enable_velocity_field=False，已跳过速度箭头。")
 
         self.fisher_visualizer.apply_field_result(field_result)
         self.fisher_hemi_geometry = self.fisher_visualizer.fisher_hemi_geometry
@@ -1012,10 +929,7 @@ class GSBackEnd(mp.Process):
         self._last_gs_colors = self.fisher_visualizer.last_gs_colors
 
         self.fisher_logger.info(
-            (
-                "Fisher 半球场更新完成：frame=%d samples=%d dense=%d "
-                "min=%.6f max=%.6f"
-            ),
+            ("Fisher 半球场更新完成：frame=%d samples=%d dense=%d min=%.6f max=%.6f"),
             idx,
             num_samples,
             num_dense_points,
