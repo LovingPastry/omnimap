@@ -22,6 +22,26 @@ source scripts/source_servo_env.sh
 ./scripts/reinstall_diff_grussian_rasterization.sh
 ```
 
+## Git 网络
+
+本机直连 GitHub 的 22 端口被阻断，已在 `~/.ssh/config` 中让 `github.com` 经
+Clash Verge 混合端口（`127.0.0.1:7897`）做 HTTP CONNECT 隧道，因此 `git push` /
+`git fetch` 不需要额外参数。
+
+Clash 未运行时会连不上，两种应急方式：
+
+```bash
+# 1) 临时改用 GitHub 的 443 端口 SSH 入口
+git -c url."ssh://git@ssh.github.com:443/".insteadOf="git@github.com:" push origin master
+
+# 2) 或在 ~/.ssh/config 里注释掉 ProxyCommand，改为
+#      HostName ssh.github.com
+#      Port 443
+```
+
+注意 `git config http.proxy` 只影响 HTTPS 传输，对 `git@github.com:` 这样的 SSH
+远程无效——SSH 的代理必须通过 `ProxyCommand` 配置。
+
 ## 注意
 
 `source_env.sh` 中的 `ROS_MASTER_URI` / `ROS_HOSTNAME` / `ROS_IP` 是写死的局域网地址，
