@@ -329,8 +329,9 @@ def main() -> None:
         enable_angular=args.enable_angular,
         grad_eps=args.grad_eps,
         spherical_speed_min=args.spherical_speed_min,
-        max_delta_theta=args.max_delta_theta,
-        max_delta_phi=args.max_delta_phi,
+        # NOTE: CLI 名保持 --max_delta_theta/--max_delta_phi，构造参数已改名。
+        max_theta_rate=args.max_delta_theta,
+        max_phi_rate=args.max_delta_phi,
         verbose=True,
     )
     # This is the key Phase-3 handoff: current mapping state -> one Fisher-driven next pose.
@@ -395,8 +396,8 @@ def main() -> None:
                 "grad_phi_compressed",
                 "scaled_theta",
                 "scaled_phi",
-                "delta_theta_applied",
-                "delta_phi_applied",
+                "theta_rate_applied",
+                "phi_rate_applied",
                 "speed_clipped",
                 "clip_scale_ratio",
                 "grad_norm_raw",
@@ -450,8 +451,8 @@ def main() -> None:
                 "grad_phi_compressed": result.grad_phi_compressed,
                 "scaled_theta": result.scaled_theta,
                 "scaled_phi": result.scaled_phi,
-                "delta_theta_applied": result.delta_theta_applied,
-                "delta_phi_applied": result.delta_phi_applied,
+                "theta_rate_applied": result.theta_rate_applied,
+                "phi_rate_applied": result.phi_rate_applied,
                 "speed_clipped": result.speed_clipped,
                 "clip_scale_ratio": result.clip_scale_ratio,
                 "grad_norm_raw": result.grad_norm_raw,

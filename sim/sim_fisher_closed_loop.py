@@ -566,12 +566,13 @@ def run_closed_loop(args: argparse.Namespace) -> None:
         enable_angular=args.enable_angular,
         grad_eps=args.grad_eps,
         spherical_speed_min=args.spherical_speed_min,
-        max_delta_theta=args.max_delta_theta,
-        max_delta_phi=args.max_delta_phi,
+        # NOTE: CLI 仍叫 --max_delta_theta/--max_delta_phi（见 docs/sim.md），
+        # 构造参数在 524648d 改名为 max_theta_rate/max_phi_rate。
+        max_theta_rate=args.max_delta_theta,
+        max_phi_rate=args.max_delta_phi,
         verbose=True,
         orientation_roll_mode="current_frame_min_roll",
         control_law_mode="dt_consistent",
-        
     )
     logger.info("[闭环] 阶段 3/4：FisherMotionPolicy 已就绪")
 
@@ -607,8 +608,8 @@ def run_closed_loop(args: argparse.Namespace) -> None:
                 "grad_phi_compressed",
                 "scaled_theta",
                 "scaled_phi",
-                "delta_theta_applied",
-                "delta_phi_applied",
+                "theta_rate_applied",
+                "phi_rate_applied",
                 "speed_clipped",
                 "clip_scale_ratio",
                 "grad_norm_raw",
@@ -717,8 +718,8 @@ def run_closed_loop(args: argparse.Namespace) -> None:
                 "fisher_current_score": motion_result.fisher_score,
                 "scaled_theta": motion_result.scaled_theta,
                 "scaled_phi": motion_result.scaled_phi,
-                "delta_theta_applied": motion_result.delta_theta_applied,
-                "delta_phi_applied": motion_result.delta_phi_applied,
+                "theta_rate_applied": motion_result.theta_rate_applied,
+                "phi_rate_applied": motion_result.phi_rate_applied,
                 "fisher_step_scale": float(args.fisher_step_scale),
                 "cartesian": bool(args.cartesian),
                 "dt": float(args.dt),
@@ -797,8 +798,8 @@ def run_closed_loop(args: argparse.Namespace) -> None:
                     "grad_phi_compressed": motion_result.grad_phi_compressed,
                     "scaled_theta": motion_result.scaled_theta,
                     "scaled_phi": motion_result.scaled_phi,
-                    "delta_theta_applied": motion_result.delta_theta_applied,
-                    "delta_phi_applied": motion_result.delta_phi_applied,
+                    "theta_rate_applied": motion_result.theta_rate_applied,
+                    "phi_rate_applied": motion_result.phi_rate_applied,
                     "speed_clipped": motion_result.speed_clipped,
                     "clip_scale_ratio": motion_result.clip_scale_ratio,
                     "grad_norm_raw": motion_result.grad_norm_raw,
@@ -891,7 +892,7 @@ def run_closed_loop(args: argparse.Namespace) -> None:
                     f"[闭环] step={idx} theta={motion_result.current_theta:.4f} "
                     f"phi={motion_result.current_phi:.4f} -> next_theta={motion_result.next_theta:.4f} "
                     f"next_phi={motion_result.next_phi:.4f} "
-                    f"增量=({motion_result.delta_theta_applied:.4f}, {motion_result.delta_phi_applied:.4f}) "
+                    f"角速率=({motion_result.theta_rate_applied:.4f}, {motion_result.phi_rate_applied:.4f}) rad/s "
                     f"停止={motion_result.should_stop} "
                     f"关键帧数={step_result.num_keyframes} "
                     f"高斯数={step_result.num_gaussians}"
