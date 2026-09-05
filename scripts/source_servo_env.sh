@@ -40,7 +40,7 @@ fi
 
 source /opt/ros/noetic/setup.bash
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [ -f "${REPO_ROOT}/ros_ws/devel/setup.bash" ]; then
     source "${REPO_ROOT}/ros_ws/devel/setup.bash"
 fi

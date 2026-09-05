@@ -20,6 +20,7 @@ export ROS_MASTER_URI=http://172.19.93.154:11311
 export ROS_HOSTNAME=172.19.73.218
 export ROS_IP=172.19.73.218
 
-if [ -f /home/fuyx/lanzc/omnimap/ros_ws/devel/setup.bash ]; then
-    source /home/fuyx/lanzc/omnimap/ros_ws/devel/setup.bash
+OMNIMAP_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [ -f "$OMNIMAP_REPO_ROOT/ros_ws/devel/setup.bash" ]; then
+    source "$OMNIMAP_REPO_ROOT/ros_ws/devel/setup.bash"
 fi

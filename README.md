@@ -283,33 +283,52 @@ We use the rendered depth and color images to generate the color mesh. You can r
 
 ```bash
 # for replica
-python tsdf_integrate.py --dataset replica --scene {scene}
+python tools/tsdf_integrate.py --dataset replica --scene {scene}
 # for scannet
-python tsdf_integrate.py --dataset scannet --scene {scene}
+python tools/tsdf_integrate.py --dataset scannet --scene {scene}
 ```
 
 ## Project Structure
 
 ```
 omnimap/
+├── demo.py                 # 离线建图主入口
+├── omnimap/                # 核心库（TSDF / 3DGS / 语义融合）
+├── info_flow/              # ROS 在线节点（tracking / planning / servo）
+├── sim/                    # 闭环仿真
+├── tools/
+│   └── tsdf_integrate.py   # 由渲染结果生成彩色网格
+├── scripts/                # 环境与构建脚本
+│   ├── source_env.sh
+│   ├── source_servo_env.sh
+│   ├── build_ros_ws.sh
+│   └── reinstall_diff_grussian_rasterization.sh
+├── docs/                   # 全部说明文档（README 除外）
 ├── config/
 │   ├── replica_config.yaml
 │   ├── scannet_config.yaml
-│   └── yolo-world/
+│   └── rtabmap_config.yaml
+├── ros_ws/                 # 自定义 ROS 消息
 ├── data/
-│   ├── coco/lvis/
-│   └── texts/
 ├── weights/
-│   ├── yolo-world/
-│   ├── tokenize-anything/
-│   └── sbert/
-├── thirdparty/
-│   ├── simple-knn/
-│   ├── diff-gaussian-rasterization/
-│   ├── lietorch/
-│   └── mmyolo/
-└── demo.py
+└── thirdparty/
+    ├── simple-knn/
+    ├── diff-gaussian-rasterization/
+    ├── lietorch/
+    └── mmyolo/
 ```
+
+## 📚 Documentation
+
+详细文档集中在 [docs/](docs/)：
+
+| 文档 | 内容 |
+| --- | --- |
+| [docs/info_flow.md](docs/info_flow.md) | ROS 三环架构（tracking / planning / servo）使用说明 |
+| [docs/execution_side_setup.md](docs/execution_side_setup.md) | 执行侧轻量环境搭建 |
+| [docs/sim.md](docs/sim.md) | 闭环仿真说明 |
+| [docs/nbv_fisher.md](docs/nbv_fisher.md) | Fisher 信息场与 NBV 规划 |
+| [docs/velocity_cmd_algorithm.md](docs/velocity_cmd_algorithm.md) | 速度指令算法推导 |
 
 ## 🔗 Citation
 

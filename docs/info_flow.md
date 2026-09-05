@@ -40,7 +40,7 @@
 ### tf_native（推荐）
 
 ```bash
-source source_env.sh
+source scripts/source_env.sh
 python info_flow/info_flow_node.py \
   --config config/rtabmap_config.yaml \
   --slam_frontend_mode tf_native \
@@ -164,7 +164,7 @@ rosrun tf tf_echo base_link cam_1_color_optical_frame
 
 1. 在算力端运行Tracking节点
 ```bash
-source source_env.sh
+source scripts/source_env.sh
 OMNIMAP_TIMEIT_EVERY=1 python3 info_flow/info_flow_tracking_node.py \
   --config config/rtabmap_config.yaml \
   --log_profile debug \
@@ -177,7 +177,7 @@ OMNIMAP_TIMEIT_EVERY=1 python3 info_flow/info_flow_tracking_node.py \
 
 2. 在算力端运行Planning节点
 ```bash
-source source_env.sh
+source scripts/source_env.sh
 python info_flow/info_flow_planning_node.py \
   --config config/rtabmap_config.yaml \
   --log_section planner \
@@ -188,7 +188,7 @@ python info_flow/info_flow_planning_node.py \
 
 3. 在执行侧运行Servo节点
 ```bash
-source source_servo_env.sh
+source scripts/source_servo_env.sh
 python info_flow/info_flow_servo_runtime.py \
   --config config/rtabmap_config.yaml \
   --log_level INFO
@@ -198,9 +198,9 @@ python info_flow/info_flow_servo_runtime.py \
 
 如果执行侧主机已经具备 `ROS Noetic + MoveIt + ur_robot_driver`，建议不要继续复用算力侧的完整 `InfoFlow` 大环境，而是直接使用轻量执行入口：
 
-- 运行入口：[info_flow_servo_runtime.py](/home/fuyx/lanzc/omnimap/info_flow/info_flow_servo_runtime.py)
-- 环境脚本：[source_servo_env.sh](/home/fuyx/lanzc/omnimap/source_servo_env.sh)
-- 完整指南：[EXECUTION_SIDE_SETUP.md](/home/fuyx/lanzc/omnimap/info_flow/EXECUTION_SIDE_SETUP.md)
+- 运行入口：[info_flow_servo_runtime.py](../info_flow/info_flow_servo_runtime.py)
+- 环境脚本：[scripts/source_servo_env.sh](../scripts/source_servo_env.sh)
+- 完整指南：[execution_side_setup.md](./execution_side_setup.md)
 
 轻量执行侧只保留：
 

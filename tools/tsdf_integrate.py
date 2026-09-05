@@ -1,5 +1,12 @@
 import os
+import sys
 import argparse
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 import numpy as np
 import open3d as o3d
 import cv2
@@ -82,12 +89,13 @@ if __name__ == '__main__':
     parser.add_argument('--use_num', type=int, default=5000, help='The number of use')
     args = parser.parse_args()
 
-    depth_file_names = sorted(glob(f'outputs/{args.scene}/renders/tsdfdepth_after_opt/*'))[:args.use_num]
-    color_file_names = sorted(glob(f'outputs/{args.scene}/renders/tsdfrgb_after_opt/*'))[:args.use_num]
+    scene_out = REPO_ROOT / 'outputs' / args.scene
+    depth_file_names = sorted(glob(f'{scene_out}/renders/tsdfdepth_after_opt/*'))[:args.use_num]
+    color_file_names = sorted(glob(f'{scene_out}/renders/tsdfrgb_after_opt/*'))[:args.use_num]
     stamps = [float(os.path.basename(i)[:-4]) for i in color_file_names]
     print(f"Found {len(depth_file_names)} depth maps and {len(color_file_names)} color images")
     
-    args.config = f"config/{args.dataset}_config.yaml"
+    args.config = str(REPO_ROOT / 'config' / f'{args.dataset}_config.yaml')
     config = load_config(args.config)
     config['scene']=args.scene
     dataset_dir = config['path']['data_path']
@@ -98,12 +106,12 @@ if __name__ == '__main__':
     elif args.dataset == "scannet":
         gt_pose = f'{dataset_dir}/{args.scene}/traj_w_c.txt'
         
-    intrinsic, extrinsic = load_intrinsic_extrinsic(f'outputs/{args.scene}', stamps, gt_pose=gt_pose)
+    intrinsic, extrinsic = load_intrinsic_extrinsic(str(scene_out), stamps, gt_pose=gt_pose)
     vbg = integrate(depth_file_names, color_file_names, intrinsic, extrinsic, args)
 
     for w in args.weight:
         mesh = vbg.extract_triangle_mesh(weight_threshold=w)
         mesh = mesh.to_legacy()
-        out = f'outputs/{args.scene}/tsdf_mesh_w{w:.1f}.ply'
+        out = f'{scene_out}/tsdf_mesh_w{w:.1f}.ply'
         o3d.io.write_triangle_mesh(out, mesh)
         print(f"TSDF saved to {out}")

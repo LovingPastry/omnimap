@@ -42,17 +42,17 @@ export PATH=$CUDA_HOME/bin:$PATH
 export LD_LIBRARY_PATH=$CUDA_HOME/lib:$LD_LIBRARY_PATH
 
 # Source ROS + InfoFlow environment for online nodes
-source source_env.sh
+source scripts/source_env.sh
 ```
 
 ### Build Commands
 
 ```bash
 # Build ROS workspace (uses system Python, not conda)
-./build_ros_ws.sh
+./scripts/build_ros_ws.sh
 
 # Reinstall diff-gaussian-rasterization after CUDA changes
-./reinstall_diff_grussian_rasterization.sh
+./scripts/reinstall_diff_grussian_rasterization.sh
 ```
 
 ### Running the System
@@ -63,7 +63,7 @@ python demo.py --dataset replica --scene room_0 [--vis_gui] [--start N] [--lengt
 python demo.py --dataset scannet --scene scene0000_00
 
 # Generate mesh from rendered outputs
-python tsdf_integrate.py --dataset replica --scene room_0
+python tools/tsdf_integrate.py --dataset replica --scene room_0
 
 # Simulation closed-loop (Fisher information-guided)
 python sim/main.py \
@@ -225,7 +225,7 @@ The TSDF backend supports spatial bounds to constrain mapping volume:
 - Used for active perception planning (next-best-view)
 - Gradients computed via finite differences (configurable `--grad_eps`)
 - Velocity commands synthesized from tangential (Fisher gradient) + radial (sphere constraint) components
-- See `velocity_cmd_algorithm.md` for mathematical formulation
+- See `docs/velocity_cmd_algorithm.md` for mathematical formulation
 
 ### ROS Topics and Messages
 

@@ -1,6 +1,12 @@
 # UR5 VLM Field Runner 速度指令算法说明
 
-本文档对应 `ros1_nodes/ur5_vlm_field_runner.py` 中的 `_compute_velocity_cmd(x)`，描述如何从策略场生成 `Twist` 命令：
+本文档描述如何从策略场生成 `Twist` 命令。
+
+> 注：文中原先引用的 `ros1_nodes/ur5_vlm_field_runner.py` 已不在仓库中。当前对应实现分布在
+> [omnimap/gaussian/renderer/nbv/motion_policy.py](../omnimap/gaussian/renderer/nbv/motion_policy.py)（策略场与角速度积分）、
+> [info_flow/info_flow_planning_node.py](../info_flow/info_flow_planning_node.py)（在线规划环）与
+> [sim/sim_fisher_closed_loop.py](../sim/sim_fisher_closed_loop.py)（仿真闭环）。
+> 下面的公式仍然描述该控制律本身。
 
 - 线速度：`[v_x, v_y, v_z]`
 - 角速度：`[\omega_x, \omega_y, \omega_z]`

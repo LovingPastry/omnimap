@@ -90,7 +90,7 @@ def import_omnimap_msgs():
         from omnimap_msgs.msg import PlannerSnapshotRef, SphericalCommand
     except Exception as exc:  # pragma: no cover - runtime dependency
         raise RuntimeError(
-            "failed to import omnimap_msgs; run `catkin_make` under ros_ws and source source_env.sh first"
+            "failed to import omnimap_msgs; run `catkin_make` under ros_ws and source scripts/source_env.sh first"
         ) from exc
     return PlannerSnapshotRef, SphericalCommand
 

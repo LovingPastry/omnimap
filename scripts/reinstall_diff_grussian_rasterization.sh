@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
-WORK_DIR="/home/fuyx/lanzc/omnimap"
+WORK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_PY="/home/fuyx/anaconda3/envs/FisherField/bin/python"
-PKG_DIR="/home/fuyx/lanzc/omnimap/thirdparty/modified-diff-gaussian-rasterization"
+PKG_DIR="$WORK_DIR/thirdparty/modified-diff-gaussian-rasterization"
 SITE_PACKAGES="/home/fuyx/anaconda3/envs/FisherField/lib/python3.11/site-packages"
 
 "$ENV_PY" -m pip uninstall -y diff-gaussian-rasterization diff_gaussian_rasterization || true

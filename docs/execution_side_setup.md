@@ -28,8 +28,8 @@
 - `info_flow/info_flow_servo_runtime.py`
 - `info_flow/servo_runtime_common.py`
 - `ros_ws/src/omnimap_msgs/`
-- `build_ros_ws.sh`
-- `source_servo_env.sh`
+- `scripts/build_ros_ws.sh`
+- `scripts/source_servo_env.sh`
 
 如果你直接同步整个仓库也可以，但执行侧运行时只依赖上面这些。
 
@@ -73,7 +73,7 @@ python -m pip install -r info_flow/requirements-servo.txt
 在仓库根目录运行：
 
 ```bash
-./build_ros_ws.sh
+./scripts/build_ros_ws.sh
 ```
 
 这个脚本会强制使用系统 ROS Python 来编译消息，避免被 conda 环境里的 `empy` 干扰。
@@ -102,7 +102,7 @@ export SERVO_CONDA_ENV=/path/to/.conda_envs/infoflow-servo
 然后加载环境：
 
 ```bash
-source source_servo_env.sh
+source scripts/source_servo_env.sh
 ```
 
 这个脚本只做三件事：
@@ -125,7 +125,7 @@ export ROS_IP=<exec_host_ip>
 最小启动命令：
 
 ```bash
-source source_servo_env.sh
+source scripts/source_servo_env.sh
 python info_flow/info_flow_servo_runtime.py \
   --spherical_cmd_topic /omnimap/spherical_cmd \
   --cmd_topic /servo_server/delta_twist_camera \
