@@ -62,9 +62,11 @@
   避免高斯球数量增长导致的步长尺度漂移；梯度模长低于 `spherical_speed_min` 时策略主动发 stop，
   不在平坦区反复抖动；执行端有线速度 / 径向速度 / 角速度三处独立限幅、加速度斜率限幅和死区，
   抑制指令突变造成的来回振荡。
-  （注意：`motion_policy` 里的 `phi_min/phi_max` 夹紧与 `max_theta_rate/max_phi_rate` 限幅只作用在
-  位姿积分分支，也就是仿真用的那条路径；在线 `spherical_rate` 输出分支不经过它们，
-  角度约束实际由执行端的机械臂工作空间与 `spatial_bounds` 承担。）
+  （注意 `motion_policy` 里两处限制的实际生效范围：`phi_min/phi_max` 夹紧只在**位姿积分**的分支里生效
+  （`cartesian_legacy` 与 angular 模式），在线 `spherical_rate` 分支在积分之前就返回了，不经过它；
+  `max_theta_rate/max_phi_rate` 更窄，只在 `cartesian=False` 的纯球面步进分支生效，
+  在线路径与 `sim/main.py` 都是 `cartesian=True`，两者都不经过。
+  所以在线闭环的角度约束实际由执行端的机械臂工作空间与 `spatial_bounds` 承担。）
 - **每一环都能独立降级为零速**。任一环的输入不新鲜（缺位姿 / 位姿过期 / 缺快照 / 快照加载失败 /
   指令过期 / TF 查询失败 / 策略主动 stop），对应环路立刻输出零速或 stop，不会带着陈旧状态继续运动。
 
@@ -172,6 +174,8 @@ Planning 环直接用 `set_precomputed_history_stat` 注入的缓存，不重复
 1. 在当前视角对 `(theta, phi)` 做中心差分，得到 `dF/dtheta`、`dF/dphi`（`grad_eps` 控制步长）
 2. 梯度归一化：`sign(g) * log1p(|g| / N_gaussians)`，消除高斯球数量增长带来的尺度漂移
 3. 归一化梯度 × `fisher_step_scale` → **切向**球坐标速率；模长低于 `spherical_speed_min` 则发 stop
+   （`max_theta_rate / max_phi_rate` 只在 `cartesian=False` 的纯球面分支限幅，在线路径不经过，
+   幅值实际由执行端的三处速度限幅兜住）
 4. Planning 发布球坐标速率；Servo 端用本机 TF 得到当前 `(radius, theta, phi)` 后合成笛卡尔速度：
    - 切向：`v_t = radius * (theta_rate * e_theta + phi_rate * e_phi)`
    - 径向：`radial_error = reference_radius - radius` 走 **PI 控制**（带抗积分饱和、积分限幅、独立速度限幅）
