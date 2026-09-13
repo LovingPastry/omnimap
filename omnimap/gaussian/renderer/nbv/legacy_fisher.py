@@ -184,6 +184,75 @@ class LegacyFisherEvaluator:
             )
         return torch.tensor([dtheta, dphi], device=device, dtype=torch.float32)
 
+    def compute_view_gradient_tangent(
+        self,
+        hemisphere_cam: HemisphereCamera,
+        history_stat: torch.Tensor,
+        eps: float = 0.01,
+    ) -> torch.Tensor:
+        """Fisher gradient probed along great circles, in equal-arclength units.
+
+        ``compute_view_gradient`` perturbs theta and phi by the same ``eps`` in
+        *angle* space. Those are not the same distance: moving theta by eps sweeps
+        an arc of ``r*cos(phi)*eps`` while moving phi by eps sweeps ``r*eps``. So
+        the theta probe shrinks toward the pole and reports a small derivative for
+        a scene that may be changing quickly -- the azimuth degree of freedom fades
+        out exactly where it is needed.
+
+        Here both probes are rotations of the view direction by the same angle
+        ``eps`` about a great circle, so both sample the same arclength ``r*eps``
+        and the returned pair is directly comparable. The components are
+        d(Fisher)/d(great-circle angle) along unit east / unit north.
+
+        The north probe also crosses the pole correctly: rotating past ``phi=pi/2``
+        continues down the far side with ``theta+pi``, where the angle-space probe
+        would clamp and silently degrade to a one-sided difference.
+        """
+        device = hemisphere_cam.theta.device
+        base_theta = float(hemisphere_cam.theta.item())
+        base_phi = float(hemisphere_cam.phi.item())
+
+        ct, st = math.cos(base_theta), math.sin(base_theta)
+        cp, sp = math.cos(base_phi), math.sin(base_phi)
+        n_hat = (cp * ct, cp * st, sp)
+        # Unit east / unit north. Both stay unit length at every phi -- that is the
+        # difference from the unnormalized (e_theta, e_phi) basis, whose e_theta
+        # carries an extra cos(phi). At the pole theta itself is ill-defined, so
+        # "east" there is whichever meridian the caller's theta names; the vector
+        # is still unit length and the probe is still a valid great circle.
+        e_east = (-st, ct, 0.0)
+        e_north = (-sp * ct, -sp * st, cp)
+
+        def probe(direction, signed_eps: float) -> float:
+            # Rotate n_hat toward `direction` by `signed_eps` along a great circle.
+            c, s = math.cos(signed_eps), math.sin(signed_eps)
+            vec = tuple(c * n_hat[i] + s * direction[i] for i in range(3))
+            norm = math.sqrt(sum(v * v for v in vec)) or 1.0
+            x, y, z = (v / norm for v in vec)
+            theta_val = math.atan2(y, x)
+            phi_val = math.asin(min(max(z, -1.0), 1.0))
+            temp_cam = copy.deepcopy(hemisphere_cam)
+            temp_cam.set_angles(theta_val, phi_val)
+            fisher = self.compute_view_score(temp_cam, history_stat).score
+            if bool(self.config.get("velocity_debug_log", False)):
+                Log(
+                    f"Fisher tangent probe (theta={theta_val:.3f}, phi={phi_val:.3f}): "
+                    f"{fisher:.6f}",
+                    tag="NextBestView",
+                )
+            return fisher
+
+        d_east = (probe(e_east, eps) - probe(e_east, -eps)) / (2.0 * eps)
+        d_north = (probe(e_north, eps) - probe(e_north, -eps)) / (2.0 * eps)
+
+        if bool(self.config.get("velocity_debug_log", False)):
+            Log(
+                f"Fisher tangent gradient: dF/ds_east={d_east:.6f}, "
+                f"dF/ds_north={d_north:.6f}",
+                tag="NextBestView",
+            )
+        return torch.tensor([d_east, d_north], device=device, dtype=torch.float32)
+
     @staticmethod
     def _current_view_dir(base_hemi: HemisphereCamera) -> torch.Tensor:
         device = base_hemi.theta.device

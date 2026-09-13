@@ -404,20 +404,25 @@ class HemisphereCamera(Camera):
         cam_pos = self.center + torch.stack([x, y, z]).reshape(3)
 
         # 计算朝向球心的旋转矩阵
-        # 相机 -Z 轴指向球心（look-at）
+        # 相机 +Z 轴指向球心（look-at）
+        # 约定与 omnimap/util/lookat.py 一致：up=[-1,0,0]、right=forward×up。
+        # 这两点都曾与其余实现不一致：up 轴给出随 theta 变化的 roll 差，
+        # cross 顺序给出恒定 180° 差。Fisher 在这里打分，执行端用统一约定，
+        # 因此这里必须与之相同，否则评的相机和动的相机 roll 不同。
         forward = torch.nn.functional.normalize(self.center - cam_pos, dim=0)
-        world_up = torch.tensor([0.0, 0.0, 1.0], device=self.device)
-        right_unnorm = torch.cross(world_up, forward, dim=0)
+        world_up = torch.tensor([-1.0, 0.0, 0.0], device=self.device)
+        right_unnorm = torch.cross(forward, world_up, dim=0)
         if torch.linalg.norm(right_unnorm) < 1e-6:
-            # near pole: fallback to an alternative up axis to avoid degeneracy
-            world_up = torch.tensor([0.0, 1.0, 0.0], device=self.device)
-            right_unnorm = torch.cross(world_up, forward, dim=0)
+            # 退化方向（phi=0 且 theta∈{0,π}）：换备用 up 轴。
+            world_up = torch.tensor([0.0, 0.0, 1.0], device=self.device)
+            right_unnorm = torch.cross(forward, world_up, dim=0)
         right = torch.nn.functional.normalize(right_unnorm, dim=0)
-        up = torch.cross(forward, right, dim=0)
+        up = torch.cross(right, forward, dim=0)
 
         # 先构造 camera-to-world 旋转，再转换成当前工程一致使用的
         # world-to-camera 外参表示：X_cam = R_w2c * X_world + T_w2c。
-        R_c2w = torch.stack([right, up, forward], dim=1)  # 3x3
+        # 第二列存 -up（本项目相机 y 轴朝下）。
+        R_c2w = torch.stack([right, -up, forward], dim=1)  # 3x3
         R = R_c2w.transpose(0, 1)
         T = -R @ cam_pos
 
