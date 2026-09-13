@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -E \"^d|^\\\\-.*\\\\.\\(py|yaml|md\\)$\")",
+      "Bash(xargs -I{} basename {})",
+      "Bash(python3 -)"
+    ]
+  }
+}
