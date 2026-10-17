@@ -71,7 +71,12 @@ class FakeFisherEval:
         return self.amplitude * float(n @ self.d) + 2.0 * self.amplitude
 
     def compute_view_score(self, cam, history_stat):
-        score = self._field(float(cam.theta.item()), float(cam.phi.item()))
+        if hasattr(cam, "theta"):
+            score = self._field(float(cam.theta.item()), float(cam.phi.item()))
+        else:  # plain Camera (global saturation probe): angles from its centre
+            c = cam.camera_center.detach().cpu().numpy().astype(np.float64)
+            c = c / np.linalg.norm(c)
+            score = self._field(math.atan2(c[1], c[0]), math.asin(np.clip(c[2], -1, 1)))
         if self.view_gate_fn is not None:
             score *= float(self.view_gate_fn(cam))
         return SimpleNamespace(score=score)
@@ -253,6 +258,22 @@ def test_stop_monitor_criteria():
         if stop:
             break
     assert reason == "info_saturated" and 0.9 ** k < 0.2
+    # local saturation is only a nomination: a reachable, still-informative view blocks it
+    def decaying(probe_value):
+        mon = StopMonitor(StopConfig(enabled=True, min_steps=5, coverage_enabled=False, score_window=3,
+                                     score_ratio=0.1, global_check_every=1))
+        for k in range(80):
+            stop, reason, state = mon.update(
+                score=1000.0 * 0.9 ** k, position=np.array([1.0, 0, 0]), view_dir=np.array([1.0, 0, 0]),
+                dt=0.1, commanded_speed_mps=0.01, global_probe=lambda dirs: probe_value,
+            )
+            if stop:
+                return reason, state
+        return "", state
+    reason, state = decaying(probe_value=500.0)
+    assert reason == "" and state["stop_global_ratio"] > 0.1
+    reason, state = decaying(probe_value=1.0)
+    assert reason == "info_saturated" and state["stop_global_ratio"] < 0.1
     # disabled monitor never stops but still reports state
     mon = StopMonitor(StopConfig(enabled=False, max_steps=1))
     stop, _, state = mon.update(score=1.0, position=np.ones(3), view_dir=np.ones(3), dt=0.1, commanded_speed_mps=0.0)

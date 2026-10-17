@@ -1363,7 +1363,44 @@ class FisherMotionPolicy:
         if fisher_eval is not None and hasattr(fisher_eval, "set_score_mask"):
             fisher_eval.set_score_mask(None, None)
 
-    def _apply_stop_monitor(self, result: MotionPolicyResult) -> MotionPolicyResult:
+    def _make_global_probe(
+        self,
+        *,
+        gs_backend: Any,
+        intrinsics_vec: Sequence[float] | None,
+        image_size: Sequence[int] | None,
+        idx: int,
+    ):
+        """Score reachable view directions on the reference sphere (stop criterion A)."""
+        if intrinsics_vec is None or image_size is None or not self.reference_initialized:
+            return None
+        center = np.asarray(self.reference_scene_center, dtype=np.float64)
+        radius = float(self.reference_radius)
+
+        def probe(dirs: np.ndarray) -> float:
+            fisher_eval = gs_backend.fisher_eval
+            history_stat = fisher_eval.get_history_stat(
+                getattr(gs_backend, "keyviewpoints", None), prefer_cached=True
+            )
+            device = self._infer_runtime_device(gs_backend)
+            best = -float("inf")
+            for direction in np.asarray(dirs, dtype=np.float64).reshape(-1, 3):
+                c2w = _look_at_c2w(eye=center + radius * direction, target=center)
+                cam = self._build_tracking_camera_from_c2w(
+                    c2w=c2w,
+                    intrinsics_vec=intrinsics_vec,
+                    image_size=image_size,
+                    idx=int(idx),
+                    device=device,
+                )
+                best = max(best, float(fisher_eval.compute_view_score(cam, history_stat).score))
+            return best
+
+        return probe
+
+    def _apply_stop_monitor(
+        self, result: MotionPolicyResult, global_probe: Any = None
+    ) -> MotionPolicyResult:
         """Fix 4: feed the stop monitor; on a stop, zero every command in the result."""
         position = np.asarray(result.current_c2w[:3, 3], dtype=np.float64)
         center = np.asarray(result.reference_scene_center, dtype=np.float64)
@@ -1376,6 +1413,7 @@ class FisherMotionPolicy:
             view_dir=position - center,
             dt=self.dt,
             commanded_speed_mps=speed,
+            global_probe=global_probe,
         )
         self._tick_diag.update(state)
         if stop and not result.should_stop:
@@ -1426,10 +1464,20 @@ class FisherMotionPolicy:
                 intrinsics_vec=intrinsics_vec,
                 image_size=image_size,
             )
+            # Inside the try so the global saturation probe sees the same mask.
+            result = self._apply_stop_monitor(
+                result,
+                self._make_global_probe(
+                    gs_backend=gs_backend,
+                    intrinsics_vec=intrinsics_vec,
+                    image_size=image_size,
+                    idx=idx,
+                ),
+            )
         finally:
             if self.fisher_mask is not None:
                 self._clear_fisher_mask(gs_backend)
-        return self._apply_stop_monitor(result)
+        return result
 
     def _next_pose_core(
         self,

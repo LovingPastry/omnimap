@@ -92,6 +92,13 @@ class StopConfig:
     saturation_enabled: bool = True
     score_window: int = 10
     score_ratio: float = 0.10
+    # The score at the *current* view also decays when a greedy policy merely
+    # sits in a local optimum. So local saturation only nominates a stop; it is
+    # confirmed by scoring up to global_probe_views reachable directions not yet
+    # covered, and the run stops only if their best score is saturated too.
+    # 0 = trust the local test alone.
+    global_probe_views: int = 12
+    global_check_every: int = 10
     # B: view-sphere coverage. Fraction of directions in the feasible band that
     # lie within coverage_radius_deg of some visited camera direction.
     coverage_enabled: bool = True
@@ -423,6 +430,8 @@ class StopMonitor:
         self.last_state: dict[str, float] = {}
         self.stopped_reason = ""
         self._t0: Optional[float] = None
+        self._last_global_check = -10**9
+        self.last_global_ratio = float("nan")
 
     def update(
         self,
@@ -432,8 +441,11 @@ class StopMonitor:
         view_dir: np.ndarray,
         dt: float,
         commanded_speed_mps: float,
+        global_probe: Optional[Any] = None,
     ) -> tuple[bool, str, dict]:
+        """``global_probe(dirs) -> max score`` over unit view directions (optional)."""
         cfg = self.cfg
+        self._global_probe = global_probe
         self.steps += 1
         if cfg.wall_clock:
             import time
@@ -479,6 +491,7 @@ class StopMonitor:
             "stop_saturation_ratio": float(saturation_ratio),
             "stop_view_coverage": coverage,
             "stop_stall_count": float(self.stall_count),
+            "stop_global_ratio": float(self.last_global_ratio),
         }
         self.last_state = state
         if not cfg.enabled:
@@ -486,9 +499,29 @@ class StopMonitor:
         if cfg.latch and self.stopped_reason:
             return True, self.stopped_reason, state
         stop, reason = self._check(coverage, saturation_ratio)
+        state["stop_global_ratio"] = float(self.last_global_ratio)
         if stop and cfg.latch:
             self.stopped_reason = reason
         return stop, reason, state
+
+    def probe_dirs(self) -> np.ndarray:
+        """Up to global_probe_views directions, preferring ones not yet covered."""
+        k = int(self.cfg.global_probe_views)
+        pool = self.dirs if self.covered is None or self.covered.all() else self.dirs[~self.covered]
+        if len(pool) <= k:
+            return pool
+        idx = np.linspace(0, len(pool) - 1, k).round().astype(int)
+        return pool[idx]
+
+    def _globally_saturated(self) -> bool:
+        if int(self.cfg.global_probe_views) <= 0 or self._global_probe is None:
+            return True
+        if self.steps - self._last_global_check < int(self.cfg.global_check_every):
+            return False
+        self._last_global_check = self.steps
+        best = float(self._global_probe(self.probe_dirs()))
+        self.last_global_ratio = best / self.max_window_mean if self.max_window_mean > 0 else float("nan")
+        return math.isfinite(self.last_global_ratio) and self.last_global_ratio < float(self.cfg.score_ratio)
 
     def _check(self, coverage: float, saturation_ratio: float) -> tuple[bool, str]:
         cfg = self.cfg
@@ -507,6 +540,7 @@ class StopMonitor:
             cfg.saturation_enabled
             and math.isfinite(saturation_ratio)
             and saturation_ratio < float(cfg.score_ratio)
+            and self._globally_saturated()
         ):
             return True, "info_saturated"
         if cfg.stall_enabled and self.stall_count >= int(cfg.stall_steps):
