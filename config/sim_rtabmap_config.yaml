@@ -7,7 +7,13 @@ Training:
   gaussian_extent: 1.0
   gaussian_update_every: 201
   gaussian_reset: 301
-  gaussian_th: 0.7
+  # 剪枝的 min_opacity。新高斯出生在 0.5（gaussian_model.create_pcd_from_tsdfs），
+  # 所以 0.7 会把每个还没被优化抬过 0.7 的新生高斯删掉：实测峰值 1081 -> 最终 185，
+  # 损失 83% 密度，且此后长期停在 ~180 不再增长。稀疏到这个程度时 Fisher 分数变成
+  # 少数离散贡献者之和，一个高斯跨过光栅化瓦片边界就让总分可见跳变，梯度符号随之
+  # 不稳（φ=30° 时 12 个相距 0.5° 的基点只有 10/12 同号）。改回标准 3DGS 的 0.005
+  # 后密度保持 1031，同一测量变成 12/12。
+  gaussian_th: 0.005
   size_threshold: 20
   rgb_boundary_threshold: 0.01
   max_keyframe_skip: 20

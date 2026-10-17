@@ -10,6 +10,7 @@ from typing import Any, Optional, Sequence
 import numpy as np
 import torch
 from scipy.spatial.transform import Rotation as R
+from omnimap.util.lookat import look_at_c2w
 from omnimap.util.utils import get_section_logger
 
 
@@ -35,46 +36,8 @@ def _look_at_c2w(
     target: np.ndarray,
     up: np.ndarray | None = None,
 ) -> np.ndarray:
-    # 统一输入形状/类型：eye 是相机位置，target 是注视点，up 是世界“上”方向参考。
-    eye = np.asarray(eye, dtype=np.float64).reshape(3)
-    target = np.asarray(target, dtype=np.float64).reshape(3)
-    up = (
-        np.array([0.0, 0.0, 1.0], dtype=np.float64)
-        if up is None
-        else np.asarray(up, dtype=np.float64).reshape(3)
-    )
-
-    # 相机前向轴（z 轴）指向 target。
-    forward = target - eye
-    forward_norm = np.linalg.norm(forward)
-    if forward_norm < 1e-12:
-        raise ValueError("eye and target are too close; cannot build look-at pose")
-    forward = forward / forward_norm
-
-    # 右轴 = forward × up；若与 up 近共线，退化到备用 up 再算一次。
-    right = np.cross(forward, up)
-    right_norm = np.linalg.norm(right)
-    if right_norm < 1e-12:
-        fallback_up = np.array([0.0, 1.0, 0.0], dtype=np.float64)
-        right = np.cross(forward, fallback_up)
-        right_norm = np.linalg.norm(right)
-        if right_norm < 1e-12:
-            raise ValueError("failed to construct a valid right axis for look-at pose")
-    right = right / right_norm
-
-    # 由 right 与 forward 反推真实 up，保持三个轴两两正交。
-    true_up = np.cross(right, forward)
-    true_up = true_up / max(np.linalg.norm(true_up), 1e-12)
-    # 本项目相机坐标约定 y 轴朝下，因此第二列使用 -up。
-    down = -true_up
-
-    # 组装 c2w：前三列分别是相机 x/y/z 轴在世界系中的方向，最后一列是相机位置。
-    c2w = np.eye(4, dtype=np.float64)
-    c2w[:3, 0] = right
-    c2w[:3, 1] = down
-    c2w[:3, 2] = forward
-    c2w[:3, 3] = eye
-    return c2w
+    """Delegate to the single shared look-at so planning and servo agree on roll."""
+    return look_at_c2w(eye, target, up)
 
 
 def _look_at_c2w_min_roll_current(
@@ -171,6 +134,86 @@ def _local_frame_from_theta_phi(
     e_phi = np.array([-sp * ct, -sp * st, cp], dtype=np.float64)
     n_hat = np.array([cp * ct, cp * st, sp], dtype=np.float64)
     return e_theta, e_phi, n_hat
+
+
+def _unit_tangent_basis(
+    theta: float,
+    phi: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Unit east / unit north / outward normal at ``(theta, phi)``.
+
+    This differs from ``_local_frame_from_theta_phi`` in one decisive way: its
+    ``e_theta`` is *not* scaled by cos(phi). The unnormalized basis makes a
+    fixed theta rate travel less and less ground as phi rises, which is one of
+    the two places the cos(phi) factor enters the loop. Controlling against a
+    unit basis means a commanded east speed is metres per second at every
+    elevation.
+    """
+    ct, st = math.cos(theta), math.sin(theta)
+    cp, sp = math.cos(phi), math.sin(phi)
+    e_east = np.array([-st, ct, 0.0], dtype=np.float64)
+    e_north = np.array([-sp * ct, -sp * st, cp], dtype=np.float64)
+    n_hat = np.array([cp * ct, cp * st, sp], dtype=np.float64)
+    return e_east, e_north, n_hat
+
+
+def _rotate_on_sphere(
+    n_hat: np.ndarray,
+    direction: np.ndarray,
+    angle: float,
+) -> np.ndarray:
+    """Rotate ``n_hat`` toward ``direction`` by ``angle`` along a great circle.
+
+    Used instead of adding increments to (theta, phi): a great-circle step has
+    the same arclength wherever it starts, and it passes over the pole without
+    the clamp that angle-space integration needs.
+    """
+    n_hat = np.asarray(n_hat, dtype=np.float64).reshape(3)
+    direction = np.asarray(direction, dtype=np.float64).reshape(3)
+    moved = math.cos(angle) * n_hat + math.sin(angle) * direction
+    norm = float(np.linalg.norm(moved))
+    if norm < 1e-12:
+        return n_hat
+    return moved / norm
+
+
+def _clamp_normal_to_upper_hemisphere(
+    n_hat: np.ndarray,
+    phi_min: float,
+    fallback_theta: float,
+) -> tuple[np.ndarray, bool]:
+    """Hold a unit normal at or above the ``phi_min`` latitude, preserving azimuth.
+
+    Great circles are not lines of latitude, so an east step at high elevation
+    genuinely descends -- that is correct geometry, but continued far enough it
+    exits the upper hemisphere. ``_position_to_spherical`` clips ``z`` into
+    ``[0, 1]``, so a position below the equator would silently read back as
+    ``phi = 0`` and the reported state would stop matching the real camera.
+
+    Only the lower bound is enforced. Clamping ``phi_max`` too would reinstate
+    the pole barrier this parameterization exists to remove: a great circle is
+    free to cross the pole and continue down the far side at ``theta + pi``.
+    """
+    n_hat = np.asarray(n_hat, dtype=np.float64).reshape(3)
+    z_min = math.sin(float(phi_min))
+    if n_hat[2] >= z_min:
+        return n_hat, False
+
+    horizontal = n_hat[:2]
+    horizontal_norm = float(np.linalg.norm(horizontal))
+    if horizontal_norm < 1e-12:
+        # Straight down: azimuth is undefined, so keep the caller's heading.
+        azimuth = np.array(
+            [math.cos(fallback_theta), math.sin(fallback_theta)], dtype=np.float64
+        )
+    else:
+        azimuth = horizontal / horizontal_norm
+    horizontal_scale = math.sqrt(max(1.0 - z_min * z_min, 0.0))
+    clamped = np.array(
+        [azimuth[0] * horizontal_scale, azimuth[1] * horizontal_scale, z_min],
+        dtype=np.float64,
+    )
+    return clamped / max(float(np.linalg.norm(clamped)), 1e-12), True
 
 
 def _position_to_spherical(
@@ -286,6 +329,15 @@ class FisherMotionPolicy:
         "cartesian_legacy",
         "spherical_rate",
     }
+    # "angle": legacy. Probe and control in (theta, phi) increments; the azimuth
+    #   degree of freedom is attenuated by cos(phi) twice (probe arclength, then
+    #   basis norm), so it stalls near the pole.
+    # "tangent": probe and control in great-circle arclength on a unit basis, so
+    #   east and north are the same physical units at every elevation.
+    _SUPPORTED_GRADIENT_SPACES = {
+        "angle",
+        "tangent",
+    }
 
     def __init__(
         self,
@@ -307,6 +359,7 @@ class FisherMotionPolicy:
         orientation_roll_mode: str = "world_up_lookat",
         control_law_mode: str = "gain",
         planner_output_mode: str = "cartesian_legacy",
+        gradient_space: str = "angle",
         verbose: bool = True,
     ) -> None:
         if not np.isfinite(fisher_step_scale):
@@ -355,6 +408,12 @@ class FisherMotionPolicy:
                 f"{sorted(self._SUPPORTED_PLANNER_OUTPUT_MODES)}, "
                 f"got {planner_output_mode!r}"
             )
+        if gradient_space not in self._SUPPORTED_GRADIENT_SPACES:
+            raise ValueError(
+                "gradient_space must be one of "
+                f"{sorted(self._SUPPORTED_GRADIENT_SPACES)}, "
+                f"got {gradient_space!r}"
+            )
 
         self.fisher_step_scale = float(fisher_step_scale)
         self.controller_mode = "cartesian" if cartesian else "angular"
@@ -382,6 +441,7 @@ class FisherMotionPolicy:
         self.orientation_roll_mode = str(orientation_roll_mode)
         self.control_law_mode = str(control_law_mode)
         self.planner_output_mode = str(planner_output_mode)
+        self.gradient_space = str(gradient_space)
         self.verbose = bool(verbose)
         self.logger = get_section_logger("planner.motion_policy", "planner")
         self._omega_cmd_preclip_norm = 0.0
@@ -410,6 +470,44 @@ class FisherMotionPolicy:
 
     def _clamp_phi(self, phi: float) -> float:
         return float(np.clip(phi, self.phi_min, self.phi_max))
+
+    # Cap on the sec(phi) conversion factor below. sec(phi) diverges at the pole,
+    # so an uncapped conversion would emit an unbounded theta rate there. 20
+    # corresponds to phi ~= 87.1 deg; past that the theta rate saturates instead
+    # of exploding. This ceiling is a property of the servo's angle-space
+    # interface, not of the tangent control law -- the cartesian path integrates
+    # positions directly and never needs it.
+    _MAX_SEC_PHI = 20.0
+
+    def _tangent_rates_to_angle_rates(
+        self,
+        *,
+        east_rate: float,
+        north_rate: float,
+        phi: float,
+    ) -> tuple[float, float]:
+        """Convert unit-basis arclength rates into (theta, phi) angle rates.
+
+        A no-op when ``gradient_space == "angle"``, where the rates already are
+        angle rates. In tangent mode, ``d(theta)/dt = v_east / cos(phi)`` and
+        ``d(phi)/dt = v_north``.
+        """
+        if self.gradient_space != "tangent":
+            return float(east_rate), float(north_rate)
+        cos_phi = math.cos(float(phi))
+        sec_phi = self._MAX_SEC_PHI
+        if abs(cos_phi) > 1e-12:
+            sec_phi = min(1.0 / abs(cos_phi), self._MAX_SEC_PHI)
+        theta_rate = float(east_rate) * sec_phi
+        if sec_phi >= self._MAX_SEC_PHI and abs(east_rate) > 1e-12:
+            self.logger.warning(
+                "sec(phi) 转换已饱和：phi=%.6f rad (cos=%.3e)，"
+                "theta_rate 被限制在 east_rate*%.1f",
+                float(phi),
+                float(cos_phi),
+                self._MAX_SEC_PHI,
+            )
+        return theta_rate, float(north_rate)
 
     @staticmethod
     def _clip_vector_norm(
@@ -786,19 +884,35 @@ class FisherMotionPolicy:
         score_ms = (time.perf_counter() - score_t0) * 1000.0
 
         gradient_t0 = time.perf_counter()
-        grad_theta_phi = fisher_eval.compute_view_gradient(
+        # In "tangent" space the two returned components are d(Fisher)/d(arclength)
+        # along unit east / unit north, so they share one unit and stay comparable
+        # at every phi. In "angle" space they are d(Fisher)/d(theta) and
+        # d(Fisher)/d(phi), and the first carries a cos(phi) factor the second
+        # does not. Downstream code treats the pair uniformly, so the space is
+        # recorded in the timing dict and surfaced in the result for auditing.
+        if self.gradient_space == "tangent":
+            probe = getattr(fisher_eval, "compute_view_gradient_tangent", None)
+            if probe is None:
+                raise AttributeError(
+                    "gradient_space='tangent' requires the Fisher evaluator to "
+                    "implement compute_view_gradient_tangent()"
+                )
+        else:
+            probe = fisher_eval.compute_view_gradient
+        grad_pair = probe(
             hemi_cam,
             history_stat,
             eps=self.grad_eps,
         )
         gradient_ms = (time.perf_counter() - gradient_t0) * 1000.0
-        grad_theta = float(grad_theta_phi[0].item())
-        grad_phi = float(grad_theta_phi[1].item())
+        grad_theta = float(grad_pair[0].item())
+        grad_phi = float(grad_pair[1].item())
         timing = {
             "history_ms": float(history_ms),
             "score_ms": float(score_ms),
             "gradient_ms": float(gradient_ms),
             "history_source": str(history_source),
+            "gradient_space": str(self.gradient_space),
         }
         if self.verbose:
             self.logger.debug(
@@ -1307,12 +1421,44 @@ class FisherMotionPolicy:
             current_radius, _, _ = _position_to_spherical(
                 current_position, reference_scene_center
             )
-            e_theta, e_phi, _ = _local_frame_from_theta_phi(current_theta, current_phi)
+            # Basis choice is the second half of the cos(phi) story. The legacy
+            # unnormalized e_theta shortens as phi rises, so a fixed theta rate
+            # covers less ground near the pole; the unit basis does not.
+            if self.gradient_space == "tangent":
+                tangent_east, tangent_north, _ = _unit_tangent_basis(
+                    current_theta, current_phi
+                )
+            else:
+                tangent_east, tangent_north, _ = _local_frame_from_theta_phi(
+                    current_theta, current_phi
+                )
             theta_rate_unclipped = float(scaled_spherical_velocity[0])
             phi_rate_unclipped = float(scaled_spherical_velocity[1])
             theta_rate = float(applied_spherical_velocity[0])
             phi_rate = float(applied_spherical_velocity[1])
             if self.planner_output_mode == "spherical_rate":
+                # Unit conversion at the output boundary. The servo integrates
+                # theta += theta_rate*dt, i.e. it expects angle-space rates. In
+                # tangent mode these values are arclength rates on a unit basis,
+                # so east must be divided by cos(phi) to become a theta rate --
+                # without this the arm would move east slower than commanded by
+                # exactly the factor this refactor set out to remove.
+                (
+                    theta_rate,
+                    phi_rate,
+                ) = self._tangent_rates_to_angle_rates(
+                    east_rate=theta_rate,
+                    north_rate=phi_rate,
+                    phi=current_phi,
+                )
+                (
+                    theta_rate_unclipped,
+                    phi_rate_unclipped,
+                ) = self._tangent_rates_to_angle_rates(
+                    east_rate=theta_rate_unclipped,
+                    north_rate=phi_rate_unclipped,
+                    phi=current_phi,
+                )
                 desired_c2w = self._compute_desired_orientation(
                     current_position=current_position,
                     reference_scene_center=reference_scene_center,
@@ -1401,7 +1547,9 @@ class FisherMotionPolicy:
                     "history_source": str(grad_timing.get("history_source", "missing")),
                 }
                 return result
-            vt_world = current_radius * (theta_rate * e_theta + phi_rate * e_phi)
+            vt_world = current_radius * (
+                theta_rate * tangent_east + phi_rate * tangent_north
+            )
             vn_world, radial_error = self._cal_e_t(
                 current_position=current_position,
                 reference_scene_center=reference_scene_center,
@@ -1543,14 +1691,52 @@ class FisherMotionPolicy:
 
         theta_rate = float(applied_spherical_velocity[0])
         phi_rate = float(applied_spherical_velocity[1])
-        next_theta = self._wrap_theta(current_theta + theta_rate * self.dt)
-        next_phi = self._clamp_phi(current_phi + phi_rate * self.dt)
-        next_c2w = _spherical_c2w(
-            scene_center=scene_center_np,
-            radius=radius,
-            theta=next_theta,
-            phi=next_phi,
-        )
+        if self.gradient_space == "tangent":
+            # Great-circle integration. Adding rates to (theta, phi) would put the
+            # cos(phi) factor back in via the chart, and would need a phi clamp at
+            # the pole; rotating the view direction has neither problem, so a step
+            # that arrives at the pole continues down the far side on its own.
+            east_hat, north_hat, n_hat = _unit_tangent_basis(
+                current_theta, current_phi
+            )
+            step_east = theta_rate * self.dt
+            step_north = phi_rate * self.dt
+            step_angle = float(math.hypot(step_east, step_north))
+            if step_angle > 1e-15:
+                step_dir = (step_east * east_hat + step_north * north_hat) / step_angle
+                next_n_hat = _rotate_on_sphere(n_hat, step_dir, step_angle)
+            else:
+                next_n_hat = n_hat
+            # A long east step at high elevation descends along its great circle
+            # and can leave the upper hemisphere. Reading phi back would clip z
+            # and report phi=0 for a camera that is actually below the equator,
+            # so the floor is enforced here on the normal itself. phi_max is
+            # deliberately left alone: crossing the pole is the intended gain.
+            next_n_hat, hemisphere_clamped = _clamp_normal_to_upper_hemisphere(
+                next_n_hat,
+                self.phi_min,
+                current_theta,
+            )
+            if hemisphere_clamped and self.verbose:
+                self.logger.debug(
+                    "idx=%d 大圆步长离开上半球，已夹回 phi_min=%.6f",
+                    int(idx),
+                    float(self.phi_min),
+                )
+            next_position = scene_center_np + radius * next_n_hat
+            _, next_theta, next_phi = _position_to_spherical(
+                next_position, scene_center_np
+            )
+            next_c2w = _look_at_c2w(eye=next_position, target=scene_center_np)
+        else:
+            next_theta = self._wrap_theta(current_theta + theta_rate * self.dt)
+            next_phi = self._clamp_phi(current_phi + phi_rate * self.dt)
+            next_c2w = _spherical_c2w(
+                scene_center=scene_center_np,
+                radius=radius,
+                theta=next_theta,
+                phi=next_phi,
+            )
 
         result = MotionPolicyResult(
             idx=int(idx),

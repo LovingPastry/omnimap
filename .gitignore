@@ -1,22 +1,27 @@
-# OS / 编辑器
+# =============================================================================
+# OmniMap .gitignore
+# =============================================================================
+
+# OS / Editor
 .DS_Store
 Thumbs.db
 .vscode/
 .idea/
 .marscode/
 
-# Python / Conda
+# Python
 __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
-*.so
-*.dylib
 *.egg-info/
+*.egg
+.eggs/
 dist/
 build/
 pip-wheel-metadata/
-.eggs/
+
+# Virtual Environments
 .venv/
 venv/
 .env
@@ -25,14 +30,15 @@ venv/
 # Jupyter
 .ipynb_checkpoints/
 
-# 测试 / 覆盖率 / 类型检查
+# Testing / Coverage / Type Checking
 .pytest_cache/
 .coverage
 coverage.xml
 .mypy_cache/
 .pytype/
+.ruff_cache/
 
-# 日志 / 运行输出
+# Logs / Runtime Outputs
 logs/
 log/
 outputs/
@@ -41,20 +47,37 @@ runs/
 wandb/
 lightning_logs/
 tensorboard/
-videos/
+*.log
 
-# 数据 / 模型（按需保留）
+# Data / Datasets (keep structure, ignore content)
 data/
 datasets/
-checkpoints/
-weights/
 replica/
+pretrained_models/
+
+# Model Weights
+weights/
+checkpoints/
 *.pt
 *.pth
 *.ckpt
-*.zip
 
-# CUDA / CMake 构建产物
+# Videos / Media
+videos/
+*.mkv
+*.mp4
+*.avi
+
+# Documents (practice reports)
+practice_reports/
+*.docx
+
+# Archives (local cleanup)
+archives/
+!archives/README.md
+!archives/**/README.md
+
+# CUDA / CMake Build
 cmake-build-*/
 CMakeFiles/
 CMakeCache.txt
@@ -63,44 +86,24 @@ Makefile
 *.la
 *.o
 *.obj
-*.log
 *.dll
 *.exe
-
-# 子模块内部可能的构建产物（源代码本身不要忽略）
-thirdparty/**/build/
-thirdparty/**/dist/
-thirdparty/**/pip-wheel-metadata/
-# Outputs and weights
-outputs/
-weights/
-
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-*.egg
-.eggs/
-
-# Build
-build/
-dist/
 *.so
+*.dylib
 
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Logs
-*.log
-*.mkv
-sim/sim_outputs/
+# ROS Workspace Build
 ros_ws/build/
 ros_ws/devel/
 ros_ws/logs/
+
+# Simulation Outputs
+sim/sim_outputs/
+
+# Third-party Build Artifacts (keep source)
+thirdparty/**/build/
+thirdparty/**/dist/
+thirdparty/**/pip-wheel-metadata/
+thirdparty/**/__pycache__/
+
+# Archives (keep tracked .zip in repo)
+*.zip

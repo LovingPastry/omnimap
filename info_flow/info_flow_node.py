@@ -31,6 +31,7 @@ from geometry_msgs.msg import TransformStamped, TwistStamped
 from message_filters import ApproximateTimeSynchronizer, Subscriber
 from omni import OMNI
 from omnimap.gaussian.renderer.nbv.motion_policy import FisherMotionPolicy
+from omnimap.util.lookat import look_at_c2w
 from omnimap.util.utils import (
     configure_logging,
     get_section_logger,
@@ -1082,35 +1083,8 @@ class InfoFlowROSNode:
 
     @staticmethod
     def _look_at_c2w(eye: np.ndarray, target: np.ndarray) -> np.ndarray:
-        eye = np.asarray(eye, dtype=np.float64).reshape(3)
-        target = np.asarray(target, dtype=np.float64).reshape(3)
-        up = np.array([0.0, 0.0, 1.0], dtype=np.float64)
-
-        forward = target - eye
-        forward_norm = np.linalg.norm(forward)
-        if forward_norm < 1e-12:
-            raise ValueError("eye and target are too close")
-        forward = forward / forward_norm
-
-        right = np.cross(forward, up)
-        right_norm = np.linalg.norm(right)
-        if right_norm < 1e-12:
-            fallback_up = np.array([0.0, 1.0, 0.0], dtype=np.float64)
-            right = np.cross(forward, fallback_up)
-            right_norm = np.linalg.norm(right)
-            if right_norm < 1e-12:
-                raise ValueError("failed to construct right axis")
-        right = right / right_norm
-        true_up = np.cross(right, forward)
-        true_up = true_up / max(np.linalg.norm(true_up), 1e-12)
-        down = -true_up
-
-        c2w = np.eye(4, dtype=np.float64)
-        c2w[:3, 0] = right
-        c2w[:3, 1] = down
-        c2w[:3, 2] = forward
-        c2w[:3, 3] = eye
-        return c2w
+        """Delegate to the single shared look-at so planning and servo agree on roll."""
+        return look_at_c2w(eye, target)
 
     def _servo_timer_callback(self, _event) -> None:
         if self.shutdown_requested:

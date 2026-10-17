@@ -1,0 +1,238 @@
+{
+  "verdict": "WARN",
+  "hallucination_rate": 0.0,
+  "pending_rate": 0.0435,
+  "warnings": [
+    "transient_failures_present"
+  ],
+  "papers": [
+    {
+      "id": "p1",
+      "status": "verified",
+      "method": "crossref",
+      "confidence": "high",
+      "reason": null,
+      "identifiers": {
+        "doi": "10.1109/iros45743.2020.9340916"
+      }
+    },
+    {
+      "id": "p2",
+      "status": "verified",
+      "method": "arxiv",
+      "confidence": "high",
+      "reason": null,
+      "identifiers": {
+        "arxiv_id": "2503.03912"
+      }
+    },
+    {
+      "id": "p3",
+      "status": "verified",
+      "method": "arxiv",
+      "confidence": "high",
+      "reason": null,
+      "identifiers": {
+        "arxiv_id": "2403.11233"
+      }
+    },
+    {
+      "id": "p4",
+      "status": "verified",
+      "method": "arxiv",
+      "confidence": "high",
+      "reason": null,
+      "identifiers": {
+        "arxiv_id": "2501.10663"
+      }
+    },
+    {
+      "id": "p5",
+      "status": "verified",
+      "method": "arxiv",
+      "confidence": "high",
+      "reason": null,
+      "identifiers": {
+        "arxiv_id": "2409.12096"
+      }
+    },
+    {
+      "id": "p6",
+      "status": "verified",
+      "method": "arxiv",
+      "confidence": "high",
+      "reason": null,
+      "identifiers": {
+        "arxiv_id": "2209.15376"
+      }
+    },
+    {
+      "id": "p7",
+      "status": "verified",
+      "method": "arxiv",
+      "confidence": "high",
+      "reason": null,
+      "identifiers": {
+        "arxiv_id": "2310.00685"
+      }
+    },
+    {
+      "id": "p8",
+      "status": "verified",
+      "method": "arxiv",
+      "confidence": "high",
+      "reason": null,
+      "identifiers": {
+        "arxiv_id": "2403.16803"
+      }
+    },
+    {
+      "id": "p9",
+      "status": "verified",
+      "method": "arxiv",
+      "confidence": "high",
+      "reason": null,
+      "identifiers": {
+        "arxiv_id": "2504.11674"
+      }
+    },
+    {
+      "id": "p10",
+      "status": "verified",
+      "method": "arxiv",
+      "confidence": "high",
+      "reason": null,
+      "identifiers": {
+        "arxiv_id": "2504.21067"
+      }
+    },
+    {
+      "id": "p11",
+      "status": "verify_pending",
+      "method": null,
+      "confidence": null,
+      "reason": "s2_verify_pending",
+      "identifiers": {}
+    },
+    {
+      "id": "p12",
+      "status": "verified",
+      "method": "arxiv",
+      "confidence": "high",
+      "reason": null,
+      "identifiers": {
+        "arxiv_id": "2310.00684"
+      }
+    },
+    {
+      "id": "p13",
+      "status": "verified",
+      "method": "arxiv",
+      "confidence": "high",
+      "reason": null,
+      "identifiers": {
+        "arxiv_id": "2412.17769"
+      }
+    },
+    {
+      "id": "p14",
+      "status": "verified",
+      "method": "arxiv",
+      "confidence": "high",
+      "reason": null,
+      "identifiers": {
+        "arxiv_id": "2410.21955"
+      }
+    },
+    {
+      "id": "p15",
+      "status": "verified",
+      "method": "arxiv",
+      "confidence": "high",
+      "reason": null,
+      "identifiers": {
+        "arxiv_id": "2208.11079"
+      }
+    },
+    {
+      "id": "p16",
+      "status": "verified",
+      "method": "arxiv",
+      "confidence": "high",
+      "reason": null,
+      "identifiers": {
+        "arxiv_id": "2304.11465"
+      }
+    },
+    {
+      "id": "p17",
+      "status": "verified",
+      "method": "arxiv",
+      "confidence": "high",
+      "reason": null,
+      "identifiers": {
+        "arxiv_id": "1905.05833"
+      }
+    },
+    {
+      "id": "p18",
+      "status": "verified",
+      "method": "arxiv",
+      "confidence": "high",
+      "reason": null,
+      "identifiers": {
+        "arxiv_id": "2412.10444"
+      }
+    },
+    {
+      "id": "p19",
+      "status": "verified",
+      "method": "arxiv",
+      "confidence": "high",
+      "reason": null,
+      "identifiers": {
+        "arxiv_id": "2601.06997"
+      }
+    },
+    {
+      "id": "p20",
+      "status": "verified",
+      "method": "arxiv",
+      "confidence": "high",
+      "reason": null,
+      "identifiers": {
+        "arxiv_id": "2605.10707"
+      }
+    },
+    {
+      "id": "p21",
+      "status": "verified",
+      "method": "arxiv",
+      "confidence": "high",
+      "reason": null,
+      "identifiers": {
+        "arxiv_id": "2509.04094"
+      }
+    },
+    {
+      "id": "p22",
+      "status": "verified",
+      "method": "arxiv",
+      "confidence": "high",
+      "reason": null,
+      "identifiers": {
+        "arxiv_id": "2409.16470"
+      }
+    },
+    {
+      "id": "p23",
+      "status": "verified",
+      "method": "arxiv",
+      "confidence": "high",
+      "reason": null,
+      "identifiers": {
+        "arxiv_id": "2307.04004"
+      }
+    }
+  ]
+}

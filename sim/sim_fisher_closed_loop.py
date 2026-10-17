@@ -25,46 +25,7 @@ if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
 
 
-def look_at_c2w(
-    eye: np.ndarray,
-    target: np.ndarray,
-    up: np.ndarray | None = None,
-) -> np.ndarray:
-    """Build a `c2w` pose whose optical axis points from `eye` to `target`."""
-    eye = np.asarray(eye, dtype=np.float64).reshape(3)
-    target = np.asarray(target, dtype=np.float64).reshape(3)
-    up = (
-        np.array([0.0, 0.0, 1.0], dtype=np.float64)
-        if up is None
-        else np.asarray(up, dtype=np.float64).reshape(3)
-    )
-
-    forward = target - eye
-    forward_norm = np.linalg.norm(forward)
-    if forward_norm < 1e-12:
-        raise ValueError("eye and target are too close; cannot build look-at pose")
-    forward = forward / forward_norm
-
-    right = np.cross(forward, up)
-    right_norm = np.linalg.norm(right)
-    if right_norm < 1e-12:
-        fallback_up = np.array([0.0, 1.0, 0.0], dtype=np.float64)
-        right = np.cross(forward, fallback_up)
-        right_norm = np.linalg.norm(right)
-        if right_norm < 1e-12:
-            raise ValueError("failed to construct a valid right axis for look-at pose")
-    right = right / right_norm
-
-    true_up = np.cross(right, forward)
-    true_up = true_up / max(np.linalg.norm(true_up), 1e-12)
-    down = -true_up
-
-    c2w = np.eye(4, dtype=np.float64)
-    c2w[:3, 0] = right
-    c2w[:3, 1] = down
-    c2w[:3, 2] = forward
-    c2w[:3, 3] = eye
-    return c2w
+from omnimap.util.lookat import look_at_c2w
 
 
 def spherical_c2w(
@@ -356,6 +317,18 @@ python3 sim/sim_fisher_closed_loop.py \
         default=0.15,
         help="Advanced: phi component used to define the spherical-speed clip radius in radians per step",
     )
+    parser.add_argument(
+        "--gradient_space",
+        choices=("angle", "tangent"),
+        default="angle",
+        help=(
+            "Fisher probe and control parameterization. 'angle' (default, legacy) "
+            "probes and controls in (theta, phi) increments, where the azimuth DOF "
+            "is attenuated by cos(phi) twice over and stalls near the pole. "
+            "'tangent' probes along great circles and controls on a unit basis, so "
+            "east and north carry the same physical units at every elevation."
+        ),
+    )
     parser.add_argument("--vis_gui", action="store_true")
     parser.add_argument(
         "--headless",
@@ -459,6 +432,10 @@ def run_closed_loop(args: argparse.Namespace) -> None:
             "show_fisher_arrows=False、step_delay_sec=0、hold_gui_sec=0"
         )
 
+    from sim.geometry_diagnostics import (
+        GEOMETRY_FIELD_NAMES,
+        GeometryDiagnostics,
+    )
     from sim.motion_policy import FisherMotionPolicy
     from sim.omnimap_runner import (
         OmniMapRunner,
@@ -566,12 +543,14 @@ def run_closed_loop(args: argparse.Namespace) -> None:
         enable_angular=args.enable_angular,
         grad_eps=args.grad_eps,
         spherical_speed_min=args.spherical_speed_min,
-        max_delta_theta=args.max_delta_theta,
-        max_delta_phi=args.max_delta_phi,
+        # NOTE: CLI 仍叫 --max_delta_theta/--max_delta_phi（见 docs/sim.md），
+        # 构造参数在 524648d 改名为 max_theta_rate/max_phi_rate。
+        max_theta_rate=args.max_delta_theta,
+        max_phi_rate=args.max_delta_phi,
         verbose=True,
         orientation_roll_mode="current_frame_min_roll",
         control_law_mode="dt_consistent",
-        
+        gradient_space=args.gradient_space,
     )
     logger.info("[闭环] 阶段 3/4：FisherMotionPolicy 已就绪")
 
@@ -595,6 +574,7 @@ def run_closed_loop(args: argparse.Namespace) -> None:
                 "idx",
                 "controller_mode",
                 "cartesian",
+                "gradient_space",
                 "fisher_step_scale",
                 "dt",
                 "radial_gain",
@@ -607,8 +587,8 @@ def run_closed_loop(args: argparse.Namespace) -> None:
                 "grad_phi_compressed",
                 "scaled_theta",
                 "scaled_phi",
-                "delta_theta_applied",
-                "delta_phi_applied",
+                "theta_rate_applied",
+                "phi_rate_applied",
                 "speed_clipped",
                 "clip_scale_ratio",
                 "grad_norm_raw",
@@ -640,9 +620,11 @@ def run_closed_loop(args: argparse.Namespace) -> None:
                 "depth_max_m",
                 "should_stop",
                 "stop_reason",
-            ],
+            ]
+            + GEOMETRY_FIELD_NAMES,
         )
         csv_writer.writeheader()
+        geometry = GeometryDiagnostics()
         last_processed_idx = -1
         for idx in range(int(args.num_steps)):
             last_processed_idx = idx
@@ -698,6 +680,18 @@ def run_closed_loop(args: argparse.Namespace) -> None:
             )
             t_policy = time.perf_counter() - t_policy0
 
+            # 5b. Geometry diagnostics: quantities that stay comparable across phi.
+            # Raw grad_theta / theta_rate both carry cos(phi), so they cannot be
+            # compared between polar and equatorial steps; these can.
+            geometry_row = geometry.update(
+                theta=motion_result.current_theta,
+                phi=motion_result.current_phi,
+                position=current_c2w[:3, 3],
+                center=motion_result.reference_scene_center,
+                velocity=motion_result.velocity_world,
+                grad_theta_raw=motion_result.grad_theta_raw,
+            )
+
             # 6. Log enough state to audit both mapping progress and control behavior.
             t_io0 = time.perf_counter()
             log_entry = {
@@ -717,10 +711,11 @@ def run_closed_loop(args: argparse.Namespace) -> None:
                 "fisher_current_score": motion_result.fisher_score,
                 "scaled_theta": motion_result.scaled_theta,
                 "scaled_phi": motion_result.scaled_phi,
-                "delta_theta_applied": motion_result.delta_theta_applied,
-                "delta_phi_applied": motion_result.delta_phi_applied,
+                "theta_rate_applied": motion_result.theta_rate_applied,
+                "phi_rate_applied": motion_result.phi_rate_applied,
                 "fisher_step_scale": float(args.fisher_step_scale),
                 "cartesian": bool(args.cartesian),
+                "gradient_space": str(args.gradient_space),
                 "dt": float(args.dt),
                 "radial_gain": float(args.radial_gain),
                 "linear_vel_max": float(args.linear_vel_max),
@@ -779,12 +774,13 @@ def run_closed_loop(args: argparse.Namespace) -> None:
                 },
                 "next_c2w": motion_result.next_c2w.tolist(),
             }
+            log_entry.update(geometry_row)
             log_file.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
-            csv_writer.writerow(
-                {
+            csv_row = {
                     "idx": idx,
                     "controller_mode": motion_result.controller_mode,
                     "cartesian": motion_result.cartesian,
+                    "gradient_space": str(args.gradient_space),
                     "fisher_step_scale": float(args.fisher_step_scale),
                     "dt": float(args.dt),
                     "radial_gain": float(args.radial_gain),
@@ -797,8 +793,8 @@ def run_closed_loop(args: argparse.Namespace) -> None:
                     "grad_phi_compressed": motion_result.grad_phi_compressed,
                     "scaled_theta": motion_result.scaled_theta,
                     "scaled_phi": motion_result.scaled_phi,
-                    "delta_theta_applied": motion_result.delta_theta_applied,
-                    "delta_phi_applied": motion_result.delta_phi_applied,
+                    "theta_rate_applied": motion_result.theta_rate_applied,
+                    "phi_rate_applied": motion_result.phi_rate_applied,
                     "speed_clipped": motion_result.speed_clipped,
                     "clip_scale_ratio": motion_result.clip_scale_ratio,
                     "grad_norm_raw": motion_result.grad_norm_raw,
@@ -843,8 +839,9 @@ def run_closed_loop(args: argparse.Namespace) -> None:
                     "depth_max_m": step_result.depth_max_m,
                     "should_stop": motion_result.should_stop,
                     "stop_reason": motion_result.stop_reason,
-                }
-            )
+            }
+            csv_row.update(geometry_row)
+            csv_writer.writerow(csv_row)
             force_sync_logs = (
                 should_log_step(idx, int(args.log_every))
                 or motion_result.should_stop
@@ -891,7 +888,7 @@ def run_closed_loop(args: argparse.Namespace) -> None:
                     f"[闭环] step={idx} theta={motion_result.current_theta:.4f} "
                     f"phi={motion_result.current_phi:.4f} -> next_theta={motion_result.next_theta:.4f} "
                     f"next_phi={motion_result.next_phi:.4f} "
-                    f"增量=({motion_result.delta_theta_applied:.4f}, {motion_result.delta_phi_applied:.4f}) "
+                    f"角速率=({motion_result.theta_rate_applied:.4f}, {motion_result.phi_rate_applied:.4f}) rad/s "
                     f"停止={motion_result.should_stop} "
                     f"关键帧数={step_result.num_keyframes} "
                     f"高斯数={step_result.num_gaussians}"
