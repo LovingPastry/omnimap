@@ -161,6 +161,14 @@ python3 sim/sim_fisher_closed_loop.py \
             "Replica log point clouds are typically in millimeters, so 0.001 is the safe default."
         ),
     )
+    parser.add_argument(
+        "--recolor",
+        choices=("none", "texture"),
+        default="none",
+        help="texture = overwrite point colours with a deterministic coloured pattern "
+        "(needed when the asset is untextured / all black).",
+    )
+    parser.add_argument("--texture_period_m", type=float, default=0.06)
     parser.add_argument("--ground", action="store_true")
     parser.add_argument("--ground_size", type=float, default=1.0)
     parser.add_argument("--ground_z", type=float, default=0.0)
@@ -514,6 +522,8 @@ def run_closed_loop(args: argparse.Namespace) -> None:
         args.pcd_path,
         voxel_size=args.voxel_size,
         scale=args.point_scale,
+        recolor=None if args.recolor == "none" else args.recolor,
+        texture_period_m=args.texture_period_m,
     )
     simulator.set_intrinsics(args.fx, args.fy, args.cx, args.cy)
     object_masks = None

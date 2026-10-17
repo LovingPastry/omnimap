@@ -6,16 +6,18 @@
 # Scene: the phase2 object on a ground plane (the table analogue -- ground
 # gaussians are what pull a Fisher-greedy camera toward the hemisphere rim).
 # --point_scale 1.0 is required: instance_gs.ply is already in metres.
+# --recolor texture is required: the asset's colours are all 0, and a black object
+# on a black background has (almost) no photometric gradient, so no Fisher signal.
 set -u
 cd "$(dirname "$0")/../.." || exit 1
 export PYTHONPATH="$PWD"
 PY="${PY:-$HOME/anaconda3/envs/InfoFlow/bin/python}"   # needs modified_diff_gaussian_rasterization
 OUT="${1:-sim/sim_outputs/nbv_ablation}"
 STEPS="${2:-300}"
-JOBS="${3:-2}"
+JOBS="${3:-1}"   # ground scene peaks ~14 GB per process on a 24 GB card
 mkdir -p "$OUT"
 
-COMMON=(--pcd_path sim/sim_outputs/phase2/instance_gs.ply --point_scale 1.0
+COMMON=(--pcd_path sim/sim_outputs/phase2/instance_gs.ply --point_scale 1.0 --recolor texture
         --config config/sim_rtabmap_config.yaml --headless --cartesian
         --num_steps "$STEPS" --dt 0.1 --fisher_step_scale 0.03 --spherical_speed_min 0.0
         --linear_vel_max 0.05
