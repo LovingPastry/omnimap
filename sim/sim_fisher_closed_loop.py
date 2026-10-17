@@ -320,15 +320,40 @@ python3 sim/sim_fisher_closed_loop.py \
     parser.add_argument(
         "--gradient_space",
         choices=("angle", "tangent"),
-        default="angle",
+        default=None,
         help=(
-            "Fisher probe and control parameterization. 'angle' (default, legacy) "
+            "Overrides nbv_policy.gradient_space from the config (default: config, "
+            "else 'angle'). "
+            "Fisher probe and control parameterization. 'angle' (legacy) "
             "probes and controls in (theta, phi) increments, where the azimuth DOF "
             "is attenuated by cos(phi) twice over and stalls near the pole. "
             "'tangent' probes along great circles and controls on a unit basis, so "
             "east and north carry the same physical units at every elevation."
         ),
     )
+    parser.add_argument(
+        "--nbv_config",
+        type=str,
+        default=None,
+        help=(
+            "Optional YAML overlaid on the config's nbv_policy section (either a bare "
+            "section or a file with a top-level nbv_policy key)."
+        ),
+    )
+    parser.add_argument(
+        "--nbv_set",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Override one nbv_policy entry, e.g. --nbv_set feasibility.enabled=true (repeatable).",
+    )
+    parser.add_argument(
+        "--quality_every",
+        type=int,
+        default=0,
+        help="Evaluate held-out PSNR / completeness every N steps and at the end (0 = off).",
+    )
+    parser.add_argument("--quality_views", type=int, default=16)
     parser.add_argument("--vis_gui", action="store_true")
     parser.add_argument(
         "--headless",
@@ -396,6 +421,43 @@ python3 sim/sim_fisher_closed_loop.py \
     return parser.parse_args(argv)
 
 
+def resolve_nbv_policy(
+    args: argparse.Namespace,
+    *,
+    object_bounds: list[float] | None,
+) -> dict:
+    """Config nbv_policy <- --nbv_config <- --nbv_set <- --gradient_space, placeholders resolved."""
+    import yaml
+
+    from omnimap.gaussian.renderer.nbv.policy_improvements import (
+        parse_override_value,
+        resolve_nbv_policy_dict,
+        set_nested,
+    )
+
+    with open(args.config, "r", encoding="utf-8") as fh:
+        config = yaml.safe_load(fh) or {}
+    raw = dict(config.get("nbv_policy") or {})
+    if args.nbv_config:
+        with open(args.nbv_config, "r", encoding="utf-8") as fh:
+            extra = yaml.safe_load(fh) or {}
+        extra = extra.get("nbv_policy", extra)
+        for key, value in extra.items():
+            if isinstance(value, dict) and isinstance(raw.get(key), dict):
+                raw[key] = {**raw[key], **value}
+            else:
+                raw[key] = value
+    for item in args.nbv_set or []:
+        if "=" not in item:
+            raise ValueError(f"--nbv_set expects KEY=VALUE, got {item!r}")
+        key, value = item.split("=", 1)
+        set_nested(raw, key.strip(), parse_override_value(value))
+    if args.gradient_space is not None:
+        raw["gradient_space"] = args.gradient_space
+    tsdf_bounds = (config.get("tsdf") or {}).get("spatial_bounds")
+    return resolve_nbv_policy_dict(raw, tsdf_bounds=tsdf_bounds, object_bounds=object_bounds)
+
+
 def run_closed_loop(args: argparse.Namespace) -> None:
     """Run the authoritative Phase-4 loop from render to next-pose update."""
     save_dir = Path(args.save_dir)
@@ -454,6 +516,25 @@ def run_closed_loop(args: argparse.Namespace) -> None:
         scale=args.point_scale,
     )
     simulator.set_intrinsics(args.fx, args.fy, args.cx, args.cy)
+    object_masks = None
+    heldout_radius = None
+    if int(args.quality_every) > 0:
+        from sim.quality_eval import heldout_poses, render_object_masks
+
+        _extent = np.asarray(simulator.aabb.get_extent(), dtype=np.float64)
+        heldout_radius = (
+            float(args.hemi_radius)
+            if args.hemi_radius is not None
+            else 0.5 * float(np.linalg.norm(_extent)) + 0.3
+        )
+        object_masks = render_object_masks(
+            simulator,
+            heldout_poses(
+                center=np.asarray(simulator.scene_center, dtype=np.float64),
+                radius=heldout_radius,
+                num_views=int(args.quality_views),
+            ),
+        )
     if args.ground:
         simulator.add_ground(size=args.ground_size, z=args.ground_z)
     if args.coord_frame:
@@ -479,6 +560,15 @@ def run_closed_loop(args: argparse.Namespace) -> None:
 
     center = np.asarray(simulator.scene_center, dtype=np.float64)
     extent = np.asarray(simulator.aabb.get_extent(), dtype=np.float64)
+    aabb_min = np.asarray(simulator.aabb.get_min_bound(), dtype=np.float64)
+    aabb_max = np.asarray(simulator.aabb.get_max_bound(), dtype=np.float64)
+    object_bounds = [
+        float(aabb_min[0]), float(aabb_max[0]),
+        float(aabb_min[1]), float(aabb_max[1]),
+        float(aabb_min[2]), float(aabb_max[2]),
+    ]
+    nbv_policy = resolve_nbv_policy(args, object_bounds=object_bounds)
+    logger.info("[闭环] nbv_policy=%s", json.dumps(nbv_policy, ensure_ascii=False))
     step_scale = float(args.fisher_step_scale)
     fisher_config_overrides = build_fisher_debug_config_overrides(
         show_fisher_heatmap=args.show_fisher_heatmap,
@@ -550,8 +640,28 @@ def run_closed_loop(args: argparse.Namespace) -> None:
         verbose=True,
         orientation_roll_mode="current_frame_min_roll",
         control_law_mode="dt_consistent",
-        gradient_space=args.gradient_space,
+        nbv_config=nbv_policy,
     )
+    quality = None
+    quality_rows: list[dict] = []
+    if int(args.quality_every) > 0:
+        from sim.quality_eval import QualityEvaluator
+
+        quality = QualityEvaluator(
+            simulator=simulator,
+            object_masks=object_masks,
+            policy=policy,
+            intrinsics=np.array([args.fx, args.fy, args.cx, args.cy], dtype=np.float64),
+            image_size=(args.height, args.width),
+            center=center,
+            radius=base_radius,
+            gt_points=np.asarray(simulator.pointcloud.points, dtype=np.float64),
+            object_bounds=(aabb_min, aabb_max),
+            num_views=int(args.quality_views),
+        )
+    path_length_m = 0.0
+    stop_reason_final = "num_steps"
+    steps_run = 0
     logger.info("[闭环] 阶段 3/4：FisherMotionPolicy 已就绪")
 
     log_path = save_dir / "loop_log.jsonl"
@@ -715,7 +825,7 @@ def run_closed_loop(args: argparse.Namespace) -> None:
                 "phi_rate_applied": motion_result.phi_rate_applied,
                 "fisher_step_scale": float(args.fisher_step_scale),
                 "cartesian": bool(args.cartesian),
-                "gradient_space": str(args.gradient_space),
+                "gradient_space": str(policy.gradient_space),
                 "dt": float(args.dt),
                 "radial_gain": float(args.radial_gain),
                 "linear_vel_max": float(args.linear_vel_max),
@@ -775,12 +885,15 @@ def run_closed_loop(args: argparse.Namespace) -> None:
                 "next_c2w": motion_result.next_c2w.tolist(),
             }
             log_entry.update(geometry_row)
+            log_entry["gradient_space"] = str(policy.gradient_space)
+            for key, value in (motion_result.nbv_diag or {}).items():
+                log_entry[f"nbv_{key}"] = value
             log_file.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
             csv_row = {
                     "idx": idx,
                     "controller_mode": motion_result.controller_mode,
                     "cartesian": motion_result.cartesian,
-                    "gradient_space": str(args.gradient_space),
+                    "gradient_space": str(policy.gradient_space),
                     "fisher_step_scale": float(args.fisher_step_scale),
                     "dt": float(args.dt),
                     "radial_gain": float(args.radial_gain),
@@ -903,14 +1016,27 @@ def run_closed_loop(args: argparse.Namespace) -> None:
             else:
                 logger.debug(step_message)
 
+            steps_run = idx + 1
+            if quality is not None and idx % int(args.quality_every) == 0:
+                q = quality.evaluate(runner.omni.gs)
+                q.update({"idx": idx, "path_m": path_length_m})
+                quality_rows.append(q)
+                logger.info("[质量] step=%d %s", idx, json.dumps(q))
+
             if motion_result.should_stop:
+                stop_reason_final = str(motion_result.stop_reason)
                 logger.info(
-                    f"[闭环] 在 step={idx} 提前停止："
+                    f"[闭环] 在 step={idx} 提前停止：reason={motion_result.stop_reason} "
                     f"|u_scaled|={motion_result.spherical_speed_scaled:.6f} "
-                    f"< min={motion_result.spherical_speed_min:.6f}"
+                    f"min={motion_result.spherical_speed_min:.6f}"
                 )
                 break
 
+            path_length_m += float(
+                np.linalg.norm(
+                    np.asarray(motion_result.next_c2w[:3, 3]) - np.asarray(current_c2w[:3, 3])
+                )
+            )
             current_c2w = motion_result.next_c2w
             if args.step_delay_sec > 0:
                 time.sleep(float(args.step_delay_sec))
@@ -924,6 +1050,32 @@ def run_closed_loop(args: argparse.Namespace) -> None:
                 timing_totals["step_total"] / timing_count,
                 timing_count,
             )
+
+    if quality is not None and steps_run > 0 and (
+        not quality_rows or quality_rows[-1]["idx"] != steps_run - 1
+    ):
+        q = quality.evaluate(runner.omni.gs)
+        q.update({"idx": steps_run - 1, "path_m": path_length_m})
+        quality_rows.append(q)
+        logger.info("[质量] final step=%d %s", steps_run - 1, json.dumps(q))
+    if quality_rows:
+        with open(save_dir / "quality.jsonl", "w", encoding="utf-8") as fh:
+            for row in quality_rows:
+                fh.write(json.dumps(row) + "\n")
+    summary = {
+        "steps_run": int(steps_run),
+        "stop_reason": stop_reason_final,
+        "path_length_m": float(path_length_m),
+        "nbv_policy": nbv_policy,
+        "gradient_space": str(policy.gradient_space),
+        "init_theta": float(args.init_theta),
+        "init_phi": float(args.init_phi),
+        "ground": bool(args.ground),
+        "final_quality": quality_rows[-1] if quality_rows else None,
+        "final_stop_state": dict(policy.stop_monitor.last_state),
+    }
+    with open(save_dir / "summary.json", "w", encoding="utf-8") as fh:
+        json.dump(summary, fh, indent=2, ensure_ascii=False)
 
     np.save(save_dir / "trajectory_c2w_last.npy", current_c2w)
     logger.info("[闭环] 已保存逐步日志：%s 和 %s", log_path, csv_path)

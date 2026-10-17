@@ -24,6 +24,7 @@ from distributed_common import (
     wait_for_camera_calibration,
 )
 from omnimap.gaussian.renderer.nbv.motion_policy import FisherMotionPolicy
+from omnimap.gaussian.renderer.nbv.policy_improvements import nbv_policy_from_config
 from omnimap.util.utils import get_section_logger
 from planner_snapshot import PlannerSnapshot, load_planner_snapshot_file
 
@@ -81,6 +82,9 @@ class InfoFlowPlanningNode:
             grad_eps=args.grad_eps,
             spherical_speed_min=args.spherical_speed_min,
             planner_output_mode="spherical_rate",
+            # nbv_policy 节：四项可切换修复（可行性/掩码/速率映射/停止判据）。
+            # 缺省或全部 disabled 时与原版逐位一致；gradient_space 也从这里读。
+            nbv_config=nbv_policy_from_config(config),
             verbose=True,
         )
         self.motion_policy_lock = threading.Lock()

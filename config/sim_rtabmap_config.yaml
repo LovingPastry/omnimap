@@ -97,3 +97,50 @@ fisher_num_dense_points: 4096
 fisher_idw_power: 2.0
 fisher_display_radius_scale: 0.92
 fisher_arrow_radius_scale: 0.90
+
+# ── 主动视角策略：可切换修复（消融 / 回退开关）────────────────────────
+# 每一项默认关闭；整节缺省或全部关闭时，与原版实现逐位一致。
+# 实现见 omnimap/gaussian/renderer/nbv/policy_improvements.py，消融见 docs/nbv_ablation.md。
+nbv_policy:
+  # angle = 原版 (theta,phi) 探测+控制；tangent = 大圆等弧长探测 + 单位切基（消除极点 cos²φ 退化）
+  gradient_space: angle
+  # 修复1 可达性：仰角带/工作空间盒外的速度分量做切锥投影，阻止"冲向半球边缘/桌下"
+  feasibility:
+    enabled: false
+    phi_min_deg: 15.0
+    phi_max_deg: 80.0
+    margin_deg: 8.0
+    workspace_bounds: null      # 相机位置可达盒 [x_min,x_max,y_min,y_max,z_min,z_max]（世界系）
+    workspace_margin_m: 0.03
+    hard_clamp: true
+  # 修复2 可见性掩码：只统计 ROI 内、支撑面以上的高斯；相机低于支撑面时打分为 0
+  fisher_mask:
+    enabled: false
+    roi_bounds: tsdf            # tsdf = 用 tsdf.spatial_bounds；或显式 6 元组；null = 不限
+    roi_padding_m: 0.0
+    support_plane_z: null       # 桌面高度；tsdf_min_z = 用 spatial_bounds 的 z_min
+    plane_softness_m: 0.01
+  # 修复3 速度尺度：normalized = 梯度只给方向，速率 = v_nominal·|g|/(|g|+κ)，κ=|g| 滑动中位数
+  velocity_mapping:
+    mode: legacy                # legacy | normalized
+    v_nominal_mps: 0.03
+    kappa_window: 20
+  # 修复4 停止判据（取或）：信息饱和 / 视角球覆盖 / 预算 / 停滞
+  stop:
+    enabled: false
+    min_steps: 20
+    saturation_enabled: true
+    score_window: 10
+    score_ratio: 0.10
+    coverage_enabled: true
+    coverage_threshold: 0.90
+    coverage_radius_deg: 25.0
+    coverage_phi_min_deg: 15.0
+    coverage_phi_max_deg: 80.0
+    max_steps: null
+    max_path_m: null
+    max_time_s: null
+    wall_clock: false
+    stall_enabled: false
+    stall_speed_mps: 0.001
+    stall_steps: 15

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import copy
 import math
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 import torch
 
@@ -45,6 +45,19 @@ class LegacyFisherEvaluator:
         self.keyviewpoints = []
         self.precomputed_history_stat: Optional[torch.Tensor] = None
         self.precomputed_history_meta: Dict[str, Any] = {}
+        # Optional score shaping installed by the motion policy (nbv_policy.fisher_mask).
+        # None = original behaviour: every gaussian counts, every view is visible.
+        self.contribution_weight: Optional[torch.Tensor] = None
+        self.view_gate_fn: Optional[Callable[[Any], float]] = None
+
+    def set_score_mask(
+        self,
+        contribution_weight: Optional[torch.Tensor],
+        view_gate_fn: Optional[Callable[[Any], float]] = None,
+    ) -> None:
+        """Install (or clear with ``None``) a per-element contribution weight and view gate."""
+        self.contribution_weight = contribution_weight
+        self.view_gate_fn = view_gate_fn
 
     def _zero_stat(self) -> torch.Tensor:
         params = [self.gaussians.capture()[1], self.gaussians.capture()[6]]
@@ -113,6 +126,13 @@ class LegacyFisherEvaluator:
         cur_stat = self._current_stat_from_raw_grad(raw_grad)
         denominator = history_stat + self.reg_lambda
         contribution = cur_stat * torch.reciprocal(denominator)
+        weight = self.contribution_weight
+        if weight is not None and weight.numel() == contribution.numel():
+            contribution = contribution * weight.to(
+                device=contribution.device, dtype=contribution.dtype
+            )
+        if self.view_gate_fn is not None:
+            contribution = contribution * float(self.view_gate_fn(cam))
         score = float(contribution.sum().item())
         topk_contrib_vals, _ = torch.topk(
             contribution.reshape(-1),
