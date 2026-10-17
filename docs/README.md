@@ -11,6 +11,7 @@
 | [sim.md](sim.md) | 闭环仿真入口与参数说明 |
 | [nbv_fisher.md](nbv_fisher.md) | Fisher 信息场计算与 NBV 视点规划 |
 | [velocity_cmd_algorithm.md](velocity_cmd_algorithm.md) | 由策略场生成 Twist 速度指令的数学推导 |
+| [nbv_ablation.md](nbv_ablation.md) | 主动视角策略四项可切换修复（`nbv_policy`）的定义、配置回退与仿真消融报告 |
 
 ## 相关约定
 
