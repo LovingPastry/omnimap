@@ -132,6 +132,9 @@ nbv_policy:
     saturation_enabled: true
     score_window: 10
     score_ratio: 0.10
+    global_probe_views: 12       # 局部饱和只是提名：再给未覆盖的可达方向打分，全局也饱和才停
+    global_check_every: 10
+    confirm_checks: 2            # 连续确认次数，防止建图侧 opacity reset 造成的瞬时全局塌缩误触发
     coverage_enabled: true
     coverage_threshold: 0.90
     coverage_radius_deg: 25.0

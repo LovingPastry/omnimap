@@ -137,6 +137,9 @@ nbv_policy:
     saturation_enabled: true
     score_window: 300            # 规划 30 Hz，窗口按 tick 计
     score_ratio: 0.10
+    global_probe_views: 12       # 局部饱和只是提名：再给未覆盖的可达方向打分，全局也饱和才停
+    global_check_every: 150       # 30 Hz 规划下约 5 s 一次；每次要多渲染 global_probe_views 个视角
+    confirm_checks: 2            # 连续确认次数，防止建图侧 opacity reset 造成的瞬时全局塌缩误触发
     coverage_enabled: true
     coverage_threshold: 0.90
     coverage_radius_deg: 25.0

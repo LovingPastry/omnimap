@@ -274,6 +274,16 @@ def test_stop_monitor_criteria():
     assert reason == "" and state["stop_global_ratio"] > 0.1
     reason, state = decaying(probe_value=1.0)
     assert reason == "info_saturated" and state["stop_global_ratio"] < 0.1
+    # a one-off collapse of every view (e.g. map opacity reset) is not confirmed
+    mon = StopMonitor(StopConfig(enabled=True, min_steps=5, coverage_enabled=False, score_window=3,
+                                 score_ratio=0.1, global_check_every=1, confirm_checks=2))
+    for k in range(40):
+        collapsed = k == 30
+        stop, reason, _ = mon.update(
+            score=1.0 if collapsed else 1000.0, position=np.array([1.0, 0, 0]), view_dir=np.array([1.0, 0, 0]),
+            dt=0.1, commanded_speed_mps=0.01, global_probe=lambda dirs, c=collapsed: 1.0 if c else 900.0,
+        )
+        assert not stop
     # disabled monitor never stops but still reports state
     mon = StopMonitor(StopConfig(enabled=False, max_steps=1))
     stop, _, state = mon.update(score=1.0, position=np.ones(3), view_dir=np.ones(3), dt=0.1, commanded_speed_mps=0.0)

@@ -18,7 +18,7 @@ JOBS="${3:-1}"   # ground scene peaks ~14 GB per process on a 24 GB card
 mkdir -p "$OUT"
 
 COMMON=(--pcd_path sim/sim_outputs/phase2/instance_gs.ply --point_scale 1.0 --recolor texture
-        --config config/sim_rtabmap_config.yaml --headless --cartesian
+        --config sim/ablation/sim_ablation_config.yaml --headless --cartesian
         --num_steps "$STEPS" --dt 0.1 --fisher_step_scale 0.03 --spherical_speed_min 0.0
         --linear_vel_max 0.05
         --fisher_num_samples 16 --fisher_num_dense_points 64

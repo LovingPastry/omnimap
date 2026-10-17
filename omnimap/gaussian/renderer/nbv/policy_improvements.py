@@ -99,6 +99,10 @@ class StopConfig:
     # 0 = trust the local test alone.
     global_probe_views: int = 12
     global_check_every: int = 10
+    # Consecutive global confirmations required. A map-side event such as the
+    # 3DGS periodic opacity reset collapses every view's score at once and would
+    # otherwise pass a single check; it recovers within a few ticks.
+    confirm_checks: int = 2
     # B: view-sphere coverage. Fraction of directions in the feasible band that
     # lie within coverage_radius_deg of some visited camera direction.
     coverage_enabled: bool = True
@@ -431,6 +435,7 @@ class StopMonitor:
         self.stopped_reason = ""
         self._t0: Optional[float] = None
         self._last_global_check = -10**9
+        self._global_hits = 0
         self.last_global_ratio = float("nan")
 
     def update(
@@ -521,7 +526,9 @@ class StopMonitor:
         self._last_global_check = self.steps
         best = float(self._global_probe(self.probe_dirs()))
         self.last_global_ratio = best / self.max_window_mean if self.max_window_mean > 0 else float("nan")
-        return math.isfinite(self.last_global_ratio) and self.last_global_ratio < float(self.cfg.score_ratio)
+        hit = math.isfinite(self.last_global_ratio) and self.last_global_ratio < float(self.cfg.score_ratio)
+        self._global_hits = self._global_hits + 1 if hit else 0
+        return self._global_hits >= max(int(self.cfg.confirm_checks), 1)
 
     def _check(self, coverage: float, saturation_ratio: float) -> tuple[bool, str]:
         cfg = self.cfg
