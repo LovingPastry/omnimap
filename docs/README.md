@@ -12,6 +12,7 @@
 | [nbv_fisher.md](nbv_fisher.md) | Fisher 信息场计算与 NBV 视点规划 |
 | [velocity_cmd_algorithm.md](velocity_cmd_algorithm.md) | 由策略场生成 Twist 速度指令的数学推导 |
 | [nbv_ablation.md](nbv_ablation.md) | 主动视角策略四项可切换修复（`nbv_policy`）的定义、配置回退与仿真消融报告 |
+| [eps_contrib_report.md](eps_contrib_report.md) | 仿真报告：探测步长 `grad_eps` 扫描 + Fisher 分数来源诊断（更正消融报告的"近视"结论） |
 
 ## 相关约定
 

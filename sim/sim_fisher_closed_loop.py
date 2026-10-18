@@ -362,6 +362,17 @@ python3 sim/sim_fisher_closed_loop.py \
         help="Evaluate held-out PSNR / completeness every N steps and at the end (0 = off).",
     )
     parser.add_argument("--quality_views", type=int, default=16)
+    parser.add_argument(
+        "--contrib_diag_every",
+        type=int,
+        default=0,
+        help=(
+            "Every N steps, split the Fisher score of the current view and of reachable "
+            "probe directions by keyframe-history bucket (read-only; 0 = off). "
+            "Writes contrib_diag.jsonl, see sim/contrib_diagnostics.py."
+        ),
+    )
+    parser.add_argument("--contrib_diag_dirs", type=int, default=24)
     parser.add_argument("--vis_gui", action="store_true")
     parser.add_argument(
         "--headless",
@@ -668,6 +679,18 @@ def run_closed_loop(args: argparse.Namespace) -> None:
             gt_points=np.asarray(simulator.pointcloud.points, dtype=np.float64),
             object_bounds=(aabb_min, aabb_max),
             num_views=int(args.quality_views),
+        )
+    contrib_diag = None
+    if int(args.contrib_diag_every) > 0:
+        from sim.contrib_diagnostics import ContributionDiagnostics
+
+        contrib_diag = ContributionDiagnostics(
+            policy=policy,
+            intrinsics_vec=[args.fx, args.fy, args.cx, args.cy],
+            image_size=(args.height, args.width),
+            out_path=save_dir / "contrib_diag.jsonl",
+            every=int(args.contrib_diag_every),
+            num_dirs=int(args.contrib_diag_dirs),
         )
     path_length_m = 0.0
     stop_reason_final = "num_steps"
@@ -1027,6 +1050,11 @@ def run_closed_loop(args: argparse.Namespace) -> None:
                 logger.debug(step_message)
 
             steps_run = idx + 1
+            if contrib_diag is not None:
+                contrib_diag.observe(current_c2w[:3, 3])
+                contrib_diag.maybe_run(
+                    idx=idx, gs_backend=runner.omni.gs, current_c2w=current_c2w
+                )
             if quality is not None and idx % int(args.quality_every) == 0:
                 q = quality.evaluate(runner.omni.gs)
                 q.update({"idx": idx, "path_m": path_length_m})
@@ -1061,6 +1089,8 @@ def run_closed_loop(args: argparse.Namespace) -> None:
                 timing_count,
             )
 
+    if contrib_diag is not None:
+        contrib_diag.close()
     if quality is not None and steps_run > 0 and (
         not quality_rows or quality_rows[-1]["idx"] != steps_run - 1
     ):
