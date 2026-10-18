@@ -2,6 +2,7 @@
 
 <section id="findings" class="report-section">
 <div class="section-heading"><span class="section-index">01 / INSIGHT</span><h2>先看这三个判断</h2><p>终点有 IK 解、路径连续、沿途远离奇异构型，是三个不同的要求。</p></div>
+<div class="report-prose opening"><p>这次调研从一个具体的系统矛盾出发：地图认为继续沿某个方向移动能看到更多内容，UR5 却在执行过程中减速、停住。只看相机轨迹，这个方向可能平滑而合理；放到机械臂上，同一段轨迹却可能要求腕部关节急剧转动，或者让下游 Servo 判定已接近奇异区域。因此，需要研究的对象不只是“下一个视角好不好”，还包括“从当前关节构型出发，机器人能否持续走向它”。</p><p>局部关系是 <code>v_camera = J_camera(q) q̇</code>。当某个奇异值变小时，沿对应末端方向的速度需要更大的关节速度才能实现；这取决于期望运动的方向，并不意味着附近所有运动都不可执行。终点 IK 有解只能回答目标构型是否存在，不能回答沿途是否跳支、是否超速，以及当前速度命令能否实现。降低速度可以缓解瞬时需求，但不会自动改变通往危险构型的路线。</p><p>由此，文献检索分成四个连续的问题：选视角时能否考虑构型质量？运动途中能否同时保留信息收益和安全裕度？安全控制具体怎样实现？对六轴 UR5，又有哪些相机约束其实可以放宽？下面先用论文地图定位工作，再逐篇解释证据，最后回到 OmniMap 的接口与执行闭环。</p></div>
 <div class="insight-grid">
 <article class="insight"><span class="large-number">01</span><h3>运动学已经进入 NBV</h3><p>COMPASS 将关节构型可操作度直接写入视角效用；Splat-CBF 把信息收益和连续安全约束结合。单独添加一个 manipulability reward，已有明确先例。</p><a href="#papers">查看直接相关工作 <span aria-hidden="true">↗</span></a></article>
 <article class="insight"><span class="large-number">02</span><h3>六轴需要重新定义任务</h3><p>UR5 严格跟踪完整六维位姿时，通常没有可用关节零空间。释放光轴 roll、允许适量误差或提前改道，才有调整构型的空间。</p><a href="#design">查看任务与控制设计 <span aria-hidden="true">↗</span></a></article>
@@ -11,7 +12,8 @@
 </section>
 
 <section id="papers" class="report-section">
-<div class="section-heading"><span class="section-index">02 / READING MAP</span><h2>论文地图：从选视角，到连续执行</h2><p>先读 COMPASS → Splat-CBF → OSCBF → Reconstruction-Aware Control。点击标签筛选，展开卡片查看核心突破与证据边界。</p></div>
+<div class="section-heading"><span class="section-index">02 / READING MAP</span><h2>论文地图：从选视角，到连续执行</h2><p>四篇重点工作分别补上“构型评分、途中感知、安全控制、任务自由度”。图卡用于快速定位；下一节展开问题、方法与实验结果。</p></div>
+<nav class="reading-route" aria-label="重点论文精读入口"><a href="#read-compass"><span>01 / 选哪个视角</span>COMPASS ↗</a><a href="#read-splat"><span>02 / 途中如何观察</span>Splat-CBF ↗</a><a href="#read-oscbf"><span>03 / 怎样约束控制</span>OSCBF ↗</a><a href="#read-reconstruction"><span>04 / 释放哪些约束</span>Reconstruction-Aware ↗</a></nav>
 <div id="paper-controls-slot"></div>
 <div id="paper-grid" class="paper-grid">
 <article class="paper featured" data-tags="nbv hardware" data-search="COMPASS Li ICRA 2026 confined manipulation manipulability 可操作度 视角 效用" id="paper-compass">
@@ -47,8 +49,49 @@
 <div class="baseline-note"><span class="note-label">与你已读的 GauSS-MI 的关系</span><p><a href="https://arxiv.org/abs/2504.21067">GauSS-MI（Xie 等，RSS 2025）</a>提供高斯表示下的信息收益目标，真实平台为 Panda。使用 MoveIt 规划与控制，不应直接理解为已经优化奇异性裕度。本次检索补充的是视角的关节构型质量、沿途可执行性和连续执行约束。</p></div>
 </section>
 
+<section id="reading" class="report-section">
+<div class="section-heading"><span class="section-index">03 / CLOSE READING</span><h2>四篇重点论文，补齐同一条执行链</h2><p>它们并非四个可以直接替换的 NBV 算法，而是在不同层面回答问题。以下结果均标明平台与比较对象，避免把七轴或移动机器人的结论直接套到 UR5。</p></div>
+<article id="read-compass" class="paper-study">
+<div class="study-rail"><span>01</span><small>VIEW + CONFIGURATION</small></div>
+<div class="study-body"><div class="study-kicker">COMPASS · ICRA 2026 已接收 · FR3 真机</div><h3>先回答：信息最多的视角，是否也方便机器人到达？</h3><p class="study-thesis">最值得借鉴的是把候选从“相机视角”提升为“视角＋关节构型”，让运动学真正参与上游决策。</p>
+<h4>它针对什么问题</h4><p>在狭窄容器中寻找并抓取目标时，遮挡要求机器人不断换视角，有限的活动空间又约束机械臂运动。单纯贪心选择信息增益最高的位置，可能把机器人带到难以到达、难以继续移动或不利于抓取的构型。COMPASS 因而将主动感知与后续操作连起来考虑。</p>
+<h4>它提出了什么方法</h4><p>系统先做近场扫描以建立周边环境，再用 MUE-RRT 探索，最后执行受约束的抓取优化。探索节点写成 <code>x=(v,q)</code>，同时包含视角和关节构型；RRT 搜索可达节点并建立无碰撞连接。节点效用把未知体积收益 G、运动惯性项 D、可操作度 M 和任务启发 H 加权，再除以关节空间轨迹长度 C。这里的 <code>M(q)=√det(JJᵀ)</code> 让信息相近但构型质量不同的视角获得不同评分。</p><p>这比在 NBV 选完之后才调用 IK 更进一步：机器人姿态的好坏会直接改变“下一步想去哪里”。但可操作度仍是效用中的一项，可能与信息收益或代价发生权衡，并不是不可违反的安全条件。</p>
+<h4>实验达到了什么效果</h4><div class="table-scroll"><table class="study-table"><caption>仿真最困难的 Level 4，原文 Table II</caption><thead><tr><th>指标</th><th>IG</th><th>GSE</th><th>COMPASS</th></tr></thead><tbody><tr><td>整体任务成功率 ↑</td><td>25.0%</td><td>45.0%</td><td>62.5%</td></tr><tr><td>平均可操作度 ↑</td><td>0.058</td><td>0.059</td><td>0.066</td></tr></tbody></table></div><p>表 II 四个难度的整体成功率取算术平均，COMPASS 比 IG 高 <b>39.25 个百分点</b>，比 GSE 高 <b>24.25 个百分点</b>。FR3 七轴机械臂搭配腕部 D435i 的真机实验中，每种场景进行 10 次试验，报告整体成功率平均为 80%，平均找到目标用时 159.75 s。这支持“把感知与运动规划结合，有助于受限空间任务完成”的结论。</p>
+<h4>对 UR5 能带走什么，不能据此推出什么</h4><p>建议先读它的效用定义与探索节点表示，用于构建 OmniMap 的“构型感知 NBV”基线：同一视角评估从当前构型可连续到达的 IK 解，并计入运动代价与构型质量。上述成功率来自整套流程，<b>不能归因于可操作度项的单独作用</b>；原文也没有给出全路径最小奇异值的硬下界。FR3 的七轴冗余与 UR5 的六轴结构不同，不能直接复用构型调整策略。</p><p class="study-source"><a href="https://arxiv.org/html/2509.14787v2#S4">精读 §IV：方法 ↗</a><a href="https://arxiv.org/html/2509.14787v2#S6.T2">Table II：仿真 ↗</a><a href="https://arxiv.org/html/2509.14787v2#S6.SS2">§VI-B：真机 ↗</a></p>
+<div class="study-transition">构型评分让策略更少选到难执行的目标，但即使终点合适，途中仍可能遇到信息与安全的冲突。这引出第二篇工作。</div></div>
+</article>
+<article id="read-splat" class="paper-study">
+<div class="study-rail"><span>02</span><small>INFORMATIVE EXECUTION</small></div>
+<div class="study-body"><div class="study-kicker">Splat-CBF · 2026.09 预印本 · Kinova 仿真</div><h3>再回答：去往 NBV 的过程中，能否一边观察、一边满足安全约束？</h3><p class="study-thesis">它与 OmniMap 的表示最接近：在在线 3DGS 地图上，把连续感知收益接入执行层的约束优化。</p>
+<h4>它针对什么问题</h4><p>NBV 给出希望到达的相机位置后，常规安全过滤器可能只负责绕开障碍；运动途中的相机朝向和观测质量未必理想。另一方面，如果持续追求信息收益，又可能把机器人拉向危险区域。Splat-CBF 研究的正是这两个目标在连续运动时如何协调。</p>
+<h4>它提出了什么方法</h4><p>论文从高斯地图构建风险感知的环境安全 barrier，并用预期 Fisher 信息构造软感知 barrier，再把两者放进同一个 CBF-QP。可把它理解为：名义控制器提出“想怎么走”，硬安全条件限制可选速度，软感知条件在剩余空间内争取有用观测；发生冲突时，自适应松弛使安全优先。与终点的单次信息评分相比，感知目标会影响途中实际执行的运动。</p><p>机械臂实验在 Isaac Sim 中使用七轴 Kinova Gen3 和腕部 RGB-D，相同的 Random、COVER 或 FisherRF 选择器分别搭配 Safety Only 与 Splat-CBF。关键是：<b>两个执行器都已有自碰撞、关节限位和奇异性 barrier</b>，后者新增的是软感知约束。这组对照检验的是安全运动中的信息利用，而不是“有没有奇异性保护”。</p>
+<h4>实验达到了什么效果</h4><div class="table-scroll"><table class="study-table"><caption>固定 COVER 视角选择器，原文 Table III</caption><thead><tr><th>指标</th><th>Safety Only</th><th>Splat-CBF</th></tr></thead><tbody><tr><td>PSNR ↑</td><td>17.08 dB</td><td>17.96 dB</td></tr><tr><td>SSIM ↑</td><td>0.712</td><td>0.737</td></tr><tr><td>深度 RMSE ↓</td><td>0.376 m</td><td>0.355 m</td></tr><tr><td>QP 求解中位耗时 ↓</td><td>0.91 ms</td><td>1.15 ms</td></tr></tbody></table></div><p>另外两种选择器也得到方向一致的重建指标改善，但幅度不同：Random 的 PSNR 为 15.78 → 16.85 dB，FisherRF 为 16.69 → 16.87 dB。作者报告机械臂试验均无碰撞、环境安全裕度保持为正。这说明在相同观测预算下，执行层的途中感知约束可以改善最终地图；它没有提供专门隔离奇异性规避效果的消融。</p>
+<h4>对 UR5 能带走什么，不能据此推出什么</h4><p>值得借鉴的是“信息目标与运动学约束分层、共同作用于实际关节速度”的结构。需要特别注意计算口径：约 1 ms 只是约束构建后的 QP 求解；包含高斯集合构建和有限差分 Fisher 感知梯度的完整过滤更新约为 <b>0.5–1.5 s</b>。OmniMap 因而更适合低频更新信息方向、高频维护运动学安全。论文的机械臂结果是仿真，真机平台是 Ackermann 移动机器人，尚不能证明 UR5 上同样有效。</p><p class="study-source"><a href="https://arxiv.org/html/2609.23100v1#S4">精读 §IV：控制设计 ↗</a><a href="https://arxiv.org/html/2609.23100v1#S5.SS5">§V-E：机械臂实验 ↗</a><a href="https://arxiv.org/html/2609.23100v1#S5.T3">Table III：完整结果 ↗</a></p>
+<div class="study-transition">Splat-CBF 给出了信息与安全的组合方式，而机械臂的奇异性 barrier 来自操作空间控制框架。要把这一层接到 UR5，需要继续读 OSCBF。</div></div>
+</article>
+<article id="read-oscbf" class="paper-study">
+<div class="study-rail"><span>03</span><small>TASK-CONSISTENT SAFETY</small></div>
+<div class="study-body"><div class="study-kicker">OSCBF · IROS 2025 · Panda 真机 · 开源</div><h3>第三个问题：保护机器人时，怎样尽量保留相机任务？</h3><p class="study-thesis">这是四篇中最值得对照代码读的控制论文：它把奇异性写成安全约束，并明确区分关节速度与力矩接口。</p>
+<h4>它针对什么问题</h4><p>安全过滤器不仅要阻止危险运动，还要决定如何修改命令。如果只在关节空间寻找最接近原命令的安全解，微小的关节修正也可能明显改变末端任务；如果只关心末端误差，又可能产生不必要的零空间运动。OSCBF 希望安全干预在操作空间中保留主任务，并合理处理次级姿态任务。</p>
+<h4>它提出了什么方法</h4><p>作者在 QP 中使用与操作空间控制一致的目标度量，把末端任务与零空间任务的偏离分别纳入优化，同时施加关节、工作空间、碰撞和奇异性条件。奇异性示例定义 <code>h(q)=μ(q)−ε</code>，其中 <code>μ(q)=∏σᵢ(J)</code>。在速度控制下，要求 h 的变化不能让系统过快接近安全边界；因此控制器可以提前削弱或改变使构型进一步恶化的速度分量。</p><p>原文 §IV-B 给出 Kinematic-OSCBF 关节速度 QP，§IV-C 给出动态力矩版本。对于现有速度指令链，前者是更直接的起点；论文 Panda 硬件演示采用力矩控制，不能把那套接口当作 UR5 已具备的能力。</p>
+<h4>实验达到了什么效果</h4><p>在七轴 Panda 仿真中，作者同时激活 168 个 CBF 条件，向机器人发送会接近各类安全边界的末端指令。报告中各 barrier 均未进入负值区域，并保留任务跟踪。原文 Table II 给出的计算频率如下；这是作者平台的计算基准，并非 UR5 的实测闭环频率。</p><div class="table-scroll"><table class="study-table"><caption>168 个约束同时启用，原文 Table II</caption><thead><tr><th>计算频率</th><th>速度控制</th><th>力矩控制</th></tr></thead><tbody><tr><td>平均</td><td>3.24 kHz</td><td>2.94 kHz</td></tr><tr><td>第 5 百分位</td><td>2.35 kHz</td><td>2.25 kHz</td></tr></tbody></table></div><p>真机使用 1 kHz Panda 力矩接口，在四项实验中展示安全边界附近的平滑跟踪、全身避碰和近奇异构型运动。论文报告部分位置安全边界的接近距离达到 6 mm，近奇异实验使用 μ=10⁻²。这些实验说明控制器具有实际运行和快速修正能力；该 μ 数值依赖机器人、Jacobian 定义和尺度，不能作为 UR5 的通用阈值。</p>
+<h4>对 UR5 能带走什么，不能据此推出什么</h4><p>优先查看开源实现中的速度 QP、奇异性函数和机器人模型适配。落地时应使用相机任务对应的 Jacobian，并检查实际执行的关节速度是否与优化结果一致。最重要的边界是：<b>安全过滤器不负责找到新 NBV，也不保证一定继续前进</b>。若完整六维任务与安全条件冲突，结果仍可能是偏离任务或停住；输入限制、离散控制和约束不可行也需要单独处理。要减少停滞，上游必须接收受限信息并改变策略。</p><p class="study-source"><a href="https://arxiv.org/html/2503.06736v3#S4">精读 §IV：两种控制接口 ↗</a><a href="https://arxiv.org/html/2503.06736v3#S5">§V：仿真与硬件 ↗</a><a href="https://github.com/StanfordASL/oscbf">作者代码 ↗</a></p>
+<div class="study-transition">对七轴机械臂，冗余关节为安全修正提供空间；对严格跟踪六维位姿的六轴 UR5，这个空间通常不存在。于是最后一个问题是：相机真的需要锁死全部姿态吗？</div></div>
+</article>
+<article id="read-reconstruction" class="paper-study">
+<div class="study-rail"><span>04</span><small>WHAT THE CAMERA NEEDS</small></div>
+<div class="study-body"><div class="study-kicker">Object-Reconstruction-Aware Whole-body Control · T-RO 2026 · 开源</div><h3>最后回到任务本身：控制位置与指向，是否就够了？</h3><p class="study-thesis">它的启发不只是让机器人“边走边看”，还在于把相机需要满足的任务与人为固定的完整姿态分开。</p>
+<h4>它针对什么问题</h4><p>只在 NBV 终点拍照，会浪费转场期间的观测机会；但为了寻找有信息的路径而反复采样和评分，又会增加计算负担。这篇工作希望在不过度增加路径搜索的前提下，让两次 NBV 之间的运动持续服务于重建。</p>
+<h4>它提出了什么方法</h4><p>系统仍从 200 个离散候选中选择 NBV，但额外在未知区域计算一个有信息的 focus point。移动过程中，连续运动学 QP 通过软可见性约束尽量把这个点留在视野中，并结合避障与绕障约束；接近 NBV 时，逐渐降低该辅助约束的权重，优先到达终点。其关键是用一个有意义的凝视目标代替反复评价大量途中候选。</p><p>主任务使用相机位置与单位光轴方向。方向向量虽有三个分量，独立自由度只有两个，因此任务局部为 <b>3D 位置＋2D 指向</b>，不要求跟踪光轴 roll。对六轴机械臂，这在任务 Jacobian 满行秩时通常可以释放一个局部自由度；它有利于构型调整，但仍需明确地把该自由度用于改善运动学。</p>
+<h4>实验达到了什么效果</h4><div class="table-scroll"><table class="study-table"><caption>114 个 ShapeNet 对象，第 10 个 NBV，原文 Table II 均值</caption><thead><tr><th>指标</th><th>Focus</th><th>路径采样</th><th>No path</th></tr></thead><tbody><tr><td>物体覆盖率 ↑</td><td>83.3%</td><td>84.0%</td><td>79.4%</td></tr><tr><td>途中信息规划累计计算时间 ↓</td><td>11.70 s</td><td>203.61 s</td><td>—</td></tr><tr><td>累计计算＋运动时间 ↓</td><td>600.46 s</td><td>833.42 s</td><td>555.37 s</td></tr></tbody></table></div><p>在这项配置下，Focus 比路径采样少用约 17.4 倍的途中规划计算时间，总时间减少 27.9%，覆盖率低 0.7 个百分点；相对 No path，则用更长时间换来高 3.9 个百分点的覆盖率。随视场和地图分辨率变化，论文报告计算加速范围为 <b>6.2–19.36 倍</b>。因此它展示的是效率与重建收益之间的折中，不能把“计算快十几倍”写成“机器人运动快十几倍”。论文另有八自由度移动机械臂及腿式机械臂真机验证。</p>
+<h4>对 UR5 能带走什么，不能据此推出什么</h4><p>应优先借鉴位置＋指向的任务表示，以及途中信息目标的软约束设计。OmniMap 可以检验：允许 roll 随构型调整，是否在保留目标可见性的同时减少奇异性停机。但论文没有直接加入 UR5 奇异性约束，也没有通过 roll 消融证明停机减少。矩形视野、遮挡和相机安装都会使 roll 影响观测收益，仍需在实际重建指标中验证。</p><p class="study-source"><a href="https://arxiv.org/html/2509.04094v3#S4">精读 §IV：任务与 QP ↗</a><a href="https://arxiv.org/html/2509.04094v3#S5.T2">Table II：重建与时间 ↗</a><a href="https://arxiv.org/html/2509.04094v3#S5.T3">Table III：参数变化 ↗</a><a href="https://github.com/fthdrsn/NBV_object_recontruction">作者代码 ↗</a></p></div>
+</article>
+<div class="synthesis"><span class="section-index">WHAT THESE PAPERS JOINTLY TELL US</span><h3>值得组合的是四种能力，而非把一篇论文整体搬到 UR5。</h3><div class="report-prose"><p>COMPASS 让决策知道构型好坏；Splat-CBF 让执行途中继续获取信息；OSCBF 提供连续安全修正的具体机制；重建感知控制则提醒我们重新定义相机任务。将它们连起来，合理的系统应当在选方向时预判运动学，在执行时维护约束，并把受限结果反馈给规划器。</p><p>这也说明研究贡献不能只表述为“给 NBV 加可操作度奖励”或“把 Fisher 信息与 CBF 结合”，这些已有直接先例。更值得检验的问题是：在六轴、在线地图、有限控制接口的实际条件下，联合调整视角与 roll、评估短时关节轨迹、反馈真实执行状态，能否同时减少停滞并提高单位时间重建收益。这里提出的是待验证方向，尚未完成针对该组合的独立查新或实验论证。</p></div></div>
+</section>
+
 <section id="audit" class="report-section">
-<div class="section-heading"><span class="section-index">03 / CODE EVIDENCE</span><h2>回到 OmniMap：四个可定位的风险</h2><p>证据基于本轮检查的仓库快照。下面的代码路径可在本地点击打开；行号对应报告生成时版本。</p></div>
+<div class="section-heading"><span class="section-index">04 / CODE EVIDENCE</span><h2>回到 OmniMap：四个可定位的风险</h2><p>证据基于本轮检查的仓库快照。下面的代码路径可在本地点击打开；行号对应报告生成时版本。</p></div>
+<div class="report-prose section-bridge"><p>带着这四篇论文再看当前实现，缺口就更明确了：信息策略能生成相机运动，但决策端还看不到关节构型与执行限制；执行端又固定了完整 look-at 姿态。因此，添加一个评分项之前，首先需要确认实际配置和停机来源，再让规划、任务定义与控制接口共享同一组运动学状态。下面四处代码证据分别对应这条链上的具体断点。</p></div>
 <div class="audit-list">
 <details class="audit-item" open><summary><span class="severity high">优先核对</span><span>负角速度上限会关闭幅值限速</span><span class="audit-number">01</span></summary><div class="audit-body"><p><a href="../config/rtabmap_config.yaml">config/rtabmap_config.yaml:82</a> 中 <code>angular_speed_max: -0.05</code>。<a href="../info_flow/info_flow_servo_runtime.py">info_flow_servo_runtime.py:155–163</a> 的限幅函数在 <code>limit &lt;= 0</code> 时返回原向量。因此该值不会产生 0.05 rad/s 的角速度上限；角加速度斜率限制仍保留。</p><pre><code>if norm &lt;= 1e-12 or limit &lt;= 0.0 or norm &lt;= limit:
     return vec, norm</code></pre><p class="boundary">已确认代码行为；尚未确认真机启动参数是否覆盖此值，也不能据此认定停机根因。</p></div></details>
@@ -60,7 +103,8 @@
 </section>
 
 <section id="design" class="report-section">
-<div class="section-heading"><span class="section-index">04 / PROPOSED DESIGN</span><h2>让信息策略知道，机器人接下来能做什么</h2><p>以下是针对 OmniMap 的组合设计建议，尚未实现或验证。切换任务形式，查看六轴 UR5 的局部自由度差异。</p></div>
+<div class="section-heading"><span class="section-index">05 / PROPOSED DESIGN</span><h2>让信息策略知道，机器人接下来能做什么</h2><p>以下是针对 OmniMap 的组合设计建议，尚未实现或验证。切换任务形式，查看六轴 UR5 的局部自由度差异。</p></div>
+<div class="report-prose section-bridge"><p>实施顺序应由故障证据驱动。第一阶段先补齐同步日志，并确认速度配置实际生效；第二阶段建立终点 IK 与构型软评分基线，测清它们还遗漏多少途中风险；第三阶段再加入短时预测和连续约束。与此同时，五维任务必须在规划器、消息接口和执行器中一致实现，否则上游释放 roll，下游仍会通过完整姿态误差把它重新锁住。</p></div>
 <div id="task-demo-slot"></div>
 <div class="design-grid"><article class="design-card"><span class="step">STEP 01</span><h3>同步运动学状态</h3><p>按时间戳对齐关节状态、相机外参、相机姿态、模型版本与 Servo 状态。Jacobian 必须对应实际相机坐标系及相机原点。</p><span class="deliverable">产出：可以解释每次停机的日志</span></article><article class="design-card"><span class="step">STEP 02</span><h3>短时关节空间预测</h3><p>从当前构型出发，为信息方向做短时 rollout；沿途检查关节限位、碰撞、速度需求、分支连续性和最小奇异值。</p><span class="deliverable">产出：路径上的可执行性评估</span></article><article class="design-card"><span class="step">STEP 03</span><h3>速度级约束 QP</h3><p>参考 OSCBF / NEO，在实际关节执行点施加约束。允许调整 roll 或部分任务误差，让安全修正有空间。</p><span class="deliverable">产出：受约束的关节速度</span></article><article class="design-card"><span class="step">STEP 04</span><h3>把受限方向反馈给 policy</h3><p>安全层持续削弱某方向时，触发换方向、调整 roll 或重规划；避免信息策略长期重复请求同一危险运动。</p><span class="deliverable">产出：能改道的主动视觉闭环</span></article></div>
 <div class="equation-panel"><div><span class="section-index">A POSSIBLE LOCAL FORMULATION</span><h3>把信息运动作为目标，把奇异性作为约束</h3><p>J<sub>task</sub> 是所选相机任务的局部 Jacobian；v<sub>info</sub> 为信息策略期望的任务速度。五维任务使用位置和光轴指向的独立局部坐标。</p></div><div class="equations"><p>min<sub>q̇</sub> &nbsp; ‖J<sub>task</sub>(q)q̇ − v<sub>info</sub>‖²<sub>W</sub> + λ‖q̇‖²</p><p>∇h(q)ᵀq̇ ≥ −αh(q)</p><p>h(q) = m(q) − m<sub>min</sub></p><small>并施加关节位置、速度及碰撞约束。</small></div></div>
@@ -70,7 +114,8 @@
 </section>
 
 <section id="validation" class="report-section">
-<div class="section-heading"><span class="section-index">05 / VALIDATION</span><h2>验证“更能完成重建”，也验证“为什么停”</h2><p>所有组使用相同初始构型、场景、观测预算和停止条件，记录停滞及真实执行轨迹。</p></div>
+<div class="section-heading"><span class="section-index">06 / VALIDATION</span><h2>验证“更能完成重建”，也验证“为什么停”</h2><p>所有组使用相同初始构型、场景、观测预算和停止条件，记录停滞及真实执行轨迹。</p></div>
+<div class="report-prose section-bridge"><p>控制器保持安全并不等于重建任务完成：一个始终停住的策略也可能没有碰撞。因此，对照实验要同时报告运动学风险、停滞和地图收益。下表先比较逐步增加能力的系统；再对完整方案分别移除自由 roll、短时预测和执行反馈，才能判断性能来自哪一环。所有结果还应按真实停机类别拆开，避免把配置修复带来的改善算作新策略的贡献。</p></div>
 <div class="table-scroll"><table><thead><tr><th>对照组</th><th>增加的能力</th><th>要回答的问题</th></tr></thead><tbody><tr><td>A / 原 Fisher 策略</td><td>原始信息目标</td><td>停机和重建收益的基线是什么？</td></tr><tr><td>B / 终点 IK 过滤</td><td>候选位姿有解</td><td>仅排除不可达终点，能解决多少问题？</td></tr><tr><td>C / 可操作度软评分</td><td>偏好较好的构型</td><td>软惩罚是否仍会沿途触发奇异性停机？</td></tr><tr><td>D / 短时预测＋约束控制</td><td>路径风险、连续修正、反馈</td><td>能否提高任务完成率与单位时间重建收益？</td></tr></tbody></table></div>
 <div class="metric-chips"><span>各类停机次数</span><span>任务完成率 / 停滞时间</span><span>最小归一化奇异值</span><span>关节峰值速度</span><span>覆盖率 / PSNR / 用时</span></div>
 <figure class="wide-figure"><img src="assets/ur5_nbv/compass-hardware.png" alt="COMPASS 原论文图 6：FR3 腕部相机在受限容器中进行主动观察与抓取的真机过程" width="1800" height="600" loading="lazy"><figcaption>真实系统参考：COMPASS 的 FR3 腕部相机实验（原论文 Fig. 6）。图片说明该论文的实验平台，不代表 OmniMap 已完成相同验证。<a href="https://arxiv.org/html/2509.14787v2#S6.F6">来源 ↗</a></figcaption></figure>
