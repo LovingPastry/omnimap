@@ -14,6 +14,8 @@
 | [nbv_ablation.md](nbv_ablation.md) | 主动视角策略四项可切换修复（`nbv_policy`）的定义、配置回退与仿真消融报告 |
 | [active_view_experiments.html](active_view_experiments.html) | 交互网页：09-05 至 10-18 全部消融与仿真实验的思维链（现象→诊断→选型→实验→结论），区分算法改进 / 超参数 / 实验设置 / 诊断 |
 | [eps_contrib_report.md](eps_contrib_report.md) | 仿真报告：探测步长 `grad_eps` 扫描 + Fisher 分数来源诊断（更正消融报告的"近视"结论） |
+| [ur5_nbv_kinematics_report.html](ur5_nbv_kinematics_report.html#three-loops) | UR5 主动感知三环复盘：改造顺序、源码证据、可执行信息动作与最小真机对照；附论文精读 |
+| [ACTIVE_PERCEPTION_REVIEW.md](../ACTIVE_PERCEPTION_REVIEW.md) | 三环复盘的完整评审记录、执行/观测反馈定义、反例检查与结果—主张边界 |
 
 ## 相关约定
 

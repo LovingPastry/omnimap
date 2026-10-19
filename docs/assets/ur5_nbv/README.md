@@ -2,6 +2,8 @@
 
 打开 `docs/ur5_nbv_kinematics_report.html` 即可阅读；无需启动服务、安装依赖或联网。论文和代码外链需要网络。
 
+首页“三环复盘”按 Tracking–Planning–Servo 解释具体改造顺序；完整源码依据和结果边界见仓库根目录 `ACTIVE_PERCEPTION_REVIEW.md`。论文精读保留为设计依据，真机方案尚未实现或验证。
+
 ## 更新
 
 1. 修改正文原稿 `docs/ur5_nbv_kinematics_report.md`。
