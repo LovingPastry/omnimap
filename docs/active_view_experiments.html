@@ -1,0 +1,1058 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>OmniMap 主动视角实验链</title>
+<meta name="description" content="从 2026-09-05 到 10-18 的主动视角消融与仿真实验：每一步为什么做、怎么选型、结论现在是否成立，并区分算法改进与超参数改动。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600;800&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout concept: a lab notebook laid out as a causal chain. A left rail threads every
+   investigation in time order; each chapter reads 现象 → 诊断 → 选型 → 实验 → 结论, and every
+   change carries a category stamp (算法 / 超参数 / 实验设置 / 诊断) that the filter can isolate. */
+:root{
+  --paper:#f3f5f1; --surface:#fbfcfa; --sunk:#e9ede8; --ink:#14272a; --muted:#56696b; --faint:#8a9a99; --line:#d3dbd6;
+  --algo:#0a7468; --algo-soft:#dceee9;
+  --hyper:#9a5a12; --hyper-soft:#f4e6d1;
+  --setup:#33609e; --setup-soft:#e1e9f5;
+  --diag:#7d4a86; --diag-soft:#eee2f0;
+  --ok:#2c7a3f; --bad:#b23a32; --warn:#9a6a00;
+  /* chart series: fixed order, one identity per arm / eps */
+  --s1:#c4473d; --s2:#e08a2c; --s3:#0e8a7a; --s4:#4f7fcf; --s5:#8a63b8; --s6:#44505a; --s7:#b0922a; --s8:#5fa35a;
+  --q1:#a9c9ea; --q2:#5f98d4; --q3:#2c66ad; --q4:#143c70;
+  --grid:#e2e7e3; --axis:#9aa8a6;
+  --display:"Noto Serif SC","Songti SC","STSong",serif;
+  --sans:"PingFang SC","Hiragino Sans GB","Noto Sans CJK SC","Microsoft YaHei",system-ui,sans-serif;
+  --mono:"JetBrains Mono",ui-monospace,"SFMono-Regular",Consolas,monospace;
+  --r:14px;
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --paper:#0e1a1c; --surface:#152427; --sunk:#1b2d30; --ink:#e2ebe7; --muted:#9db0ad; --faint:#6f8582; --line:#2c3f42;
+  --algo:#68cdb6; --algo-soft:#18352f; --hyper:#e3b06a; --hyper-soft:#3a2f1e; --setup:#9cbbef; --setup-soft:#1f2c42; --diag:#d39cdc; --diag-soft:#33243a;
+  --ok:#7fcb8c; --bad:#f08a80; --warn:#e6c25a;
+  --s1:#f0796e; --s2:#f2a95a; --s3:#4fc7b2; --s4:#86a9ea; --s5:#b796e0; --s6:#b9c4c9; --s7:#dcc05a; --s8:#8fcf86;
+  --q1:#36577c; --q2:#4f86c4; --q3:#86b5ea; --q4:#cfe3fb;
+  --grid:#22363a; --axis:#5e7472; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --paper:#0e1a1c; --surface:#152427; --sunk:#1b2d30; --ink:#e2ebe7; --muted:#9db0ad; --faint:#6f8582; --line:#2c3f42;
+  --algo:#68cdb6; --algo-soft:#18352f; --hyper:#e3b06a; --hyper-soft:#3a2f1e; --setup:#9cbbef; --setup-soft:#1f2c42; --diag:#d39cdc; --diag-soft:#33243a;
+  --ok:#7fcb8c; --bad:#f08a80; --warn:#e6c25a;
+  --s1:#f0796e; --s2:#f2a95a; --s3:#4fc7b2; --s4:#86a9ea; --s5:#b796e0; --s6:#b9c4c9; --s7:#dcc05a; --s8:#8fcf86;
+  --q1:#36577c; --q2:#4f86c4; --q3:#86b5ea; --q4:#cfe3fb;
+  --grid:#22363a; --axis:#5e7472; color-scheme:dark}
+
+*{box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:72px}
+@media (prefers-reduced-motion: reduce){html{scroll-behavior:auto}*{transition:none!important;animation:none!important}}
+body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.75 var(--sans);-webkit-font-smoothing:antialiased;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+h1,h2,h3,h4,p,figure,dl,dd{margin:0}
+h1,h2,h3{font-family:var(--display);text-wrap:balance;letter-spacing:.01em}
+a{color:var(--algo);text-underline-offset:3px}
+button{font:inherit;color:inherit;cursor:pointer}
+:focus-visible{outline:2px solid var(--algo);outline-offset:3px;border-radius:4px}
+code,.mono{font-family:var(--mono);font-size:.86em}
+code{background:var(--sunk);padding:.08em .38em;border-radius:5px}
+.num{font-family:var(--mono);font-variant-numeric:tabular-nums}
+[hidden]{display:none!important}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:40;background:var(--paper)}
+.top{position:sticky;top:env(safe-area-inset-top,0px);z-index:30;background:color-mix(in srgb,var(--paper) 92%,transparent);backdrop-filter:blur(12px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1240px;margin:auto;padding-block:10px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));display:flex;align-items:center;gap:14px}
+.brand{font-family:var(--display);font-weight:800;font-size:16px;white-space:nowrap}
+.brand small{font:500 11px var(--mono);color:var(--muted);margin-left:8px;letter-spacing:.06em}
+.filters{display:flex;gap:6px;margin-left:auto;flex-wrap:wrap;justify-content:flex-end}
+.chip{border:1px solid var(--line);background:var(--surface);border-radius:999px;padding:3px 11px;font-size:12.5px;display:inline-flex;align-items:center;gap:6px;line-height:1.6}
+.chip .dot{width:8px;height:8px;border-radius:50%}
+.chip[aria-pressed="true"]{border-color:currentColor;font-weight:600}
+.chip.algo{color:var(--algo)} .chip.hyper{color:var(--hyper)} .chip.setup{color:var(--setup)} .chip.diag{color:var(--diag)}
+.chip.all{color:var(--ink)}
+.theme-btn{border:1px solid var(--line);background:var(--surface);border-radius:8px;width:34px;height:30px;display:grid;place-items:center}
+.progress{position:absolute;left:0;bottom:-1px;height:2px;background:var(--algo);width:0}
+@media (max-width:760px){.filters .lbl{display:none}.brand small{display:none}}
+
+/* page frame */
+.wrap{max-width:1240px;margin:auto;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+.layout{display:grid;grid-template-columns:230px minmax(0,1fr);gap:44px;padding-block:28px 80px}
+@media (max-width:980px){.layout{grid-template-columns:minmax(0,1fr)}.rail{display:none}}
+
+/* rail = the thread through time */
+.rail{position:sticky;top:76px;align-self:start;max-height:calc(100vh - 96px);overflow:auto;padding-right:4px}
+.rail h4{font:600 11px var(--mono);letter-spacing:.12em;color:var(--muted);text-transform:uppercase;margin-bottom:10px}
+.rail ol{list-style:none;margin:0;padding:0;position:relative}
+.rail ol::before{content:"";position:absolute;left:5px;top:6px;bottom:6px;width:1px;background:var(--line)}
+.rail li{position:relative;padding:4px 0 8px 22px}
+.rail li a{color:var(--muted);text-decoration:none;font-size:13px;line-height:1.45;display:block}
+.rail li a .d{font:11px var(--mono);color:var(--faint);display:block}
+.rail li .pip{position:absolute;left:0;top:9px;width:11px;height:11px;border-radius:50%;border:2px solid var(--paper);background:var(--faint)}
+.rail li.on a{color:var(--ink);font-weight:600}
+.rail li.dim{opacity:.35}
+.pip.algo{background:var(--algo)}.pip.hyper{background:var(--hyper)}.pip.setup{background:var(--setup)}.pip.diag{background:var(--diag)}
+
+/* hero */
+.hero{padding-block:34px 8px;max-width:860px}
+.eyebrow{font:600 11.5px var(--mono);letter-spacing:.14em;color:var(--muted);text-transform:uppercase}
+.hero h1{font-size:clamp(30px,4.6vw,50px);line-height:1.22;font-weight:800;margin:10px 0 16px}
+.hero h1 em{font-style:normal;color:var(--algo)}
+.lede{font-size:16.5px;color:var(--muted);max-width:66ch}
+.lede strong{color:var(--ink)}
+
+.kinds{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-top:26px}
+@media (max-width:900px){.kinds{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:460px){.kinds{grid-template-columns:minmax(0,1fr)}}
+.kind{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:14px 16px;display:flex;flex-direction:column;gap:6px;text-align:left}
+.kind .k{display:flex;align-items:baseline;justify-content:space-between;gap:8px}
+.kind .k b{font-family:var(--display);font-size:17px}
+.kind .k .num{font-size:22px;font-weight:600}
+.kind .p{display:block;font-size:13px;color:var(--muted);line-height:1.6}
+.kind.algo b,.kind.algo .num{color:var(--algo)} .kind.hyper b,.kind.hyper .num{color:var(--hyper)}
+.kind.setup b,.kind.setup .num{color:var(--setup)} .kind.diag b,.kind.diag .num{color:var(--diag)}
+.kind{cursor:pointer;transition:border-color .15s,transform .15s}
+.kind:hover{transform:translateY(-1px)}
+.kind[aria-pressed="true"].algo{border-color:var(--algo)}.kind[aria-pressed="true"].hyper{border-color:var(--hyper)}
+.kind[aria-pressed="true"].setup{border-color:var(--setup)}.kind[aria-pressed="true"].diag{border-color:var(--diag)}
+
+/* thesis strip */
+.thesis{margin-top:30px;border-top:1px solid var(--line);border-bottom:1px solid var(--line);padding-block:18px;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:22px}
+@media (max-width:760px){.thesis{grid-template-columns:minmax(0,1fr)}}
+.thesis div{font-size:14px;color:var(--muted)}
+.thesis div b{display:block;color:var(--ink);font-family:var(--display);font-size:15.5px;margin-bottom:4px}
+
+/* chapters */
+.ch{padding-block:46px 8px;border-bottom:1px solid var(--line);transition:opacity .2s}
+.ch.dim{opacity:.32}
+.ch-head{display:grid;grid-template-columns:auto minmax(0,1fr);gap:18px;align-items:start;margin-bottom:22px}
+.ch-no{font:600 13px var(--mono);color:var(--paper);background:var(--ink);border-radius:8px;padding:5px 9px;margin-top:6px}
+.ch-head .date{font:12px var(--mono);color:var(--muted);letter-spacing:.04em}
+.ch-head h2{font-size:clamp(22px,2.6vw,30px);line-height:1.35;font-weight:800;margin:2px 0 8px}
+.tags{display:flex;gap:6px;flex-wrap:wrap}
+.tag{font-size:12px;border-radius:6px;padding:1px 8px;font-weight:600;line-height:1.7}
+.tag.algo{background:var(--algo-soft);color:var(--algo)}.tag.hyper{background:var(--hyper-soft);color:var(--hyper)}
+.tag.setup{background:var(--setup-soft);color:var(--setup)}.tag.diag{background:var(--diag-soft);color:var(--diag)}
+.status{font-size:12px;border-radius:6px;padding:1px 8px;border:1px solid currentColor;line-height:1.6;font-weight:600}
+.status.ok{color:var(--ok)}.status.bad{color:var(--bad)}.status.warn{color:var(--warn)}
+
+/* the reasoning chain inside each chapter */
+.chain{display:grid;grid-template-columns:minmax(0,1fr);gap:0;max-width:880px}
+.step{display:grid;grid-template-columns:118px minmax(0,1fr);gap:18px;padding-block:12px;border-top:1px dashed var(--line)}
+.step:first-child{border-top:0}
+.step>dt{font:600 12px var(--mono);letter-spacing:.06em;color:var(--muted);padding-top:3px}
+.step>dt i{display:block;font-style:normal;font-weight:400;color:var(--faint);font-size:11px}
+.step>dd p+p{margin-top:8px}
+.step>dd ul{margin:6px 0 0;padding-left:1.1em}
+.step>dd li+li{margin-top:4px}
+@media (max-width:620px){.step{grid-template-columns:minmax(0,1fr);gap:4px}}
+.why{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-top:8px}
+.why h4{font-size:13px;margin-bottom:6px;font-family:var(--sans)}
+.alt{display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 10px;font-size:13.5px}
+.alt .x{font:600 11px var(--mono);border-radius:5px;padding:0 6px;align-self:start;margin-top:3px}
+.alt .x.no{color:var(--bad);background:color-mix(in srgb,var(--bad) 12%,transparent)}
+.alt .x.yes{color:var(--ok);background:color-mix(in srgb,var(--ok) 14%,transparent)}
+.alt .x.later{color:var(--warn);background:color-mix(in srgb,var(--warn) 14%,transparent)}
+.knobs{font-size:13px;color:var(--muted);margin-top:8px}
+.knobs b{color:var(--hyper)}
+.overturn{border-left:3px solid var(--bad);padding:6px 12px;background:color-mix(in srgb,var(--bad) 7%,transparent);border-radius:0 8px 8px 0;font-size:14px;margin-top:8px}
+.overturn b{color:var(--bad)}
+
+/* figures */
+.fig{margin-top:22px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:16px 16px 12px;max-width:940px}
+.fig-head{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;justify-content:space-between;margin-bottom:8px}
+.fig-head h3{font-size:15.5px;font-family:var(--sans);font-weight:700}
+.fig-note{font-size:12.5px;color:var(--muted);margin-top:8px}
+.ctrls{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.seg button{border:0;background:transparent;padding:3px 10px;font-size:12.5px}
+.seg button+button{border-left:1px solid var(--line)}
+.seg button[aria-pressed="true"]{background:var(--ink);color:var(--paper)}
+.toggle{border:1px solid var(--line);background:transparent;border-radius:999px;padding:2px 10px 2px 8px;font-size:12px;display:inline-flex;gap:6px;align-items:center;opacity:.5}
+.toggle[aria-pressed="true"]{opacity:1;border-color:var(--axis)}
+.toggle .sw{width:14px;height:3px;border-radius:2px}
+.chart{position:relative;width:100%}
+.chart svg{display:block;width:100%;height:auto;overflow:visible}
+.chart text{fill:var(--muted);font:11px var(--mono)}
+.chart .lbl-strong{fill:var(--ink);font-weight:600}
+.tip{position:absolute;pointer-events:none;background:var(--ink);color:var(--paper);font:12px/1.55 var(--mono);padding:7px 9px;border-radius:8px;white-space:nowrap;z-index:5;box-shadow:0 6px 20px #0003}
+.tip .sw{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:6px;vertical-align:-1px}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+@media (max-width:820px){.two{grid-template-columns:minmax(0,1fr)}}
+.scroll{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:13.5px}
+th,td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+th{font:600 11.5px var(--mono);letter-spacing:.04em;color:var(--muted);white-space:nowrap}
+td.num,th.num{text-align:right}
+tr.hl td{background:color-mix(in srgb,var(--algo) 8%,transparent)}
+tr.lo td{background:color-mix(in srgb,var(--bad) 7%,transparent)}
+
+/* small widgets */
+.meter{position:relative;height:30px;border-radius:8px;background:var(--sunk);margin:28px 0 30px}
+.meter span{position:absolute;top:0;bottom:0;border-radius:8px}
+.meter .mk{position:absolute;top:-22px;font:11px var(--mono);color:var(--muted);transform:translateX(-50%);white-space:nowrap}
+.meter .mk.b{top:34px}
+.meter .tick{position:absolute;top:-4px;bottom:-4px;width:2px;background:var(--ink)}
+.slider-row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;font-size:13px}
+input[type=range]{accent-color:var(--algo);width:min(320px,100%)}
+.bars{display:grid;gap:8px;margin-top:10px}
+.bar{display:grid;grid-template-columns:150px minmax(0,1fr) 64px;gap:10px;align-items:center;font-size:13px}
+@media (max-width:520px){.bar{grid-template-columns:96px minmax(0,1fr) 56px}}
+.bar .t{height:12px;border-radius:6px;background:var(--sunk);overflow:hidden}
+.bar .t i{display:block;height:100%;border-radius:6px}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-top:10px}
+.kpi{border:1px solid var(--line);border-radius:10px;padding:8px 12px;background:var(--paper)}
+.kpi .v{font:600 20px var(--mono);font-variant-numeric:tabular-nums}
+.kpi .l{font-size:12px;color:var(--muted)}
+.cmp td:first-child{font-weight:600;white-space:nowrap}
+
+/* ledger */
+.ledger{min-width:860px}.ledger-row td:first-child{white-space:nowrap}.ledger .status{white-space:nowrap}
+.ledger .tag{white-space:nowrap}
+.foot{padding-block:30px;color:var(--muted);font-size:13px}
+.foot code{font-size:12px}
+</style>
+</head>
+<body>
+<div class="top"><div class="top-in">
+  <div class="brand">主动视角实验链<small>OmniMap · 09-05 → 10-18</small></div>
+  <div class="filters" role="group" aria-label="按改动类别筛选">
+    <span class="lbl" style="font-size:12px;color:var(--muted);align-self:center">只看</span>
+    <button class="chip all" data-f="all" aria-pressed="true">全部</button>
+    <button class="chip algo" data-f="algo" aria-pressed="false"><span class="dot" style="background:var(--algo)"></span>算法</button>
+    <button class="chip hyper" data-f="hyper" aria-pressed="false"><span class="dot" style="background:var(--hyper)"></span>超参数</button>
+    <button class="chip setup" data-f="setup" aria-pressed="false"><span class="dot" style="background:var(--setup)"></span>实验设置</button>
+    <button class="chip diag" data-f="diag" aria-pressed="false"><span class="dot" style="background:var(--diag)"></span>诊断</button>
+  </div>
+  <button class="theme-btn" id="themeBtn" aria-label="切换深浅色"><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.5a6.5 6.5 0 1 0 0 13z" fill="currentColor"/><circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-width="1.4"/></svg></button>
+</div><div class="progress" id="progress"></div></div>
+
+<div class="wrap">
+<div class="layout">
+<nav class="rail" aria-label="实验时间线">
+  <h4>时间线</h4>
+  <ol id="railList"></ol>
+</nav>
+
+<main>
+<header class="hero">
+  <p class="eyebrow">UR5 + 腕部 RGB-D · 3DGS 地图 · FisherRF 信息增益 · 连续视角控制</p>
+  <h1>每个实验，都在回答<em>上一个实验</em>留下的问题</h1>
+  <p class="lede">我们的相机沿以物体为中心的半球连续运动，速度方向来自 Fisher 信息分数的梯度。
+  六周里这套方法暴露出一串问题：极点打转、冲向桌下、速度靠限幅、永不停止、梯度像抛硬币。
+  这一页按时间顺序记录每个问题<strong>为什么出现、为什么选这种修法、实验怎么设计、结论现在还成不成立</strong>。
+  其中有几条结论后来被我们自己的实验推翻，都保留在原处并标明。</p>
+  <div class="kinds" id="kinds">
+    <button class="kind algo" data-f="algo" aria-pressed="false"><span class="k"><b>算法改进</b><span class="num" id="cnt-algo">5</span></span>
+      <span class="p">改了方法<em>算什么</em>：目标函数、梯度参数化、控制律、停止规则的结构。</span></button>
+    <button class="kind hyper" data-f="hyper" aria-pressed="false"><span class="k"><b>超参数</b><span class="num" id="cnt-hyper">3</span></span>
+      <span class="p">方法不变，只改其中一个数，例如剪枝阈值、探测步长、正则 λ。</span></button>
+    <button class="kind setup" data-f="setup" aria-pressed="false"><span class="k"><b>实验设置</b><span class="num" id="cnt-setup">5</span></span>
+      <span class="p">不碰方法，改的是<em>怎么测</em>：资产颜色、评估视角、重复次数。</span></button>
+    <button class="kind diag" data-f="diag" aria-pressed="false"><span class="k"><b>纯诊断</b><span class="num" id="cnt-diag">5</span></span>
+      <span class="p">只测量、不改动；它们决定下一步改什么，有时决定什么都不改。</span></button>
+  </div>
+  <div class="thesis">
+    <div><b>最大的单项收益是一个超参数</b>剪枝阈值 <code>gaussian_th</code> 从 0.7 改成 0.005，地图密度恢复 5.6 倍，梯度符号从 10/12 变成 12/12 一致。</div>
+    <div><b>唯一有行为证据的算法项是掩码</b>去掉 Fisher 掩码，相机被地面拉到可行性带边沿，终态 PSNR −2.0 dB（主要来自 s20）；其他三项的质量差都在 1 dB 噪声内。</div>
+    <div><b>"局部梯度近视"不成立</b>远处分数高是因为 Fisher 分数围绕已访问轨迹呈碗状；覆盖率低是路径预算所限，已达上限的 78–90%。</div>
+  </div>
+</header>
+
+<!-- ============================================================ 01 -->
+<section class="ch" id="c1" data-cat="diag" data-date="09-05" data-title="审计：Fisher 少了平方？">
+  <div class="ch-head"><span class="ch-no">01</span><div>
+    <p class="date">2026-09-05 · 代码审计 · 无提交</p>
+    <h2>审计报告说 Fisher 少了一个平方，我们没有改</h2>
+    <div class="tags"><span class="tag diag">诊断 · 不改动</span><span class="status ok">结论成立</span></div>
+  </div></div>
+  <dl class="chain">
+    <div class="step"><dt>现象</dt><dd><p>审计发现 <code>LegacyFisherEvaluator</code> 直接把 <code>.grad</code> 当作 Fisher 对角，没有 <code>torch.square</code>。按定义 Fisher 对角是 Σ J²，看起来像致命 bug。</p></dd></div>
+    <div class="step"><dt>诊断</dt><dd><p>沿调用链找到实际加载的光栅器（在仓库外的 FisherRF 目录），它的 CUDA backward 里 <code>#define acc_func atomicAddSquare</code>，每个像素的贡献在归约前已经平方。FisherRF 作者在 issue #5 里也说明 <code>.grad</code> 只是用来搬运结果。</p></dd></div>
+    <div class="step"><dt>选型</dt><dd><div class="alt">
+      <span class="x no">不选</span><span>在 Python 里补 <code>torch.square</code>：会变成四次方。<code>DiagFisherEvaluator</code> 就是这么错的。</span>
+      <span class="x yes">采用</span><span>保持原样，把"平方在 kernel 里"写进记忆，防止以后再"修"。</span></div></dd></div>
+    <div class="step"><dt>为什么重要</dt><dd><p>后面所有实验都建立在这个信息量上。如果这里错了，掩码、步长、停止判据的结论全部作废。第一步先确认测量本身是对的。</p></dd></div>
+  </dl>
+</section>
+
+<!-- ============================================================ 02 -->
+<section class="ch" id="c2" data-cat="diag" data-date="09-05" data-title="三条固有缺陷与总诊断">
+  <div class="ch-head"><span class="ch-no">02</span><div>
+    <p class="date">2026-09-05 · 讨论定路线</p>
+    <h2>真机上的四个症状，指向同一个根因</h2>
+    <div class="tags"><span class="tag diag">诊断</span><span class="status ok">路线已全部实现（10-17）</span></div>
+  </div></div>
+  <dl class="chain">
+    <div class="step"><dt>现象</dt><dd><ul>
+      <li>相机在北极附近打转，绕不出去。</li>
+      <li>相机冲向半球下沿、桌面下方，或撞关节限位。</li>
+      <li>速度大小靠试，实际由限幅决定。</li>
+      <li>没有停止条件：真机配置 <code>spherical_speed_min: 0.0</code>，防抖停机永远不会触发。</li></ul></dd></div>
+    <div class="step"><dt>总诊断</dt><dd><p>FisherRF 的信息增益是为"在自由空间的候选集里挑一张图"设计的。挑图不需要可行性、速度尺度和停止条件。我们把它拿来驱动<b>受约束空间里的连续运动</b>，这三样就都成了必需品。</p>
+      <p>所以修法不是调参，而是给控制链补上缺失的部件。下面 03、05 章就是这些部件。</p></dd></div>
+    <div class="step"><dt>定的顺序</dt><dd><p>极点 → 停止判据 → 可达性掩码 → 尺度归一化。理由是：做对比实验之前，必须先修好"桌下"和"极点"，否则测到的是 bug 而不是方法。</p></dd></div>
+  </dl>
+</section>
+
+<!-- ============================================================ 03 -->
+<section class="ch" id="c3" data-cat="algo" data-date="09-13" data-title="切空间梯度：极点退化">
+  <div class="ch-head"><span class="ch-no">03</span><div>
+    <p class="date">2026-09-13 · commit 2170d69 → 6b99a62</p>
+    <h2>极点打转不是局部最优，是坐标系把一个自由度压扁了</h2>
+    <div class="tags"><span class="tag algo">算法改进 · 梯度参数化</span><span class="status ok">几何量成立</span><span class="status warn">质量收益未测出 · 真机未验证</span></div>
+  </div></div>
+  <dl class="chain">
+    <div class="step"><dt>现象</dt><dd><p>旧日志里 φ=87° 时东向与北向速度的各向异性约 3000×；<code>phase4_dense</code> 跑 50 步只到过 2/18 个经度分区。</p></dd></div>
+    <div class="step"><dt>诊断</dt><dd><p>(θ, φ) 参数化里 θ 自由度被两个<b>独立的</b> cos φ 压缩：</p><ul>
+      <li>探测端：θ±ε 在世界里走的弧长是 R·cos φ·ε，越靠近极点探得越短，导数被低估。</li>
+      <li>执行端：单位 θ 速率对应的切向速度模长也是 cos φ。</li></ul>
+      <p>两者相乘是 cos²φ：信息梯度一直存在，只是驱动不到。拖动下面的滑块看压缩有多快。</p></dd></div>
+    <div class="step"><dt>选型</dt><dd><div class="alt">
+      <span class="x no">不选</span><span>把 φ 上限夹在 80°：只是不让相机进极区，问题还在，而且丢掉了顶视角。</span>
+      <span class="x no">不选</span><span>只在执行端乘 sec φ：探测端仍然低估导数，只修了一半。</span>
+      <span class="x yes">采用</span><span>两端一起换：沿大圆做等弧长探测，用单位东/北切基积分；只在 <code>spherical_rate</code> 输出边界做一次 sec φ 换算（上限 20）。look-at 的 up 向量统一成 [−1,0,0]，跨极 roll 跳变从 180° 降到 0.20°。</span></div>
+      <p class="knobs">它是算法改动：改变了梯度在什么坐标里求、速度在什么坐标里积分。开关 <code>nbv_policy.gradient_space</code>，默认 <code>angle</code>（原版）。</p></dd></div>
+    <div class="step"><dt>实验</dt><dd><p>健康地图上（<code>gaussian_th=0.005</code>，见 04 章）、init φ=83.1°、50 步做 A/B，angle → tangent：</p>
+      <div class="kpis">
+        <div class="kpi"><div class="v">0.24° → 51.5°</div><div class="l">方位行程</div></div>
+        <div class="kpi"><div class="v">223 → 0.7</div><div class="l">东/北速度各向异性</div></div>
+        <div class="kpi"><div class="v">25 → 4</div><div class="l">θ 振荡次数</div></div>
+        <div class="kpi"><div class="v">1 → 3 /18</div><div class="l">经度分区覆盖</div></div></div></dd></div>
+    <div class="step"><dt>结论</dt><dd><p>退化被修掉。但 10-17 发现这组 A/B 跑在全黑资产上（见 06 章）：各向异性这类纯几何量仍然成立，和信息增益大小有关的结论要重测。10-17 的消融里切空间没有质量收益，因为三个起点的轨迹基本不进入 φ>80° 的极区。</p></dd></div>
+  </dl>
+  <figure class="fig">
+    <div class="fig-head"><h3>θ 方向被压缩了多少</h3>
+      <div class="slider-row"><label for="phiSlider">相机仰角 φ</label><input id="phiSlider" type="range" min="0" max="89" value="80"><span class="num" id="phiVal">80°</span></div></div>
+    <div class="two">
+      <div class="chart" id="poleSvg"></div>
+      <div>
+        <div class="bars" id="poleBars"></div>
+        <p class="fig-note" id="poleNote"></p>
+      </div>
+    </div>
+  </figure>
+</section>
+
+<!-- ============================================================ 04 -->
+<section class="ch" id="c4" data-cat="hyper diag" data-date="09-13" data-title="梯度像抛硬币？剪枝阈值">
+  <div class="ch-head"><span class="ch-no">04</span><div>
+    <p class="date">2026-09-13 → 09-14 · commit ced24fa</p>
+    <h2>"梯度像抛硬币"的真因是一个剪枝阈值</h2>
+    <div class="tags"><span class="tag diag">诊断</span><span class="tag hyper">超参数 · 配置错误</span><span class="status ok">成立（仿真）</span><span class="status warn">真机 config 仍是 0.7</span></div>
+  </div></div>
+  <dl class="chain">
+    <div class="step"><dt>现象</dt><dd><p>比较 angle 与 tangent 两种探测时出现"不可能"的结果：tangent 的梯度模长小于 angle，两者比值本应等于 sec φ，却在 φ=30° 和 88° 处变号。</p></dd></div>
+    <div class="step"><dt>诊断 1<i>后被推翻</i></dt><dd><p>同一位姿重复打分完全一致，说明不是随机噪声；但在 <code>grad_eps=0.01</code> 的尺度上不光滑。φ=30° 取 12 个相距 0.5° 的基点，dF/dθ 4 正 8 负；噪声约为真实趋势的 6 倍。当时的结论是：把探测步长放大到 0.2。</p>
+      <div class="overturn"><b>同日被推翻。</b>用户问"如果有限差分和抛硬币一样，整个思路是不是可以扔了"。追查后发现测量用的地图只有约 180 个高斯，病因是地图密度，不是探测步长。</div></dd></div>
+    <div class="step"><dt>诊断 2</dt><dd><p>新高斯出生时不透明度是 <b>0.5</b>，而 <code>densify_and_prune</code> 用 <code>gaussian_th=0.7</code> 当 <code>min_opacity</code>。0.5 &lt; 0.7，每个新高斯在下一次剪枝时都被删掉，除非优化先把它抬过 0.7。frame 4 一次剪枝 1117 → 124，之后 34 帧卡在 178 不动。</p></dd></div>
+    <div class="step"><dt>选型</dt><dd><div class="alt">
+      <span class="x no">不选</span><span>放大 grad_eps 掩盖粗糙：治标，而且 10-18 的实验（12 章）证明大步长本身有害。</span>
+      <span class="x no">不选</span><span>改出生不透明度：会改变建图初始化，影响面更大。</span>
+      <span class="x yes">采用</span><span>阈值改回标准 3DGS 的 0.005，只改仿真 config。真机那份会改变建图行为，要先验 PSNR。</span></div>
+      <p class="knobs">这是<b>超参数</b>改动：方法一行没变，只是一个数原本就设错了。</p></dd></div>
+    <div class="step"><dt>结论</dt><dd><p>同一个指标在健康地图上变成 12/12 一致，默认 eps=0.01 就够用。这一个数同时压住了重建质量和梯度质量，是"效果不好"最基础的根因。此后所有测量都先检查高斯数是在增长还是下降。</p></dd></div>
+  </dl>
+  <figure class="fig">
+    <div class="fig-head"><h3>40 帧预热后的高斯数，以及梯度符号一致性</h3>
+      <div class="seg" role="group" aria-label="指标"><button aria-pressed="true" data-v="count">高斯数</button><button aria-pressed="false" data-v="sign">符号一致性</button></div></div>
+    <div class="chart" id="pruneChart"></div>
+    <p class="fig-note">符号一致性：12 个相距 0.5° 的基点上 dF/dθ 同号的个数，6/12 等于抛硬币。数据来自 <code>sim/sim_outputs/phase2</code> 的离线测量。</p>
+  </figure>
+</section>
+
+<!-- ============================================================ 05 -->
+<section class="ch" id="c5" data-cat="algo hyper" data-date="10-17" data-title="四项修复：补齐控制链">
+  <div class="ch-head"><span class="ch-no">05</span><div>
+    <p class="date">2026-10-17 · commit d068bc4 · 53bfd1a · 96ba6a4</p>
+    <h2>给连续运动补上可行性、尺度和停止</h2>
+    <div class="tags"><span class="tag algo">算法改进 ×4</span><span class="tag hyper">附带手设常数</span><span class="status ok">默认关闭，与原版逐位一致</span></div>
+  </div></div>
+  <dl class="chain">
+    <div class="step"><dt>共同设计</dt><dd><p>四项都做成 <code>nbv_policy</code> 下的独立开关，全关时在 447 步上与改动前的原版<b>逐位一致</b>。这样做有两个原因：消融时每次只动一个开关，贡献才分得清；真机出问题可以一键回退。</p></dd></div>
+    <div class="step"><dt>可行性投影</dt><dd>
+      <p><b>现象</b>：相机冲向桌下、超关节限位。<b>根因</b>：目标函数里没有"可达"这一项，梯度不知道哪里去不了。</p>
+      <div class="alt">
+        <span class="x no">不选</span><span>只做硬夹紧：轨迹在边界上抖动，速度不连续。</span>
+        <span class="x no">不选</span><span>在目标函数里加罚项：权重要调，而且信息峰仍在边界外拉着相机。</span>
+        <span class="x yes">采用</span><span>只削掉指令速度里"往外"的分量 <code>v ← v − s·max(0, v·n)·n</code>，往里走不受影响，激活度 s 在边界前 margin 内线性升到 1。Misimi 等人用的虚拟平面投影是同一思路。</span></div>
+      <p class="knobs">手设常数：<b>φ 带 15°–80°</b>、<b>margin 8°</b>。这是规则，不是由逆运动学推出来的。</p></dd></div>
+    <div class="step"><dt>Fisher 掩码</dt><dd>
+      <p><b>根因</b>：打分对<b>全部</b>高斯求和。桌面和背景高斯的"信息"无法兑现，却在拉相机；它们大多没被看过，history≈0，分母只剩 λ=0.1，分数被放大。</p>
+      <div class="alt">
+        <span class="x no">暂缓</span><span>逐高斯 TSDF 光线投射算可见性：最有原则，但当前 TSDF 后端不暴露逐体素权重。</span>
+        <span class="x no">暂缓</span><span>用实例分割选物体：要先解决"选哪个实例"。</span>
+        <span class="x yes">采用</span><span>ROI 盒外、支撑面以下的高斯权重置 0；相机低于支撑面时整幅打分乘 sigmoid 门。用支撑面近似遮挡。</span></div>
+      <p class="knobs">ROI 来源：仿真 = <b>真值物体包围盒</b>（特权信息），真机 = 手设 <code>tsdf.spatial_bounds</code>。</p></dd></div>
+    <div class="step"><dt>速率映射</dt><dd>
+      <p><b>现象</b>：同一个 <code>fisher_step_scale</code> 在不同场景下速度差两个数量级，原版 100% 的步数撞在限幅上。</p>
+      <div class="alt"><span class="x yes">采用</span><span>方向 = g/|g|，速率 = v_nominal·|g|/(|g|+κ)，κ = |g| 的滑动中位数。场整体放大 10⁴ 倍，指令完全不变（单元测试）。</span></div>
+      <p class="knobs">手设常数：<b>v_nominal = 0.05 m/s</b>、<b>κ 窗口 20</b>。v_nominal 有物理单位，限幅退回安全兜底。</p></dd></div>
+    <div class="step"><dt>停止判据</dt><dd>
+      <p>A 信息饱和、B 视角球覆盖、C 预算、D 停滞，满足任一即停。它自己迭代了两次：</p>
+      <div class="alt">
+        <span class="x no">v1</span><span>当前视角分数的滑动均值低于峰值的 10% 就停：贪心策略停在局部最优时当前分数也会衰减，会误停。</span>
+        <span class="x yes">v2</span><span>局部饱和只算<b>提名</b>，再给未覆盖的可达方向打分确认（53bfd1a）。</span>
+        <span class="x yes">v3</span><span>周期性 opacity reset 让所有视角同时塌缩，一次 run 在 reset 后两步误停，PSNR 9.6 dB；改为连续 2 次确认才停（96ba6a4）。</span></div>
+      <p class="knobs">手设常数：<b>score_ratio 0.1</b>、<b>覆盖阈值 0.9 / 邻域 25°</b>、<b>confirm_checks 2</b>。</p>
+      <div class="overturn"><b>10-18 发现判据 A 的参照有问题。</b>它拿"碗底"的分数作分母，按现在的写法几乎不可能触发，见 13 章。</div></dd></div>
+  </dl>
+</section>
+
+<!-- ============================================================ 06 -->
+<section class="ch" id="c6" data-cat="setup" data-date="10-17" data-title="实验设置的两个坑">
+  <div class="ch-head"><span class="ch-no">06</span><div>
+    <p class="date">2026-10-17 · commit cddb642 · 04546ac · 96ba6a4</p>
+    <h2>先修尺子：全黑资产、opacity reset 和评估视角</h2>
+    <div class="tags"><span class="tag setup">实验设置 ×3</span><span class="status bad">20 个 run 作废</span></div>
+  </div></div>
+  <dl class="chain">
+    <div class="step"><dt>全黑资产</dt><dd><p><b>现象</b>：无地面时地图只有 631 个高斯，留出视角 PSNR 高达 58 dB。<b>原因</b>：<code>instance_gs.ply</code> 每个点的颜色都是 (0,0,0)。黑物体在黑背景上渲染，对高斯参数几乎没有梯度，Fisher 场里根本没有物体的信号；有地面时场几乎全由灰色地面驱动。</p>
+      <p><b>做法</b>：加 <code>--recolor texture</code>，给资产上确定性彩色纹理。已经跑完的 20 个 run 全部作废，9-13 的切空间 A/B 也跑在这个资产上。</p></dd></div>
+    <div class="step"><dt>opacity reset</dt><dd><p>3DGS 每 301 次迭代把不透明度全部置 0.01，几步内所有视角的 Fisher 分数同时塌缩。终态 PSNR 会取决于"最后一步离 reset 有多近"。消融配置里关闭它；真机保留，靠 confirm_checks 防误停。</p></dd></div>
+    <div class="step"><dt>评估指标</dt><dd><p>用 16 个<b>不喂给建图</b>的固定留出视角，并且只在物体像素上算 PSNR。原因：在训练视角上算 PSNR 会奖励"反复看同一处"；整幅图算会被大面积地面主导。另加表面完整度（GT 点 1 cm 内有高斯的比例）和视角球覆盖率。</p></dd></div>
+    <div class="step"><dt>为什么单列</dt><dd><p>这三项都没有改变方法，只改变了"测什么、怎么测"。但如果不修，算法改进的结论全都不可信。</p></dd></div>
+  </dl>
+</section>
+
+<!-- ============================================================ 07 -->
+<section class="ch" id="c7" data-cat="algo diag" data-date="10-17" data-title="消融：30 个 run">
+  <div class="ch-head"><span class="ch-no">07</span><div>
+    <p class="date">2026-10-17 · commit 16ddf5c · 8 臂 × 3 起点 + 无地面对照</p>
+    <h2>消融：一次去掉一项，看谁真的在起作用</h2>
+    <div class="tags"><span class="tag algo">评估算法改进</span><span class="status ok">下沿问题修掉</span><span class="status warn">质量提升不能声称</span></div>
+  </div></div>
+  <dl class="chain">
+    <div class="step"><dt>实验设计</dt><dd><ul>
+      <li><b>"全开减一项"</b>而不是"原版加一项"：加法的结果依赖加的顺序，减法直接回答"去掉它会不会变差"。</li>
+      <li><b>2 m 灰色地面</b>当桌面的替身：原版冲向下沿正是地面高斯在拉，没有地面就复现不了这个问题。另设无地面对照。</li>
+      <li><b>三个起点</b> φ = 20° / 45° / 70°：低、中、高仰角各一个。</li>
+      <li>300 步，dt = 0.1，限幅 0.05 m/s。</li></ul></dd></div>
+    <div class="step"><dt>结论</dt><dd><ul>
+      <li><b>下沿问题稳定复现，并被修掉。</b>原版三个起点都在 120–230 步内掉到 φ≈0，63% 的步数贴着下沿；全开的变体 0–1%。在下图选 legacy 和 full 对比。</li>
+      <li><b>掩码是唯一有行为证据的关键项。</b>去掉后相机被地面拉到可行性带边沿 φ≈15° 并停住；PSNR 上只有 s20 超出噪声（17.78 vs 22.25 dB）。</li>
+      <li><b>速率映射</b>把撞限幅从 100% 降到 0%，路径短一半；质量差在噪声内。</li>
+      <li><b>切空间</b>在这组实验里看不出收益：轨迹不进入极区。</li></ul></dd></div>
+  </dl>
+  <figure class="fig">
+    <div class="fig-head"><h3>相机仰角 φ 随步数变化</h3>
+      <div class="ctrls"><div class="seg" role="group" aria-label="起点" id="ablStart"><button aria-pressed="true" data-v="s20">s20</button><button aria-pressed="false" data-v="s45">s45</button><button aria-pressed="false" data-v="s70">s70</button></div></div></div>
+    <div class="ctrls" id="ablArms" style="margin-bottom:6px"></div>
+    <div class="chart" id="ablPhi"></div>
+    <p class="fig-note">阴影 = 可行性带 15°–80°。点按上面的臂名可增减曲线。悬停查看每一步的数值。</p>
+  </figure>
+  <figure class="fig">
+    <div class="fig-head"><h3>留出视角 PSNR（物体像素）</h3><span class="fig-note" style="margin:0">与上图联动</span></div>
+    <div class="chart" id="ablPsnr"></div>
+  </figure>
+  <figure class="fig">
+    <div class="fig-head"><h3>8 臂汇总（地面场景，3 起点均值）</h3>
+      <div class="seg" role="group" aria-label="排序" id="ablSort"><button aria-pressed="true" data-v="order">按定义顺序</button><button aria-pressed="false" data-v="final_psnr">按终态 PSNR</button></div></div>
+    <div class="scroll"><table id="ablTable"></table></div>
+    <p class="fig-note">无地面对照：full 20.11 ± 0.43 vs legacy 19.33 ± 0.48 dB；经度分区 5.3 vs 1.3 /18。</p>
+  </figure>
+</section>
+
+<!-- ============================================================ 08 -->
+<section class="ch" id="c8" data-cat="diag setup" data-date="10-18" data-title="噪声有多大">
+  <div class="ch-head"><span class="ch-no">08</span><div>
+    <p class="date">2026-10-18 · commit 67d6f22</p>
+    <h2>两个配置相同的臂差了 1 dB：先量噪声</h2>
+    <div class="tags"><span class="tag diag">诊断</span><span class="tag setup">实验设置 · 改为每格 3 次重复</span><span class="status bad">推翻 "+0.71 dB"</span></div>
+  </div></div>
+  <dl class="chain">
+    <div class="step"><dt>现象</dt><dd><p><code>full</code> 与 <code>full_no_stop</code> 的<b>实际行为完全相同</b>：停止判据 30 个 run 里一次没触发，全局探测只读不写。可两者的终态 PSNR 相差 0.25 / 1.02 / 1.01 dB。</p></dd></div>
+    <div class="step"><dt>诊断</dt><dd><p>仿真不是确定性的：GPU 反传里的 atomicAdd 顺序不固定，场景中心又是从地图推出来的，轨迹从第 0 步就开始分叉。单次 run 的噪声约 1 dB。</p></dd></div>
+    <div class="step"><dt>后果</dt><dd><div class="overturn"><b>"full 比 legacy 好 +0.71 dB"不成立</b>，在噪声内。按 PSNR 曲线均值（time-to-quality）原版反而更好（19.11 vs 18.69 dB），因为原版一直以限幅速度运动，全开的中位速度只有 0.024 m/s。这不是等速比较。</div>
+      <p style="margin-top:8px">从此每格至少重复 3 次，并报告置信区间。</p></dd></div>
+  </dl>
+  <figure class="fig">
+    <div class="fig-head"><h3>同配置两臂的终态 PSNR</h3></div>
+    <div class="chart" id="noiseChart"></div>
+  </figure>
+</section>
+
+<!-- ============================================================ 09 -->
+<section class="ch" id="c9" data-cat="diag" data-date="10-17" data-title="停止判据从不触发">
+  <div class="ch-head"><span class="ch-no">09</span><div>
+    <p class="date">2026-10-17 · 消融报告"停止判据"一节</p>
+    <h2>停止判据一次也没触发，我们当时把它读成了"近视"</h2>
+    <div class="tags"><span class="tag diag">诊断</span><span class="status bad">解读已被推翻（13 章）</span></div>
+  </div></div>
+  <dl class="chain">
+    <div class="step"><dt>现象</dt><dd><p>局部饱和<b>每次</b>都被提名（当前视角分数降到峰值的 2–9%），但全局确认对未覆盖方向打分，得到的最大值是历史峰值的 <b>1.3–180 倍</b>，于是拒绝停止。300 步只覆盖了视角球的 17–31%。</p></dd></div>
+    <div class="step"><dt>当时的解读</dt><dd><p>局部梯度近视：它到不了的地方信息多一到两个数量级。建议下一步做"重定位"：局部饱和、全局未饱和时，朝全局探测 argmax 走大圆，再恢复梯度跟随。</p>
+      <div class="overturn"><b>这个解读后来被推翻。</b>1.3–180 倍量的是碗有多深，不是信息差；覆盖率低是路径预算所限。见 13 章。</div></dd></div>
+  </dl>
+</section>
+
+<!-- ============================================================ 10 -->
+<section class="ch" id="c10" data-cat="diag" data-date="10-18" data-title="读 Misimi 等 RA-L">
+  <div class="ch-head"><span class="ch-no">10</span><div>
+    <p class="date">2026-10-18 · 文献对照</p>
+    <h2>读一篇几乎同构的论文，带出两个可检验的问题</h2>
+    <div class="tags"><span class="tag diag">诊断 · 文献</span></div>
+  </div></div>
+  <dl class="chain">
+    <div class="step"><dt>为什么读它</dt><dd><p>Misimi, Herland, Chaumette, "Visual Servoing-Based Active Vision for 3D Object Reconstruction"（RA-L）同样是腕部相机在以物体为中心的球面上连续运动，同样用 4 点中心差分求信息梯度。差别正好落在我们刚发现的问题上。</p></dd></div>
+    <div class="step"><dt>对照</dt><dd><div class="scroll"><table class="cmp">
+      <tr><th></th><th>Misimi 等</th><th>我们</th></tr>
+      <tr><td>约束在球面</td><td>主任务视觉伺服：物体质心居中、距离 25 cm</td><td>径向修正 + look-at，球心为常数</td></tr>
+      <tr><td>探测步长</td><td>δ = 5 cm ≈ <b>0.2 rad</b></td><td><b>0.01 rad</b>，小 20 倍</td></tr>
+      <tr><td>目标函数</td><td>OctoMap 光线期望熵，每体素有上界 log2</td><td>FisherRF EIG，未观测元素分母≈λ，无上界</td></tr>
+      <tr><td>ROI</td><td>在线 RANSAC 去平面 + 欧氏聚类</td><td>真值包围盒 / 手设 bounds</td></tr>
+      <tr><td>Hybrid（局部+全局）</td><td>Chamfer 1.6 vs 1.8 mm，耗时 67 vs 42 s，边际收益</td><td>正打算做</td></tr></table></div></dd></div>
+    <div class="step"><dt>问题 1</dt><dd><p>他们的步长大 20 倍，自带一点前瞻。<b>我们放大 <code>grad_eps</code> 能缓解"近视"吗？</b>这是超参数实验，代价是改一个命令行参数。→ 12 章</p></dd></div>
+    <div class="step"><dt>问题 2</dt><dd><p>熵有上界、看过就饱和；Fisher 对未观测高斯是 cur/0.1，没有上界。<b>"别处多 1.3–180 倍"是不是分母造成的假象？</b>如果是，应该先给目标函数加饱和，而不是做 Hybrid。→ 13 章</p></dd></div>
+  </dl>
+</section>
+
+<!-- ============================================================ 11 -->
+<section class="ch" id="c11" data-cat="setup diag" data-date="10-18" data-title="实验设计：36 run">
+  <div class="ch-head"><span class="ch-no">11</span><div>
+    <p class="date">2026-10-18 · commit 6f9f156</p>
+    <h2>一批 run 同时回答两个问题</h2>
+    <div class="tags"><span class="tag setup">实验设置</span><span class="tag diag">新诊断工具</span></div>
+  </div></div>
+  <dl class="chain">
+    <div class="step"><dt>配置</dt><dd><p>基线用消融里的 <code>full_no_stop</code>（tangent + 可行性 + 掩码 + 速率映射）。关掉停止判据，是为了让所有 run 都跑满 300 步，终态可以直接比。</p></dd></div>
+    <div class="step"><dt>规模</dt><dd><p>eps ∈ {0.01, 0.05, 0.1, 0.2} × 3 起点 × <b>3 次重复</b> = 36 个 run，串行约 5 小时（地面场景单进程峰值约 14 GB）。参考球半径 0.89 m，0.2 rad ≈ 18 cm，覆盖了 Misimi 的角步长。3 个 run 在 TSDF 处 CUDA OOM，原样重跑后成功。</p></dd></div>
+    <div class="step"><dt>诊断工具</dt><dd><p>新增 <code>--contrib_diag_every 30</code>：每 30 步对当前视角和 φ∈[15°,80°] 内 24 个方向打分，只读不改地图。每个分数按参数元素的 history 分桶拆开，再把分母换成 history+λ′ 重新求和。</p>
+      <div class="alt"><span class="x no">不选</span><span>用不同 λ 重跑闭环：轨迹和关键帧都会变，分不清是分母的作用还是路径的作用，还要再多跑 36 个 run。</span>
+      <span class="x yes">采用</span><span>同一批贡献向量做重加权反事实。代价是它只回答"同一时刻的分数结构"，不回答"闭环会怎么走"。</span></div></dd></div>
+  </dl>
+</section>
+
+<!-- ============================================================ 12 -->
+<section class="ch" id="c12" data-cat="hyper" data-date="10-18" data-title="实验 1：探测步长">
+  <div class="ch-head"><span class="ch-no">12</span><div>
+    <p class="date">2026-10-18 · 实验 1</p>
+    <h2>放大探测步长没有带来前瞻，反而把相机钉在边上</h2>
+    <div class="tags"><span class="tag hyper">超参数 · 拒绝修改</span><span class="status ok">保留 grad_eps = 0.01</span></div>
+  </div></div>
+  <dl class="chain">
+    <div class="step"><dt>结果</dt><dd><p>相对 0.01，终态 PSNR 下降 <b>1.4–2.0 dB</b>（95% CI 不含 0）。去掉 s20 后差异在噪声内，视角覆盖只小幅上升 0.01–0.03。</p></dd></div>
+    <div class="step"><dt>机制</dt><dd><p>s20 起点离下沿只有 5°。eps=0.01 时三次重复第 0 步的北向梯度都是 <b>+1e6</b>，相机爬到 φ≈65°；eps≥0.1 时三次都是 <b>−3e8 到 −7e8</b>，幅值大 300 倍、符号相反。中心差分为负说明更低仰角一侧分数更高；eps=0.1 的下侧探测点在 14.3°，已在可行性带外。可行性投影削掉向外分量后几乎什么都不剩，相机贴着 15° 停住。</p>
+      <p>eps=0.05 的下侧探测点 17.1° 仍在带内，三次里也有两次往下走：大尺度上靠近桌面一侧本来就分数更高，大步长只是让梯度看见了这个趋势。</p></dd></div>
+    <div class="step"><dt>可复现性</dt><dd><p>第 0 步梯度符号在 3 次重复间一致的起点数：eps=0.01 为 3/3，更大的 eps 为 1–2/3。</p></dd></div>
+    <div class="step"><dt>结论</dt><dd><p>这是一次<b>超参数实验，结论是不改</b>。小步长并不更聪明：它跟随碗底的局部斜率，这个斜率总指向离开已访问轨迹的方向，在这里恰好朝北。如果将来需要更大的探测范围，探测点必须先夹到可行性带内（未实现）。</p></dd></div>
+  </dl>
+  <figure class="fig">
+    <div class="fig-head"><h3>同一起点、不同探测步长的仰角轨迹</h3>
+      <div class="ctrls"><div class="seg" role="group" aria-label="起点" id="epsStart"><button aria-pressed="true" data-v="s20">s20</button><button aria-pressed="false" data-v="s45">s45</button><button aria-pressed="false" data-v="s70">s70</button></div></div></div>
+    <div class="ctrls" id="epsToggles" style="margin-bottom:6px"></div>
+    <div class="chart" id="epsPhi"></div>
+    <p class="fig-note">每个 eps 3 条线（3 次重复）。s20 上 eps ≥ 0.1 的 9 条线全部贴在 15° 下沿。</p>
+  </figure>
+  <figure class="fig">
+    <div class="fig-head"><h3>终态 PSNR，每个点是一个 run</h3></div>
+    <div class="chart" id="epsDots"></div>
+    <p class="fig-note">横向位置区分起点：左 s20、中 s45、右 s70。悬停看具体 run。</p>
+  </figure>
+</section>
+
+<!-- ============================================================ 13 -->
+<section class="ch" id="c13" data-cat="diag" data-date="10-18" data-title="实验 2：分数从哪里来">
+  <div class="ch-head"><span class="ch-no">13</span><div>
+    <p class="date">2026-10-18 · 实验 2</p>
+    <h2>不是分母在作怪，是分数围绕轨迹形成了一个碗</h2>
+    <div class="tags"><span class="tag diag">诊断</span><span class="status bad">推翻"λ 假说"和"近视"</span></div>
+  </div></div>
+  <dl class="chain">
+    <div class="step"><dt>λ 假说</dt><dd><p>未观测元素（history &lt; λ）约占掩码内参数元素的 18%，只贡献未覆盖方向分数的 30–39%，而且这个比例随时间从约 57% 降到约 20%。把 λ 放大 1000 倍，"最佳未覆盖 / 最佳已覆盖"只从 4.8 降到 2.8；只算已观测元素是 4.6。<b>"先给目标函数加饱和"作废。</b></p></dd></div>
+    <div class="step"><dt>碗</dt><dd><p>把每个探测方向的分数除以当前视角，按它离最近已访问方向的角距离分桶：0–5° 处是 0.8 倍，15–25° 处已经是 62 倍，90° 以外是 2054 倍。增长主要来自<b>已观测</b>元素：从关键帧里斜着看过的元素，正面看时 log1p(cur) 大得多。</p>
+      <p>当前位姿永远在碗底。所以停止判据 A 的"局部饱和"几乎必然成立，而"全局确认"拿碗外分数和碗底峰值比，碗深就有两三个数量级。09 章的 1.3–180 倍量的是<b>碗深</b>。在碗外两个方向之间公平比较，差距只有约 5 倍。</p></dd></div>
+    <div class="step"><dt>覆盖上界</dt><dd><p>300 步 × 约 0.024 m/s ≈ 0.71 m，在 0.89 m 的球上只是 46° 的弧。用与 StopMonitor 相同的 400 方向、25° 邻域算，一条最优 46° 大圆路径最多覆盖 0.275。实际 0.215–0.25，达到上限的 78–90%。<b>覆盖低是路径预算所限，不是近视。</b>这也和 Misimi 等人 Hybrid 只有边际收益一致。</p></dd></div>
+  </dl>
+  <figure class="fig">
+    <div class="fig-head"><h3>碗的形状：离已访问方向越远，分数越高</h3>
+      <div class="seg" role="group" aria-label="颜色" id="bowlMode"><button aria-pressed="true" data-v="ratio">分数 / 当前视角</button><button aria-pressed="false" data-v="unobs">未观测占比</button></div></div>
+    <div class="chart" id="bowlChart"></div>
+    <p class="fig-note">柱 = 中位数，竖线 = 四分位区间，纵轴对数刻度。36 个 run、第 30 步以后的全部探测（n = 7,776）。</p>
+  </figure>
+  <figure class="fig">
+    <div class="fig-head"><h3>反事实：把分母换成 history + λ′</h3>
+      <div class="seg" role="group" aria-label="λ′" id="lamSeg"><button aria-pressed="true" data-v="lam0.1">λ′=0.1 实际</button><button aria-pressed="false" data-v="lam1">1</button><button aria-pressed="false" data-v="lam10">10</button><button aria-pressed="false" data-v="lam100">100</button><button aria-pressed="false" data-v="observed_only">只算已观测</button></div></div>
+    <div class="ctrls" style="margin-bottom:6px;font-size:12.5px;gap:14px"><span><span style="display:inline-block;width:14px;height:3px;border-radius:2px;background:var(--s1);vertical-align:middle;margin-right:6px"></span>最佳未覆盖 / 当前视角（含碗深）</span><span><span style="display:inline-block;width:14px;height:3px;border-radius:2px;background:var(--s3);vertical-align:middle;margin-right:6px"></span>最佳未覆盖 / 最佳已覆盖（碗外对碗外）</span></div>
+    <div class="chart" id="lamChart"></div>
+    <p class="fig-note">两条线是同一 λ′ 下的两种比较。"对当前视角"含碗深，"对已覆盖方向"是碗外对碗外。λ′ 越大前者降得越多，后者始终在 2–6 之间。</p>
+  </figure>
+  <figure class="fig">
+    <div class="fig-head"><h3>视角覆盖：实际 vs 路径预算允许的上限</h3></div>
+    <div class="meter" id="covMeter"></div>
+    <p class="fig-note">覆盖率 = φ∈[15°,80°] 内 400 个 Fibonacci 方向中，落在某个已访问视角 25° 以内的比例。</p>
+  </figure>
+</section>
+
+<!-- ============================================================ 14 -->
+<section class="ch" id="c14" data-cat="algo hyper setup diag" data-date="10-18" data-title="总账与下一步">
+  <div class="ch-head"><span class="ch-no">14</span><div>
+    <p class="date">截至 2026-10-18</p>
+    <h2>总账：每一项改动属于哪一类，现在还成不成立</h2>
+    <div class="tags"><span class="tag algo">算法</span><span class="tag hyper">超参数</span><span class="tag setup">实验设置</span><span class="tag diag">诊断</span></div>
+  </div></div>
+  <dl class="chain">
+    <div class="step"><dt>分类规则</dt><dd><p>改的是"算什么"（目标函数、参数化、控制律、判据结构）算<b style="color:var(--algo)">算法</b>；方法不变只改一个数算<b style="color:var(--hyper)">超参数</b>；改的是"怎么测"算<b style="color:var(--setup)">实验设置</b>；只测量不改动算<b style="color:var(--diag)">诊断</b>。算法项里附带的手设常数，单独列为超参数。</p></dd></div>
+    <div class="step"><dt>下一步</dt><dd><ul>
+      <li><b>改停止判据 A 的参照</b>（算法）：改为"最佳未覆盖 / 最佳已覆盖"的同半径比较，阈值仍需标定。</li>
+      <li><b>重定位 / Hybrid 暂缓</b>：固定路径预算下它不会提高覆盖率。</li>
+      <li><b>真机 <code>gaussian_th</code> 仍是 0.7</b>（超参数）：改之前先验证 PSNR。</li>
+      <li>等速或等路径比较、多物体、非特权 ROI，才能对重建质量下结论。</li></ul></dd></div>
+  </dl>
+  <figure class="fig">
+    <div class="fig-head"><h3>改动总账</h3><span class="fig-note" style="margin:0">顶栏筛选同样作用于此表</span></div>
+    <div class="scroll"><table class="ledger" id="ledger"></table></div>
+  </figure>
+</section>
+
+<footer class="foot">
+  <p>来源：<code>docs/nbv_ablation.md</code>、<code>docs/eps_contrib_report.md</code>、<code>sim/sim_outputs/nbv_ablation</code>、<code>sim/sim_outputs/eps_contrib</code>，以及 09-05 至 10-18 的提交记录。图中数据由 <code>sim/sim_outputs/*/report/metrics.json</code> 和逐步日志生成，全部内嵌在本页，离线可用。</p>
+  <p>局限：只有单个仿真物体；掩码 ROI 用真值包围盒；λ′ 反事实是重加权而非重跑；真机未验证。</p>
+</footer>
+</main>
+</div>
+</div>
+
+<script type="application/json" id="data">{"ablation":{"ground":{"full":{"s20":{"final_psnr":22.252,"psnr_auc":18.42,"phi_min_deg":20.121,"phi_max_deg":63.692,"rim_frac":0.0,"view_coverage":0.22,"path_m":0.713,"limiter_frac":0.0,"speed_median_mps":0.024,"lon_bins":2.0,"final_completeness":1.0,"curve":[[0,12.86],[10,14.82],[20,15.68],[30,16.19],[40,16.74],[50,17.31],[60,17.93],[70,18.39],[80,18.71],[90,19.02],[100,19.2],[110,19.4],[120,19.64],[130,19.81],[140,19.99],[150,20.21],[160,20.38],[170,20.52],[180,20.71],[190,20.9],[200,21.08],[210,21.23],[220,21.37],[230,21.51],[240,21.66],[250,21.8],[260,21.91],[270,22.03],[280,22.12],[290,22.17],[299,22.25]],"phi":[20.1,21.0,21.6,22.4,23.0,23.7,24.3,25.0,25.8,26.6,27.3,28.1,28.8,29.6,30.3,31.1,31.9,32.7,33.5,34.2,34.9,35.7,36.4,37.2,37.9,38.7,39.5,40.4,41.1,41.9,42.7,43.4,44.2,44.9,45.6,46.4,47.3,48.0,48.8,49.5,50.2,51.0,51.7,52.5,53.2,53.9,54.5,55.2,56.0,56.8,57.5,58.2,58.9,59.6,60.2,60.9,61.5,62.0,62.7,63.2]},"s45":{"final_psnr":21.046,"psnr_auc":18.804,"phi_min_deg":36.357,"phi_max_deg":52.312,"rim_frac":0.0,"view_coverage":0.242,"path_m":0.717,"limiter_frac":0.0,"speed_median_mps":0.024,"lon_bins":3.0,"final_completeness":1.0,"curve":[[0,16.17],[10,16.8],[20,16.86],[30,16.96],[40,17.21],[50,17.61],[60,18.11],[70,18.57],[80,18.91],[90,19.2],[100,19.38],[110,19.56],[120,19.74],[130,19.82],[140,19.93],[150,20.06],[160,20.14],[170,20.28],[180,20.35],[190,20.44],[200,20.56],[210,20.67],[220,20.77],[230,20.83],[240,20.93],[250,21.04],[260,21.07],[270,21.11],[280,21.11],[290,21.07],[299,21.05]],"phi":[36.4,36.8,37.2,37.5,37.8,38.0,38.3,38.5,38.7,38.9,39.0,39.2,39.5,39.8,40.2,40.4,40.6,40.8,41.0,41.3,41.5,41.8,42.2,42.5,42.8,43.1,43.4,43.7,43.9,44.2,44.4,44.6,44.9,45.2,45.5,45.8,46.2,46.5,46.9,47.4,47.9,48.3,48.7,49.5,50.3,50.8,51.2,51.4,51.5,51.9,51.9,51.9,51.9,52.2,52.0,51.8,51.9,52.0,51.8,51.9]},"s70":{"final_psnr":21.175,"psnr_auc":18.856,"phi_min_deg":26.757,"phi_max_deg":66.723,"rim_frac":0.0,"view_coverage":0.268,"path_m":0.711,"limiter_frac":0.0,"speed_median_mps":0.024,"lon_bins":3.0,"final_completeness":1.0,"curve":[[0,17.01],[10,17.05],[20,16.91],[30,16.88],[40,17.03],[50,17.37],[60,17.85],[70,18.44],[80,18.9],[90,19.2],[100,19.42],[110,19.62],[120,19.8],[130,19.95],[140,20.06],[150,20.19],[160,20.26],[170,20.33],[180,20.39],[190,20.47],[200,20.53],[210,20.54],[220,20.62],[230,20.66],[240,20.72],[250,20.84],[260,20.86],[270,20.96],[280,21.07],[290,21.09],[299,21.18]],"phi":[66.7,65.7,64.8,63.9,63.1,62.3,61.4,60.6,59.7,58.8,57.9,57.0,56.1,55.2,54.3,53.5,52.7,51.9,51.1,50.3,49.5,48.8,48.1,47.4,46.6,46.0,45.4,44.8,44.2,43.7,43.1,42.4,41.7,41.0,40.3,39.7,39.0,38.4,37.7,37.0,36.4,35.9,35.3,34.7,34.2,33.8,33.3,32.9,32.4,32.0,31.5,31.0,30.5,30.0,29.5,29.0,28.5,28.1,27.5,27.1]}},"full_no_feas":{"s20":{"final_psnr":21.758,"psnr_auc":18.126,"phi_min_deg":20.132,"phi_max_deg":65.037,"rim_frac":0.0,"view_coverage":0.215,"path_m":0.709,"limiter_frac":0.0,"speed_median_mps":0.024,"lon_bins":2.0,"final_completeness":1.0,"curve":[[0,12.75],[10,14.72],[20,15.46],[30,16.07],[40,16.62],[50,17.15],[60,17.69],[70,18.17],[80,18.47],[90,18.74],[100,18.89],[110,19.09],[120,19.26],[130,19.43],[140,19.57],[150,19.74],[160,19.96],[170,20.12],[180,20.26],[190,20.36],[200,20.52],[210,20.65],[220,20.79],[230,20.93],[240,21.05],[250,21.24],[260,21.33],[270,21.42],[280,21.53],[290,21.63],[299,21.76]],"phi":[20.1,20.9,21.6,22.3,22.9,23.5,24.2,24.9,25.6,26.4,27.2,27.9,28.6,29.3,30.1,30.9,31.6,32.4,33.3,34.0,34.7,35.5,36.3,37.0,37.7,38.5,39.3,40.1,40.9,41.6,42.4,43.1,43.9,44.6,45.4,46.1,46.9,47.7,48.4,49.1,49.9,50.7,51.4,52.2,53.0,53.7,54.4,55.2,56.1,57.1,57.9,58.7,59.4,60.1,60.9,61.6,62.4,63.1,63.8,64.5]},"s45":{"final_psnr":22.431,"psnr_auc":19.388,"phi_min_deg":36.393,"phi_max_deg":60.518,"rim_frac":0.0,"view_coverage":0.258,"path_m":0.709,"limiter_frac":0.0,"speed_median_mps":0.024,"lon_bins":4.0,"final_completeness":1.0,"curve":[[0,16.13],[10,16.76],[20,16.91],[30,17.08],[40,17.42],[50,17.91],[60,18.52],[70,19.03],[80,19.5],[90,19.88],[100,20.18],[110,20.44],[120,20.62],[130,20.79],[140,20.93],[150,21.0],[160,21.04],[170,21.12],[180,21.21],[190,21.29],[200,21.42],[210,21.5],[220,21.65],[230,21.8],[240,21.91],[250,21.99],[260,22.05],[270,22.15],[280,22.27],[290,22.42],[299,22.43]],"phi":[36.4,37.2,38.0,38.7,39.4,40.0,40.8,41.5,42.2,42.8,43.4,44.0,44.7,45.4,46.2,46.9,47.7,48.4,49.2,49.9,50.6,51.3,51.9,52.5,53.1,53.7,54.2,54.7,55.1,55.5,55.9,56.2,56.4,56.7,57.1,57.5,58.0,58.5,58.9,59.2,59.6,59.8,60.0,60.2,60.3,60.5,60.5,60.4,60.4,60.4,60.4,60.4,60.3,60.2,60.2,60.0,60.0,59.8,59.7,59.5]},"s70":{"final_psnr":21.098,"psnr_auc":18.514,"phi_min_deg":13.741,"phi_max_deg":66.68,"rim_frac":0.02,"view_coverage":0.228,"path_m":0.729,"limiter_frac":0.0,"speed_median_mps":0.024,"lon_bins":2.0,"final_completeness":1.0,"curve":[[0,17.14],[10,17.18],[20,16.99],[30,16.95],[40,17.13],[50,17.46],[60,17.89],[70,18.29],[80,18.61],[90,18.84],[100,19.0],[110,19.15],[120,19.22],[130,19.23],[140,19.22],[150,19.33],[160,19.37],[170,19.48],[180,19.84],[190,19.96],[200,20.02],[210,20.12],[220,20.23],[230,20.31],[240,20.45],[250,20.57],[260,20.71],[270,20.82],[280,20.95],[290,21.03],[299,21.1]],"phi":[66.7,65.7,64.8,63.9,63.1,62.2,61.4,60.5,59.6,58.7,57.8,56.9,56.0,55.1,54.2,53.2,52.3,51.4,50.5,49.6,48.8,48.0,47.1,46.3,45.4,44.6,43.8,43.1,42.3,41.4,40.6,39.8,39.0,38.3,37.5,36.8,36.0,35.2,34.3,33.5,32.6,31.8,30.9,30.0,29.1,28.2,27.3,26.3,25.4,24.4,23.4,22.5,21.5,20.6,19.6,18.7,17.8,16.9,15.9,14.6]}},"full_no_mask":{"s20":{"final_psnr":17.782,"psnr_auc":17.042,"phi_min_deg":15.012,"phi_max_deg":20.109,"rim_frac":0.0,"view_coverage":0.087,"path_m":0.186,"limiter_frac":0.0,"speed_median_mps":0.003,"lon_bins":1.0,"final_completeness":0.991,"curve":[[0,13.06],[10,14.93],[20,15.78],[30,16.22],[40,16.71],[50,17.12],[60,17.4],[70,17.56],[80,17.59],[90,17.62],[100,17.65],[110,17.68],[120,17.71],[130,17.72],[140,17.73],[150,17.69],[160,17.64],[170,17.68],[180,17.68],[190,17.69],[200,17.72],[210,17.69],[220,17.68],[230,17.68],[240,17.72],[250,17.7],[260,17.73],[270,17.74],[280,17.77],[290,17.77],[299,17.78]],"phi":[20.1,19.8,19.4,18.9,18.3,17.9,17.6,17.4,17.1,17.0,16.8,16.6,16.5,16.3,16.2,16.1,16.0,15.9,15.8,15.7,15.7,15.6,15.6,15.5,15.5,15.4,15.4,15.3,15.3,15.3,15.2,15.2,15.2,15.2,15.2,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0]},"s45":{"final_psnr":20.524,"psnr_auc":19.025,"phi_min_deg":15.66,"phi_max_deg":36.687,"rim_frac":0.0,"view_coverage":0.175,"path_m":0.654,"limiter_frac":0.0,"speed_median_mps":0.022,"lon_bins":2.0,"final_completeness":1.0,"curve":[[0,16.29],[10,16.78],[20,16.87],[30,17.08],[40,17.44],[50,17.96],[60,18.48],[70,18.89],[80,19.17],[90,19.41],[100,19.61],[110,19.77],[120,20.09],[130,20.2],[140,20.25],[150,20.28],[160,20.35],[170,20.47],[180,20.51],[190,20.6],[200,20.63],[210,20.63],[220,20.48],[230,20.5],[240,20.53],[250,20.49],[260,20.48],[270,20.47],[280,20.46],[290,20.55],[299,20.52]],"phi":[36.4,36.5,36.1,35.4,34.9,34.4,33.9,33.5,33.0,32.6,32.1,31.7,31.1,30.6,30.1,29.6,28.9,28.3,27.7,27.3,26.8,26.3,25.6,25.0,24.5,23.9,23.3,22.7,22.2,21.8,21.4,21.0,20.5,20.0,19.6,19.3,19.1,18.8,18.5,18.2,18.0,17.8,17.6,17.4,17.1,16.9,16.8,16.7,16.6,16.4,16.4,16.3,16.2,16.1,16.0,16.0,15.9,15.8,15.7,15.7]},"s70":{"final_psnr":20.184,"psnr_auc":18.718,"phi_min_deg":32.522,"phi_max_deg":66.709,"rim_frac":0.0,"view_coverage":0.235,"path_m":0.737,"limiter_frac":0.0,"speed_median_mps":0.025,"lon_bins":2.0,"final_completeness":1.0,"curve":[[0,17.02],[10,17.05],[20,16.96],[30,17.06],[40,17.33],[50,17.73],[60,18.21],[70,18.58],[80,18.8],[90,19.09],[100,19.27],[110,19.45],[120,19.53],[130,19.59],[140,19.64],[150,19.78],[160,19.82],[170,19.81],[180,19.8],[190,19.86],[200,19.87],[210,19.85],[220,19.87],[230,19.9],[240,19.95],[250,20.02],[260,20.09],[270,20.12],[280,20.16],[290,20.17],[299,20.18]],"phi":[66.7,66.1,65.1,63.6,62.4,61.3,60.3,59.5,58.7,57.7,56.6,55.5,54.6,53.7,52.8,51.8,50.9,49.8,48.7,47.7,46.8,46.0,45.2,44.4,43.8,43.5,43.3,43.3,42.7,41.9,41.0,40.0,38.9,37.9,37.3,37.2,36.8,36.8,36.6,35.8,35.4,35.0,34.6,34.5,34.1,33.5,32.9,32.7,32.7,32.7,32.8,32.6,32.8,32.7,32.7,32.6,32.8,32.7,32.6,32.7]}},"full_no_rate":{"s20":{"final_psnr":21.945,"psnr_auc":19.239,"phi_min_deg":20.123,"phi_max_deg":52.043,"rim_frac":0.0,"view_coverage":0.195,"path_m":0.547,"limiter_frac":0.09,"speed_median_mps":0.013,"lon_bins":2.0,"final_completeness":1.0,"curve":[[0,12.78],[10,15.46],[20,16.46],[30,17.36],[40,18.2],[50,18.73],[60,19.11],[70,19.43],[80,19.73],[90,19.96],[100,20.15],[110,20.33],[120,20.46],[130,20.57],[140,20.7],[150,20.84],[160,20.94],[170,21.08],[180,21.18],[190,21.31],[200,21.37],[210,21.42],[220,21.53],[230,21.62],[240,21.67],[250,21.73],[260,21.79],[270,21.84],[280,21.89],[290,21.92],[299,21.95]],"phi":[20.1,21.6,23.1,24.4,25.8,27.0,28.3,29.5,30.6,31.7,32.6,33.5,34.4,35.2,36.1,36.9,37.7,38.4,39.1,39.6,40.2,40.7,41.3,41.8,42.3,42.8,43.3,43.7,44.1,44.6,45.0,45.4,45.8,46.2,46.5,46.9,47.2,47.5,47.8,48.1,48.3,48.6,48.9,49.1,49.4,49.6,49.8,50.0,50.2,50.4,50.6,50.8,50.9,51.1,51.3,51.4,51.5,51.7,51.8,51.9]},"s45":{"final_psnr":21.333,"psnr_auc":19.467,"phi_min_deg":36.393,"phi_max_deg":59.063,"rim_frac":0.0,"view_coverage":0.217,"path_m":0.52,"limiter_frac":0.04,"speed_median_mps":0.016,"lon_bins":2.0,"final_completeness":1.0,"curve":[[0,16.28],[10,16.99],[20,17.17],[30,17.53],[40,18.12],[50,18.68],[60,19.14],[70,19.45],[80,19.71],[90,19.91],[100,20.11],[110,20.24],[120,20.39],[130,20.52],[140,20.7],[150,20.75],[160,20.82],[170,20.89],[180,20.96],[190,20.97],[200,21.01],[210,21.08],[220,21.15],[230,21.18],[240,21.19],[250,21.2],[260,21.19],[270,21.23],[280,21.28],[290,21.29],[299,21.33]],"phi":[36.4,37.5,38.7,39.8,40.7,41.5,42.3,43.0,43.7,44.4,45.1,45.8,46.4,47.0,47.6,48.2,48.7,49.3,49.8,50.4,51.0,51.5,52.0,52.5,52.9,53.4,53.8,54.2,54.6,55.0,55.4,55.8,56.2,56.5,56.9,57.2,57.5,57.6,57.8,57.8,57.9,58.0,58.1,58.2,58.2,57.9,57.8,57.9,57.9,57.9,57.9,58.0,58.2,58.3,58.5,58.6,58.7,58.9,59.0,59.1]},"s70":{"final_psnr":20.232,"psnr_auc":18.525,"phi_min_deg":50.222,"phi_max_deg":66.749,"rim_frac":0.0,"view_coverage":0.212,"path_m":0.389,"limiter_frac":0.01,"speed_median_mps":0.01,"lon_bins":3.0,"final_completeness":1.0,"curve":[[0,17.01],[10,17.05],[20,16.86],[30,16.89],[40,17.31],[50,17.73],[60,18.21],[70,18.58],[80,18.75],[90,18.9],[100,18.98],[110,19.07],[120,19.14],[130,19.23],[140,19.28],[150,19.36],[160,19.41],[170,19.5],[180,19.56],[190,19.68],[200,19.78],[210,19.84],[220,19.9],[230,19.9],[240,19.92],[250,19.99],[260,20.05],[270,20.1],[280,20.13],[290,20.19],[299,20.23]],"phi":[66.7,65.2,63.7,62.4,61.4,60.5,59.7,59.0,58.4,57.9,57.4,57.0,56.6,56.2,55.9,55.6,55.3,55.0,54.8,54.6,54.4,54.2,54.0,53.8,53.7,53.5,53.3,53.2,53.1,52.9,52.8,52.6,52.5,52.4,52.3,52.1,52.0,51.9,51.8,51.7,51.6,51.5,51.4,51.3,51.3,51.2,51.1,51.0,51.0,50.9,50.8,50.8,50.7,50.6,50.6,50.5,50.4,50.4,50.3,50.3]}},"full_no_stop":{"s20":{"final_psnr":22.495,"psnr_auc":18.393,"phi_min_deg":20.12,"phi_max_deg":64.882,"rim_frac":0.0,"view_coverage":0.215,"path_m":0.712,"limiter_frac":0.0,"speed_median_mps":0.024,"lon_bins":2.0,"final_completeness":1.0,"curve":[[0,13.14],[10,15.04],[20,15.68],[30,16.25],[40,16.72],[50,17.32],[60,17.89],[70,18.33],[80,18.63],[90,18.86],[100,19.1],[110,19.33],[120,19.56],[130,19.73],[140,19.9],[150,20.09],[160,20.31],[170,20.48],[180,20.66],[190,20.84],[200,21.03],[210,21.16],[220,21.33],[230,21.5],[240,21.71],[250,21.9],[260,22.06],[270,22.19],[280,22.32],[290,22.44],[299,22.5]],"phi":[20.1,20.8,21.6,22.3,23.0,23.6,24.3,25.0,25.7,26.5,27.3,28.0,28.8,29.5,30.3,31.0,31.8,32.6,33.4,34.1,34.9,35.7,36.4,37.1,37.8,38.6,39.4,40.2,41.0,41.8,42.6,43.4,44.1,44.8,45.6,46.4,47.2,48.0,48.8,49.5,50.2,50.9,51.6,52.4,53.1,53.9,54.6,55.4,56.2,57.1,57.9,58.7,59.4,60.1,60.8,61.6,62.3,63.0,63.7,64.3]},"s45":{"final_psnr":22.068,"psnr_auc":19.303,"phi_min_deg":36.407,"phi_max_deg":63.254,"rim_frac":0.0,"view_coverage":0.26,"path_m":0.714,"limiter_frac":0.0,"speed_median_mps":0.024,"lon_bins":4.0,"final_completeness":1.0,"curve":[[0,16.19],[10,16.82],[20,16.93],[30,17.13],[40,17.39],[50,17.86],[60,18.45],[70,18.96],[80,19.36],[90,19.68],[100,19.94],[110,20.18],[120,20.42],[130,20.62],[140,20.77],[150,20.91],[160,21.01],[170,21.06],[180,21.17],[190,21.21],[200,21.26],[210,21.28],[220,21.31],[230,21.42],[240,21.45],[250,21.48],[260,21.55],[270,21.7],[280,21.81],[290,21.92],[299,22.07]],"phi":[36.4,37.3,38.0,38.7,39.4,40.1,40.7,41.4,42.1,42.9,43.5,44.0,44.5,45.1,45.7,46.4,47.1,47.8,48.6,49.4,50.2,50.9,51.5,52.3,53.0,53.7,54.3,54.9,55.5,56.0,56.6,57.1,57.6,58.2,58.7,59.2,59.8,60.3,60.7,61.1,61.4,61.7,61.9,62.2,62.5,62.7,62.8,62.9,63.0,63.1,63.2,63.1,63.2,63.2,63.2,63.2,63.1,63.1,63.0,62.9]},"s70":{"final_psnr":20.171,"psnr_auc":18.447,"phi_min_deg":18.313,"phi_max_deg":66.761,"rim_frac":0.0,"view_coverage":0.235,"path_m":0.687,"limiter_frac":0.0,"speed_median_mps":0.023,"lon_bins":2.0,"final_completeness":1.0,"curve":[[0,16.89],[10,16.83],[20,16.75],[30,16.76],[40,16.94],[50,17.27],[60,17.71],[70,18.19],[80,18.65],[90,18.89],[100,19.03],[110,19.12],[120,19.22],[130,19.36],[140,19.47],[150,19.59],[160,19.55],[170,19.57],[180,19.58],[190,19.54],[200,19.64],[210,19.72],[220,19.81],[230,19.87],[240,20.0],[250,20.05],[260,20.08],[270,20.1],[280,20.1],[290,20.18],[299,20.17]],"phi":[66.8,65.8,64.9,64.0,63.2,62.4,61.5,60.6,59.8,58.8,58.0,57.1,56.2,55.3,54.4,53.5,52.7,51.9,51.0,50.1,49.3,48.5,47.7,47.0,46.2,45.5,44.8,44.0,43.2,42.5,41.6,40.8,40.0,39.3,38.5,37.7,36.8,36.1,35.4,34.7,33.9,33.1,32.3,31.5,30.6,29.8,28.9,28.0,27.1,26.2,25.4,24.5,23.5,22.5,21.7,21.0,20.3,19.7,19.1,18.7]}},"full_no_tangent":{"s20":{"final_psnr":22.497,"psnr_auc":18.417,"phi_min_deg":20.125,"phi_max_deg":65.339,"rim_frac":0.0,"view_coverage":0.22,"path_m":0.707,"limiter_frac":0.0,"speed_median_mps":0.024,"lon_bins":2.0,"final_completeness":1.0,"curve":[[0,12.99],[10,15.0],[20,15.66],[30,16.21],[40,16.76],[50,17.3],[60,17.88],[70,18.35],[80,18.66],[90,18.93],[100,19.14],[110,19.37],[120,19.6],[130,19.78],[140,20.0],[150,20.17],[160,20.37],[170,20.56],[180,20.73],[190,20.89],[200,21.09],[210,21.25],[220,21.43],[230,21.61],[240,21.75],[250,21.89],[260,22.02],[270,22.16],[280,22.28],[290,22.43],[299,22.5]],"phi":[20.1,21.0,21.7,22.4,23.0,23.6,24.3,25.0,25.8,26.6,27.3,28.0,28.8,29.5,30.2,31.0,31.8,32.6,33.4,34.1,34.9,35.7,36.5,37.2,38.0,38.7,39.5,40.3,41.0,41.8,42.6,43.4,44.1,44.8,45.6,46.4,47.2,48.0,48.7,49.4,50.2,51.0,51.7,52.5,53.2,53.9,54.7,55.5,56.4,57.3,58.0,58.8,59.5,60.2,61.0,61.8,62.5,63.3,64.0,64.8]},"s45":{"final_psnr":21.553,"psnr_auc":19.421,"phi_min_deg":36.361,"phi_max_deg":76.783,"rim_frac":0.0,"view_coverage":0.24,"path_m":0.659,"limiter_frac":0.0,"speed_median_mps":0.022,"lon_bins":2.0,"final_completeness":1.0,"curve":[[0,16.25],[10,16.83],[20,16.95],[30,17.12],[40,17.42],[50,17.87],[60,18.44],[70,18.97],[80,19.4],[90,19.78],[100,20.11],[110,20.42],[120,20.6],[130,20.81],[140,20.97],[150,21.1],[160,21.22],[170,21.31],[180,21.39],[190,21.46],[200,21.52],[210,21.56],[220,21.56],[230,21.45],[240,21.41],[250,21.4],[260,21.37],[270,21.39],[280,21.4],[290,21.46],[299,21.55]],"phi":[36.4,37.2,37.9,38.6,39.3,40.0,40.6,41.3,42.0,42.7,43.3,43.8,44.4,45.0,45.8,46.6,47.4,48.1,48.9,49.6,50.3,51.0,51.7,52.4,53.1,53.9,54.6,55.3,56.1,56.8,57.5,58.3,59.1,59.8,60.5,61.5,62.5,63.1,63.7,64.4,65.1,66.1,66.8,67.5,67.9,68.4,69.1,70.0,70.7,71.4,72.2,72.9,73.4,74.0,74.5,75.0,75.4,75.9,76.2,76.6]},"s70":{"final_psnr":20.994,"psnr_auc":18.689,"phi_min_deg":17.125,"phi_max_deg":66.734,"rim_frac":0.0,"view_coverage":0.225,"path_m":0.661,"limiter_frac":0.0,"speed_median_mps":0.023,"lon_bins":2.0,"final_completeness":1.0,"curve":[[0,16.97],[10,16.94],[20,16.71],[30,16.71],[40,16.88],[50,17.25],[60,17.69],[70,18.2],[80,18.62],[90,18.9],[100,19.2],[110,19.4],[120,19.58],[130,19.79],[140,19.96],[150,20.09],[160,20.16],[170,20.18],[180,20.22],[190,20.33],[200,20.37],[210,20.41],[220,20.53],[230,20.65],[240,20.69],[250,20.76],[260,20.81],[270,20.83],[280,20.87],[290,20.91],[299,20.99]],"phi":[66.7,65.7,64.8,63.9,63.1,62.3,61.4,60.6,59.6,58.7,57.8,56.9,56.0,55.0,54.2,53.2,52.3,51.3,50.4,49.5,48.6,47.7,46.8,45.8,44.9,43.9,43.0,42.0,41.1,40.1,39.3,38.3,37.4,36.5,35.6,34.8,33.8,32.9,32.0,31.1,30.2,29.3,28.5,27.6,26.8,25.9,25.0,24.2,23.3,22.4,21.5,20.8,20.2,19.6,19.1,18.7,18.3,17.9,17.6,17.3]}},"legacy":{"s20":{"final_psnr":19.762,"psnr_auc":18.446,"phi_min_deg":0.057,"phi_max_deg":24.714,"rim_frac":0.793,"view_coverage":0.105,"path_m":1.012,"limiter_frac":1.0,"speed_median_mps":0.05,"lon_bins":1.0,"final_completeness":0.999,"curve":[[0,12.95],[10,15.57],[20,16.49],[30,17.22],[40,17.77],[50,18.22],[60,18.57],[70,18.74],[80,18.9],[90,18.99],[100,19.16],[110,19.26],[120,19.41],[130,19.51],[140,19.6],[150,19.64],[160,19.65],[170,19.71],[180,19.77],[190,19.78],[200,19.74],[210,19.77],[220,19.77],[230,19.79],[240,19.8],[250,19.75],[260,19.76],[270,19.77],[280,19.8],[290,19.76],[299,19.76]],"phi":[20.1,21.3,22.5,23.6,24.5,24.0,22.9,21.7,20.4,19.2,17.9,16.6,15.3,14.0,12.9,11.7,10.5,9.4,8.2,7.0,5.7,4.5,3.8,2.7,1.3,0.6,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1]},"s45":{"final_psnr":21.152,"psnr_auc":19.803,"phi_min_deg":0.057,"phi_max_deg":36.961,"rim_frac":0.66,"view_coverage":0.163,"path_m":1.388,"limiter_frac":1.0,"speed_median_mps":0.05,"lon_bins":3.0,"final_completeness":1.0,"curve":[[0,16.27],[10,16.9],[20,17.12],[30,17.5],[40,18.17],[50,18.84],[60,19.53],[70,19.96],[80,20.26],[90,20.42],[100,20.55],[110,20.63],[120,20.86],[130,20.99],[140,21.15],[150,21.28],[160,21.37],[170,21.46],[180,21.36],[190,21.42],[200,21.42],[210,21.44],[220,21.44],[230,21.46],[240,21.42],[250,21.39],[260,21.34],[270,21.35],[280,21.25],[290,21.21],[299,21.15]],"phi":[36.4,37.0,36.1,35.0,33.9,32.7,31.6,30.4,29.2,28.1,26.9,25.8,24.7,23.9,22.8,21.5,20.3,19.0,17.8,16.5,15.3,14.1,12.8,11.5,10.3,9.1,7.9,6.7,5.5,4.3,4.1,3.0,1.8,0.6,0.2,0.1,0.1,0.1,0.3,1.1,1.8,0.8,0.2,0.4,0.1,0.1,0.1,0.1,0.1,0.1,0.5,0.1,0.1,0.1,0.1,0.1,0.1,0.5,0.1,0.5]},"s70":{"final_psnr":21.412,"psnr_auc":19.069,"phi_min_deg":0.057,"phi_max_deg":66.75,"rim_frac":0.447,"view_coverage":0.26,"path_m":1.465,"limiter_frac":1.0,"speed_median_mps":0.05,"lon_bins":4.0,"final_completeness":1.0,"curve":[[0,16.89],[10,16.89],[20,16.86],[30,17.13],[40,17.73],[50,18.48],[60,18.85],[70,19.11],[80,19.24],[90,19.31],[100,19.46],[110,19.64],[120,19.79],[130,19.83],[140,19.89],[150,20.05],[160,20.27],[170,20.44],[180,20.7],[190,20.82],[200,20.82],[210,20.9],[220,20.98],[230,21.04],[240,21.12],[250,21.19],[260,21.32],[270,21.32],[280,21.34],[290,21.4],[299,21.41]],"phi":[66.8,64.9,63.0,61.2,59.4,57.5,55.7,54.0,52.1,50.5,48.8,47.2,45.6,44.0,42.5,41.0,39.5,38.2,36.7,35.3,33.8,32.3,30.9,29.4,28.0,26.7,25.2,23.8,22.3,20.9,19.5,18.1,16.7,15.2,13.8,12.9,11.5,10.1,8.8,7.4,6.0,4.6,3.7,2.8,1.4,0.6,0.1,0.6,1.4,1.2,0.4,0.8,0.1,0.1,0.6,2.0,2.7,1.4,0.1,0.1]}},"tangent_only":{"s20":{"final_psnr":20.015,"psnr_auc":18.375,"phi_min_deg":0.057,"phi_max_deg":25.161,"rim_frac":0.777,"view_coverage":0.11,"path_m":1.184,"limiter_frac":1.0,"speed_median_mps":0.05,"lon_bins":2.0,"final_completeness":0.998,"curve":[[0,12.95],[10,15.52],[20,16.4],[30,17.22],[40,17.87],[50,18.36],[60,18.69],[70,18.78],[80,18.79],[90,18.82],[100,18.76],[110,18.85],[120,18.96],[130,19.27],[140,19.49],[150,19.59],[160,19.68],[170,19.77],[180,19.85],[190,19.89],[200,19.93],[210,19.97],[220,20.0],[230,20.03],[240,20.03],[250,20.04],[260,20.07],[270,20.04],[280,20.04],[290,20.04],[299,20.01]],"phi":[20.1,21.3,22.4,23.5,24.5,25.1,24.1,23.0,21.8,20.6,19.3,18.0,16.6,15.3,14.1,12.8,11.6,10.5,9.3,8.2,7.0,5.7,4.5,3.2,2.0,0.8,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1]},"s45":{"final_psnr":21.61,"psnr_auc":19.925,"phi_min_deg":0.057,"phi_max_deg":36.911,"rim_frac":0.653,"view_coverage":0.175,"path_m":1.359,"limiter_frac":1.0,"speed_median_mps":0.05,"lon_bins":4.0,"final_completeness":1.0,"curve":[[0,16.24],[10,16.87],[20,17.09],[30,17.5],[40,18.24],[50,18.97],[60,19.71],[70,20.08],[80,20.36],[90,20.64],[100,20.77],[110,20.93],[120,21.13],[130,21.22],[140,21.22],[150,21.33],[160,21.45],[170,21.51],[180,21.59],[190,21.63],[200,21.71],[210,21.74],[220,21.74],[230,21.75],[240,21.71],[250,21.72],[260,21.7],[270,21.68],[280,21.64],[290,21.63],[299,21.61]],"phi":[36.4,36.3,35.2,34.2,33.1,32.1,31.0,30.0,28.9,27.8,26.8,25.7,24.7,23.5,22.3,21.2,20.1,19.0,17.9,16.8,15.8,14.7,13.7,13.1,12.0,10.8,9.6,8.4,7.2,5.9,4.8,4.2,3.1,2.0,1.0,0.7,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.6,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.7]},"s70":{"final_psnr":21.823,"psnr_auc":19.442,"phi_min_deg":0.057,"phi_max_deg":66.739,"rim_frac":0.39,"view_coverage":0.273,"path_m":1.441,"limiter_frac":1.0,"speed_median_mps":0.05,"lon_bins":4.0,"final_completeness":1.0,"curve":[[0,16.9],[10,16.91],[20,16.87],[30,17.12],[40,17.57],[50,18.27],[60,18.96],[70,19.37],[80,19.7],[90,19.84],[100,20.04],[110,20.2],[120,20.34],[130,20.58],[140,20.77],[150,20.96],[160,21.04],[170,21.08],[180,21.13],[190,21.21],[200,21.25],[210,21.3],[220,21.39],[230,21.43],[240,21.48],[250,21.51],[260,21.6],[270,21.65],[280,21.68],[290,21.72],[299,21.82]],"phi":[66.7,65.3,63.8,62.4,60.9,59.4,57.8,56.3,54.8,53.2,51.6,50.1,48.6,47.1,45.7,44.2,42.7,42.0,40.5,39.1,37.8,36.4,35.0,33.7,32.3,31.0,29.7,28.3,26.9,25.4,24.0,22.6,21.2,19.8,18.5,17.1,15.7,14.3,13.0,11.6,10.2,8.9,7.5,6.1,4.8,3.4,2.0,0.5,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.3,0.1,0.4]}}},"noground":{"full":{"s20":{"final_psnr":19.525,"psnr_auc":16.07,"phi_min_deg":25.196,"phi_max_deg":77.147,"rim_frac":0.0,"view_coverage":0.287,"path_m":0.699,"limiter_frac":0.0,"speed_median_mps":0.023,"lon_bins":6.0,"final_completeness":1.0,"curve":[[0,11.53],[10,12.84],[20,13.37],[30,13.96],[40,14.49],[50,15.0],[60,15.56],[70,15.91],[80,16.27],[90,16.55],[100,16.78],[110,17.02],[120,17.18],[130,17.37],[140,17.52],[150,17.66],[160,17.84],[170,18.0],[180,18.18],[190,18.32],[200,18.42],[210,18.52],[220,18.64],[230,18.77],[240,18.88],[250,18.95],[260,19.01],[270,19.13],[280,19.28],[290,19.42],[299,19.53]],"phi":[25.2,26.4,27.6,28.6,29.5,30.6,31.6,32.6,33.7,34.9,36.0,37.1,38.2,39.3,40.5,41.7,42.9,44.0,45.2,46.3,47.4,48.5,49.5,50.6,51.7,52.8,54.0,55.1,56.1,57.3,58.5,59.6,60.7,61.9,63.0,64.1,65.2,66.3,67.4,68.5,69.5,70.5,71.6,72.7,73.6,74.4,75.0,75.5,75.9,76.3,76.5,76.7,76.9,77.0,77.1,77.1,77.1,77.1,77.0,76.7]},"s45":{"final_psnr":20.553,"psnr_auc":17.086,"phi_min_deg":52.521,"phi_max_deg":72.997,"rim_frac":0.0,"view_coverage":0.312,"path_m":0.72,"limiter_frac":0.0,"speed_median_mps":0.024,"lon_bins":7.0,"final_completeness":1.0,"curve":[[0,12.98],[10,14.15],[20,14.31],[30,14.52],[40,14.81],[50,15.26],[60,15.92],[70,16.58],[80,17.13],[90,17.57],[100,17.88],[110,18.19],[120,18.42],[130,18.63],[140,18.8],[150,18.97],[160,19.16],[170,19.32],[180,19.49],[190,19.62],[200,19.71],[210,19.85],[220,19.95],[230,20.05],[240,20.17],[250,20.23],[260,20.32],[270,20.39],[280,20.45],[290,20.51],[299,20.55]],"phi":[52.5,53.7,54.7,55.7,56.6,57.5,58.4,59.3,60.3,61.3,62.3,63.2,64.3,65.2,66.2,67.1,67.9,68.7,69.4,70.0,70.5,71.0,71.5,72.0,72.4,72.7,72.8,72.9,73.0,73.0,73.0,72.9,72.7,72.5,72.2,71.9,71.5,71.1,70.6,70.0,69.5,68.9,68.2,67.6,66.7,66.2,65.5,64.8,64.1,63.2,62.4,61.5,60.7,59.8,59.0,58.2,57.4,56.6,55.7,54.8]},"s70":{"final_psnr":20.261,"psnr_auc":17.806,"phi_min_deg":26.037,"phi_max_deg":72.141,"rim_frac":0.0,"view_coverage":0.265,"path_m":0.716,"limiter_frac":0.0,"speed_median_mps":0.024,"lon_bins":3.0,"final_completeness":1.0,"curve":[[0,15.11],[10,15.62],[20,15.56],[30,15.58],[40,15.86],[50,16.29],[60,16.89],[70,17.45],[80,17.89],[90,18.3],[100,18.56],[110,18.78],[120,18.92],[130,19.04],[140,19.13],[150,19.24],[160,19.34],[170,19.42],[180,19.52],[190,19.61],[200,19.69],[210,19.78],[220,19.82],[230,19.91],[240,19.97],[250,20.03],[260,20.09],[270,20.16],[280,20.18],[290,20.19],[299,20.26]],"phi":[72.1,71.0,70.0,69.0,68.2,67.4,66.5,65.6,64.6,63.7,62.7,61.8,60.8,59.8,58.8,57.9,57.0,56.1,55.2,54.3,53.4,52.5,51.7,50.9,50.1,49.3,48.7,48.1,47.4,46.8,46.0,45.1,44.0,42.9,42.1,41.4,40.6,39.9,39.2,38.4,37.6,36.9,36.2,35.5,34.9,34.4,33.8,33.2,32.6,32.0,31.5,31.0,30.5,30.0,29.5,28.9,28.3,27.7,27.1,26.5]}},"legacy":{"s20":{"final_psnr":18.65,"psnr_auc":16.657,"phi_min_deg":25.208,"phi_max_deg":64.729,"rim_frac":0.0,"view_coverage":0.228,"path_m":0.524,"limiter_frac":0.063,"speed_median_mps":0.012,"lon_bins":1.0,"final_completeness":1.0,"curve":[[0,11.47],[10,13.41],[20,14.4],[30,15.09],[40,15.79],[50,16.2],[60,16.54],[70,16.83],[80,17.12],[90,17.27],[100,17.41],[110,17.53],[120,17.62],[130,17.77],[140,17.85],[150,17.99],[160,18.09],[170,18.21],[180,18.24],[190,18.32],[200,18.39],[210,18.43],[220,18.47],[230,18.5],[240,18.52],[250,18.54],[260,18.55],[270,18.59],[280,18.61],[290,18.62],[299,18.65]],"phi":[25.2,27.0,28.8,30.8,32.8,34.8,36.8,38.6,40.3,41.9,43.4,44.9,46.5,47.8,49.0,50.4,51.8,52.5,53.1,53.6,54.0,54.5,55.0,55.7,56.3,56.9,57.7,58.3,58.7,59.4,59.4,59.9,60.2,60.8,61.5,61.4,61.5,61.6,62.1,62.0,62.0,62.0,62.0,62.0,62.0,61.9,62.0,62.0,61.9,62.0,62.0,62.0,61.9,62.2,62.5,62.8,63.1,63.5,63.8,64.2]},"s45":{"final_psnr":19.657,"psnr_auc":17.504,"phi_min_deg":52.554,"phi_max_deg":89.944,"rim_frac":0.0,"view_coverage":0.23,"path_m":0.424,"limiter_frac":0.043,"speed_median_mps":0.01,"lon_bins":2.0,"final_completeness":1.0,"curve":[[0,12.97],[10,14.28],[20,14.57],[30,15.08],[40,15.77],[50,16.49],[60,17.11],[70,17.62],[80,17.95],[90,18.28],[100,18.45],[110,18.64],[120,18.8],[130,18.93],[140,19.01],[150,19.08],[160,19.18],[170,19.24],[180,19.3],[190,19.34],[200,19.33],[210,19.38],[220,19.46],[230,19.5],[240,19.58],[250,19.63],[260,19.64],[270,19.68],[280,19.68],[290,19.66],[299,19.66]],"phi":[52.6,53.9,56.0,58.1,60.0,61.9,63.5,65.0,66.4,67.7,68.8,69.8,70.8,71.8,72.6,73.4,74.2,75.0,75.7,76.3,76.9,77.6,78.2,78.8,79.4,79.9,80.4,81.0,81.4,81.9,82.3,82.7,83.1,83.5,83.9,84.4,84.7,85.1,85.5,85.9,86.2,86.5,86.9,87.3,87.6,87.9,88.2,88.5,88.8,89.1,89.3,89.6,89.9,89.9,89.9,89.9,89.9,89.9,89.9,89.9]},"s70":{"final_psnr":19.691,"psnr_auc":18.08,"phi_min_deg":31.45,"phi_max_deg":72.148,"rim_frac":0.0,"view_coverage":0.22,"path_m":0.493,"limiter_frac":0.033,"speed_median_mps":0.013,"lon_bins":1.0,"final_completeness":1.0,"curve":[[0,15.13],[10,15.75],[20,15.91],[30,16.29],[40,16.81],[50,17.39],[60,17.84],[70,18.2],[80,18.51],[90,18.66],[100,18.81],[110,18.94],[120,19.02],[130,19.07],[140,19.15],[150,19.19],[160,19.22],[170,19.21],[180,19.21],[190,19.27],[200,19.32],[210,19.37],[220,19.37],[230,19.42],[240,19.48],[250,19.48],[260,19.51],[270,19.59],[280,19.67],[290,19.68],[299,19.69]],"phi":[72.1,70.2,68.2,66.2,64.5,63.0,61.6,60.4,59.3,58.2,57.2,56.3,55.4,54.5,53.7,52.9,52.2,51.6,50.9,50.2,49.6,49.0,48.4,47.8,47.2,46.6,46.1,45.6,45.1,44.6,44.1,43.7,43.2,42.7,42.2,41.6,41.1,40.6,40.2,39.7,39.3,38.8,38.3,37.8,37.2,36.7,36.2,35.7,35.3,34.9,34.5,34.2,33.8,33.4,33.1,32.8,32.5,32.2,31.9,31.7]}}}},"eps":{"0.01":[{"start":"s20","rep":"r1","final_psnr":22.69,"psnr_auc":19.59,"cov":0.215,"path":0.71,"phi_max":64.8,"curve":[12.69,14.74,15.46,16.06,16.65,17.26,17.92,18.41,18.74,19.05,19.31,19.51,19.71,19.89,20.08,20.27,20.42,20.64,20.83,21.02,21.19,21.36,21.54,21.68,21.87,22.0,22.15,22.31,22.43,22.58],"phi":[20.1,21.0,21.7,22.4,23.0,23.6,24.4,25.1,25.9,26.7,27.3,28.1,28.9,29.6,30.3,31.1,31.9,32.7,33.5,34.2,35.0,35.8,36.5,37.3,38.1,38.8,39.6,40.3,41.0,41.8,42.7,43.5,44.3,45.0,45.8,46.6,47.4,48.1,48.9,49.6,50.3,51.0,51.7,52.4,53.2,53.9,54.7,55.5,56.4,57.3,58.0,58.8,59.5,60.2,60.9,61.7,62.4,63.1,63.7,64.4],"g0":966448.0},{"start":"s20","rep":"r2","final_psnr":22.38,"psnr_auc":19.56,"cov":0.22,"path":0.71,"phi_max":65.3,"curve":[13.09,15.02,15.72,16.24,16.79,17.33,17.89,18.34,18.66,18.96,19.17,19.39,19.61,19.83,20.02,20.17,20.38,20.57,20.75,20.95,21.14,21.3,21.46,21.58,21.75,21.9,22.0,22.12,22.23,22.29],"phi":[20.1,21.0,21.7,22.4,23.0,23.6,24.3,25.0,25.8,26.5,27.3,28.0,28.8,29.5,30.3,31.1,31.8,32.6,33.4,34.1,34.9,35.7,36.4,37.2,37.9,38.7,39.5,40.3,41.0,41.7,42.5,43.3,44.1,44.9,45.6,46.4,47.2,47.9,48.7,49.4,50.1,50.9,51.6,52.4,53.1,53.9,54.6,55.4,56.3,57.2,57.9,58.7,59.4,60.3,61.0,61.8,62.5,63.2,64.0,64.7],"g0":1325947.0},{"start":"s20","rep":"r3","final_psnr":22.19,"psnr_auc":19.47,"cov":0.223,"path":0.71,"phi_max":65.1,"curve":[12.83,14.9,15.55,16.17,16.7,17.3,17.87,18.35,18.69,18.88,19.09,19.36,19.58,19.79,20.0,20.16,20.33,20.51,20.69,20.87,21.05,21.24,21.37,21.53,21.65,21.77,21.89,21.94,22.0,22.13],"phi":[20.1,21.0,21.7,22.4,23.1,23.7,24.3,25.1,25.8,26.6,27.3,28.1,28.8,29.5,30.2,31.0,31.7,32.5,33.2,33.9,34.7,35.5,36.3,37.0,37.7,38.4,39.2,40.0,40.7,41.4,42.2,42.9,43.7,44.5,45.3,46.0,46.9,47.6,48.4,49.1,49.8,50.5,51.3,52.0,52.8,53.5,54.3,55.1,55.9,56.7,57.6,58.4,59.2,59.9,60.7,61.4,62.3,63.1,63.8,64.5],"g0":979849.0},{"start":"s45","rep":"r1","final_psnr":22.15,"psnr_auc":20.16,"cov":0.247,"path":0.72,"phi_max":59.2,"curve":[16.19,16.77,16.85,17.01,17.29,17.77,18.37,19.0,19.5,19.89,20.22,20.43,20.66,20.8,20.96,21.03,21.06,21.06,21.1,21.24,21.33,21.4,21.52,21.67,21.85,21.92,21.97,21.99,21.99,22.05],"phi":[36.4,37.1,37.8,38.5,39.1,39.7,40.3,40.9,41.7,42.4,43.0,43.7,44.5,45.4,46.1,46.8,47.5,48.2,48.8,49.5,50.1,50.7,51.4,52.0,52.5,53.0,53.5,53.9,54.3,54.8,55.2,55.6,56.0,56.3,56.6,56.8,57.1,57.2,57.4,57.6,57.8,58.0,58.2,58.3,58.3,58.4,58.5,58.4,58.3,58.3,58.3,58.5,58.7,58.9,58.9,59.1,59.1,59.2,59.2,59.1],"g0":201952.0},{"start":"s45","rep":"r2","final_psnr":21.25,"psnr_auc":19.85,"cov":0.242,"path":0.72,"phi_max":74.2,"curve":[16.35,16.88,16.94,17.08,17.3,17.68,18.2,18.67,19.1,19.45,19.76,20.03,20.25,20.45,20.6,20.74,20.85,20.92,20.95,21.0,21.1,21.16,21.2,21.23,21.24,21.25,21.27,21.33,21.28,21.25],"phi":[36.4,37.2,37.9,38.6,39.2,39.9,40.5,41.1,41.8,42.3,42.7,43.0,43.4,43.8,44.2,44.7,45.1,45.6,46.1,46.6,47.2,47.7,48.2,48.8,49.3,49.8,50.3,50.9,51.6,52.5,53.6,54.6,55.4,56.2,56.9,57.6,58.4,59.1,60.1,60.8,61.8,62.4,63.0,63.6,64.4,65.0,65.6,66.0,66.7,67.1,67.5,68.0,68.6,69.4,70.1,70.9,71.6,72.4,73.1,73.7],"g0":333928.0},{"start":"s45","rep":"r3","final_psnr":21.53,"psnr_auc":19.75,"cov":0.247,"path":0.73,"phi_max":62.8,"curve":[16.34,16.88,16.96,17.09,17.35,17.78,18.31,18.78,19.13,19.47,19.75,19.96,20.16,20.32,20.45,20.5,20.56,20.64,20.68,20.76,20.82,20.8,20.77,20.89,21.02,21.09,21.19,21.26,21.32,21.4],"phi":[36.4,37.2,37.9,38.5,39.2,39.9,40.6,41.2,41.9,42.5,43.0,43.3,43.7,44.0,44.4,45.0,45.6,46.3,46.9,47.4,48.1,48.7,49.4,50.1,50.7,51.4,52.2,53.1,54.0,54.8,55.5,56.2,56.9,57.6,58.3,59.0,59.7,60.2,60.7,61.2,61.8,62.4,62.8,62.2,61.4,61.2,61.0,61.1,61.1,61.3,61.4,61.5,61.5,61.6,61.6,61.7,61.7,61.7,61.7,61.6],"g0":257610.0},{"start":"s70","rep":"r1","final_psnr":21.0,"psnr_auc":19.21,"cov":0.24,"path":0.7,"phi_max":66.7,"curve":[16.74,16.78,16.57,16.55,16.74,17.1,17.44,17.89,18.29,18.67,19.01,19.26,19.4,19.51,19.66,19.78,19.88,20.0,20.14,20.28,20.36,20.41,20.5,20.55,20.59,20.68,20.76,20.84,20.88,20.96],"phi":[66.7,65.7,64.9,64.0,63.2,62.4,61.5,60.7,59.8,58.9,58.0,57.0,56.1,55.1,54.2,53.3,52.4,51.5,50.6,49.7,48.8,48.0,47.2,46.4,45.7,45.0,44.3,43.7,43.0,42.4,41.7,41.0,40.3,39.7,39.0,38.3,37.7,37.0,36.4,35.7,35.0,34.3,33.5,32.7,31.9,31.1,30.2,29.3,28.3,27.4,26.5,25.6,24.7,23.7,22.8,21.9,21.1,20.4,19.8,19.2],"g0":-348495.0},{"start":"s70","rep":"r2","final_psnr":20.78,"psnr_auc":19.35,"cov":0.235,"path":0.69,"phi_max":66.7,"curve":[17.08,17.0,16.89,16.94,17.11,17.41,17.81,18.18,18.59,19.04,19.35,19.55,19.74,19.92,20.0,20.06,20.11,20.2,20.16,20.27,20.3,20.35,20.42,20.46,20.48,20.54,20.61,20.73,20.65,20.66],"phi":[66.7,65.7,64.8,63.9,63.1,62.3,61.4,60.6,59.7,58.8,57.9,57.0,56.1,55.2,54.3,53.3,52.4,51.5,50.6,49.8,48.9,48.1,47.4,46.6,45.8,45.1,44.3,43.6,42.9,42.2,41.4,40.8,40.0,39.3,38.7,38.0,37.3,36.5,35.7,35.0,34.2,33.4,32.5,31.6,30.7,29.9,29.0,28.2,27.4,26.6,25.7,24.7,23.8,22.8,21.9,21.1,20.4,19.8,19.2,18.8],"g0":-254462.0},{"start":"s70","rep":"r3","final_psnr":21.26,"psnr_auc":19.46,"cov":0.242,"path":0.7,"phi_max":66.7,"curve":[17.12,17.1,16.95,17.05,17.28,17.64,18.06,18.47,18.93,19.1,19.28,19.4,19.42,19.61,19.75,19.92,20.01,20.16,20.3,20.37,20.43,20.4,20.4,20.5,20.75,20.89,20.99,21.11,21.16,21.17],"phi":[66.7,65.7,64.8,63.9,63.1,62.3,61.5,60.7,59.8,58.9,58.0,57.2,56.3,55.5,54.7,53.9,53.1,52.3,51.5,50.7,49.9,49.1,48.4,47.6,46.8,46.0,45.3,44.6,43.8,43.0,42.3,41.6,40.8,40.0,39.2,38.4,37.6,36.9,36.1,35.4,34.6,33.9,33.1,32.4,31.6,30.8,30.0,29.3,28.5,27.7,26.9,26.0,25.2,24.3,23.3,22.3,21.5,20.7,20.0,19.4],"g0":-289230.0}],"0.05":[{"start":"s20","rep":"r1","final_psnr":22.0,"psnr_auc":19.05,"cov":0.205,"path":0.69,"phi_max":59.7,"curve":[12.65,14.75,15.33,15.91,16.46,16.93,17.44,17.79,18.17,18.42,18.63,18.83,19.0,19.2,19.41,19.61,19.81,19.99,20.15,20.32,20.55,20.7,20.88,21.05,21.22,21.39,21.56,21.67,21.77,21.9],"phi":[20.1,20.4,21.2,21.7,22.1,22.6,23.0,23.3,23.7,23.9,24.2,24.5,25.0,25.5,26.2,26.8,27.5,28.3,29.0,29.6,30.2,31.2,31.9,32.6,33.3,34.0,34.7,35.6,36.2,36.8,37.6,38.4,39.4,40.0,40.5,41.1,41.9,42.6,43.3,44.1,44.8,45.5,46.3,47.0,47.8,48.5,49.1,49.8,50.6,51.3,52.0,52.7,53.5,54.3,55.1,55.8,56.6,57.4,58.2,59.0],"g0":-57138808.0},{"start":"s20","rep":"r2","final_psnr":17.17,"psnr_auc":16.57,"cov":0.077,"path":0.08,"phi_max":20.1,"curve":[12.69,14.42,14.98,15.36,15.8,16.09,16.33,16.54,16.71,16.81,16.93,16.96,17.0,17.01,17.02,17.04,17.04,17.04,17.06,17.06,17.08,17.11,17.11,17.11,17.13,17.15,17.14,17.15,17.17,17.16],"phi":[20.1,19.6,19.3,18.9,18.6,18.3,18.0,17.6,17.3,17.1,16.9,16.7,16.6,16.4,16.3,16.2,16.1,16.0,15.9,15.8,15.7,15.6,15.6,15.5,15.5,15.4,15.4,15.3,15.3,15.3,15.3,15.2,15.2,15.2,15.2,15.2,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0],"g0":-18528620.0},{"start":"s20","rep":"r3","final_psnr":17.17,"psnr_auc":16.7,"cov":0.077,"path":0.08,"phi_max":20.1,"curve":[13.24,14.88,15.4,15.78,16.08,16.28,16.46,16.6,16.77,16.87,16.93,16.99,17.03,17.07,17.08,17.12,17.14,17.14,17.17,17.18,17.2,17.21,17.2,17.2,17.18,17.18,17.17,17.17,17.16,17.16],"phi":[20.1,19.7,19.2,18.9,18.6,18.3,18.0,17.7,17.5,17.2,17.0,16.8,16.6,16.5,16.3,16.2,16.1,16.0,15.9,15.8,15.7,15.7,15.6,15.6,15.5,15.5,15.4,15.4,15.3,15.3,15.3,15.2,15.2,15.2,15.2,15.2,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0],"g0":-57677380.0},{"start":"s45","rep":"r1","final_psnr":21.82,"psnr_auc":20.02,"cov":0.265,"path":0.69,"phi_max":60.1,"curve":[16.32,16.87,16.98,17.14,17.46,17.88,18.41,18.91,19.33,19.66,19.94,20.16,20.37,20.54,20.69,20.8,20.9,20.97,21.08,21.19,21.25,21.34,21.42,21.5,21.5,21.53,21.55,21.58,21.58,21.7],"phi":[36.4,37.2,37.7,38.2,39.1,39.8,40.4,41.1,41.7,42.2,42.7,43.4,43.9,44.4,44.9,45.6,46.2,46.7,47.3,47.9,48.5,49.0,49.4,49.8,50.2,50.6,51.2,51.7,52.4,52.9,53.4,53.8,54.2,54.6,54.9,55.2,55.6,55.9,56.2,56.5,56.8,57.1,57.3,57.6,57.8,58.0,58.1,58.2,58.4,58.5,58.6,58.8,58.9,59.0,59.2,59.3,59.5,59.6,59.8,59.9],"g0":7438267.0},{"start":"s45","rep":"r2","final_psnr":21.95,"psnr_auc":19.91,"cov":0.263,"path":0.69,"phi_max":59.9,"curve":[16.27,16.77,16.93,17.06,17.31,17.7,18.21,18.72,19.16,19.52,19.78,19.98,20.18,20.37,20.49,20.63,20.72,20.85,20.92,21.01,21.07,21.17,21.25,21.39,21.45,21.52,21.58,21.67,21.79,21.86],"phi":[36.3,36.7,37.2,37.7,38.2,38.7,39.2,39.7,40.2,40.6,41.1,41.6,42.2,42.8,43.4,43.9,44.2,44.5,44.8,45.1,45.3,45.6,45.9,46.2,46.5,46.8,47.2,47.5,47.9,48.2,48.6,49.0,49.4,49.8,50.1,50.5,50.8,51.2,51.5,51.9,52.3,52.7,53.0,53.4,53.7,54.1,54.4,54.8,55.1,55.5,55.9,56.4,56.8,57.2,57.6,58.0,58.4,58.8,59.2,59.6],"g0":1978241.0},{"start":"s45","rep":"r3","final_psnr":21.43,"psnr_auc":19.81,"cov":0.258,"path":0.7,"phi_max":64.7,"curve":[16.33,16.81,16.95,17.1,17.4,17.83,18.33,18.83,19.22,19.57,19.79,19.96,20.12,20.28,20.43,20.52,20.62,20.71,20.77,20.83,20.92,20.99,21.04,21.12,21.18,21.19,21.25,21.27,21.33,21.45],"phi":[36.3,36.8,37.3,37.8,38.2,38.7,39.3,39.7,40.0,40.5,41.0,41.4,41.8,42.2,42.6,43.0,43.3,43.6,44.0,44.3,44.7,45.0,45.4,45.7,46.0,46.3,46.7,47.1,47.5,48.0,48.5,49.1,49.6,50.1,50.6,51.1,51.6,52.1,52.7,53.2,53.7,54.3,54.8,55.3,55.7,56.2,56.7,57.2,57.7,58.3,58.9,59.5,60.1,60.6,61.2,61.7,62.2,62.8,63.4,64.1],"g0":-3304748.0},{"start":"s70","rep":"r1","final_psnr":21.32,"psnr_auc":19.53,"cov":0.285,"path":0.71,"phi_max":68.0,"curve":[16.99,17.06,16.97,17.1,17.43,17.91,18.46,18.93,19.31,19.54,19.69,19.79,19.9,20.04,20.1,20.14,20.09,20.07,20.04,20.06,20.18,20.17,20.22,20.31,20.57,20.78,20.85,20.91,21.05,21.16],"phi":[66.7,66.8,66.8,67.0,67.1,67.1,67.3,67.5,67.8,68.0,68.0,68.0,68.0,68.0,67.8,67.7,67.5,67.3,67.1,66.8,66.4,66.1,65.7,65.3,64.9,64.4,63.9,63.3,62.8,62.2,61.6,61.0,60.3,59.7,59.0,58.3,57.6,56.9,56.1,55.3,54.5,53.7,52.9,52.0,51.2,50.3,49.3,48.4,47.5,46.6,45.7,44.8,44.0,43.1,42.2,41.2,40.3,39.4,38.6,37.6],"g0":33110.0},{"start":"s70","rep":"r2","final_psnr":20.11,"psnr_auc":18.82,"cov":0.297,"path":0.72,"phi_max":66.7,"curve":[16.97,16.99,16.83,16.86,17.08,17.41,17.75,18.02,18.26,18.41,18.57,18.69,18.77,18.86,18.91,19.0,19.13,19.28,19.44,19.62,19.81,19.86,19.89,19.9,19.94,19.98,20.03,20.06,20.07,20.09],"phi":[66.7,65.9,65.4,64.9,64.6,64.3,64.2,64.1,63.9,63.8,63.5,63.3,63.1,62.9,62.7,62.6,62.4,62.2,61.9,61.6,61.4,61.1,60.6,60.2,59.8,59.4,59.0,58.6,58.2,57.8,57.3,56.8,56.3,55.6,54.9,54.3,53.7,53.1,52.4,51.7,51.1,50.4,49.7,48.9,48.1,47.3,46.3,45.4,44.5,43.7,42.9,42.0,41.2,40.3,39.4,38.4,37.5,36.6,35.6,34.6],"g0":-305128.0},{"start":"s70","rep":"r3","final_psnr":19.84,"psnr_auc":18.75,"cov":0.25,"path":0.71,"phi_max":66.7,"curve":[17.06,17.07,16.86,16.87,17.12,17.48,17.92,18.27,18.6,18.97,19.17,19.25,19.23,19.22,19.17,19.12,19.14,19.13,19.1,19.12,19.19,19.24,19.22,19.32,19.41,19.5,19.56,19.66,19.71,19.79],"phi":[66.7,65.8,65.1,64.4,63.6,62.9,62.1,61.5,60.9,60.2,59.3,58.6,57.6,56.9,56.1,55.1,54.5,53.9,53.4,52.7,52.1,51.5,50.9,50.3,49.6,49.0,48.4,47.8,47.1,46.4,45.8,45.2,44.5,43.8,43.2,42.5,41.8,41.1,40.4,39.6,38.9,38.2,37.4,36.5,35.7,34.8,34.0,33.2,32.4,31.1,30.1,29.3,28.5,27.7,26.7,25.7,24.7,23.7,22.8,21.9],"g0":-848361.0}],"0.1":[{"start":"s20","rep":"r1","final_psnr":17.36,"psnr_auc":16.59,"cov":0.077,"path":0.09,"phi_max":20.1,"curve":[12.64,14.08,14.72,15.29,15.65,15.95,16.23,16.46,16.59,16.72,16.79,16.87,16.91,16.97,17.03,17.07,17.12,17.18,17.21,17.26,17.26,17.27,17.28,17.26,17.28,17.29,17.31,17.33,17.33,17.35],"phi":[20.1,19.7,19.3,19.0,18.7,18.4,18.0,17.8,17.6,17.4,17.2,17.0,16.8,16.6,16.4,16.3,16.2,16.1,16.0,15.9,15.8,15.7,15.7,15.6,15.5,15.5,15.5,15.4,15.4,15.3,15.3,15.3,15.2,15.2,15.2,15.2,15.2,15.2,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0],"g0":-660462464.0},{"start":"s20","rep":"r2","final_psnr":17.13,"psnr_auc":16.54,"cov":0.077,"path":0.09,"phi_max":20.1,"curve":[12.8,14.47,15.09,15.49,15.86,16.15,16.4,16.58,16.67,16.74,16.81,16.87,16.88,16.91,16.92,16.93,16.93,16.97,16.97,16.99,17.02,17.03,17.05,17.08,17.08,17.08,17.08,17.09,17.09,17.11],"phi":[20.1,19.7,19.3,18.9,18.6,18.3,18.0,17.7,17.4,17.2,17.0,16.8,16.6,16.5,16.3,16.2,16.1,16.0,15.9,15.8,15.7,15.7,15.6,15.5,15.5,15.4,15.4,15.4,15.3,15.3,15.3,15.2,15.2,15.2,15.2,15.2,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0],"g0":-265621296.0},{"start":"s20","rep":"r3","final_psnr":17.42,"psnr_auc":16.6,"cov":0.077,"path":0.09,"phi_max":20.1,"curve":[12.79,14.35,14.87,15.35,15.74,15.97,16.17,16.32,16.47,16.63,16.75,16.81,16.86,16.93,16.94,16.96,17.03,17.09,17.15,17.19,17.24,17.27,17.31,17.35,17.37,17.39,17.39,17.39,17.38,17.4],"phi":[20.1,19.7,19.3,19.0,18.7,18.4,18.0,17.8,17.6,17.3,17.1,16.9,16.7,16.5,16.4,16.2,16.1,16.0,15.9,15.9,15.8,15.7,15.6,15.6,15.5,15.5,15.4,15.4,15.4,15.3,15.3,15.3,15.2,15.2,15.2,15.2,15.2,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0],"g0":-715790656.0},{"start":"s45","rep":"r1","final_psnr":21.6,"psnr_auc":19.69,"cov":0.263,"path":0.68,"phi_max":57.8,"curve":[16.38,16.85,16.96,17.04,17.25,17.63,18.13,18.71,19.16,19.52,19.81,20.05,20.22,20.31,20.43,20.39,20.34,20.36,20.43,20.5,20.64,20.69,20.78,20.9,21.0,21.02,21.14,21.25,21.37,21.48],"phi":[36.4,36.4,37.1,37.8,38.5,39.1,39.6,40.1,40.6,41.1,41.5,42.1,42.6,43.0,43.5,44.1,44.6,45.0,45.5,45.9,46.4,46.8,47.2,47.6,48.0,48.5,48.9,49.3,49.7,50.1,50.4,50.8,51.1,51.4,51.7,52.1,52.4,52.6,52.9,53.1,53.4,53.6,53.8,54.1,54.3,54.5,54.7,54.8,55.0,55.1,55.3,55.4,55.7,55.9,56.1,56.4,56.6,56.9,57.3,57.6],"g0":-22466450.0},{"start":"s45","rep":"r2","final_psnr":21.46,"psnr_auc":19.46,"cov":0.255,"path":0.68,"phi_max":57.4,"curve":[16.33,16.72,16.78,16.91,17.12,17.45,17.93,18.34,18.65,18.97,19.23,19.37,19.56,19.81,19.97,20.08,20.19,20.34,20.41,20.48,20.58,20.64,20.72,20.78,20.89,20.96,21.07,21.13,21.2,21.31],"phi":[36.4,35.8,35.7,36.4,37.2,38.0,38.7,39.3,39.8,40.2,40.6,41.1,41.5,41.9,42.3,42.7,43.2,43.7,44.2,44.8,45.2,45.5,45.8,46.2,46.5,46.8,47.1,47.4,47.7,48.0,48.3,48.6,49.0,49.4,49.7,50.0,50.3,50.6,50.9,51.2,51.5,51.9,52.3,52.6,53.0,53.2,53.5,53.8,54.1,54.3,54.6,54.8,55.1,55.4,55.7,56.0,56.2,56.5,56.8,57.1],"g0":-45865896.0},{"start":"s45","rep":"r3","final_psnr":21.65,"psnr_auc":19.8,"cov":0.263,"path":0.68,"phi_max":59.4,"curve":[16.28,16.8,16.94,17.08,17.4,17.83,18.34,18.76,19.12,19.41,19.63,19.8,19.96,20.15,20.3,20.43,20.54,20.62,20.75,20.87,20.98,21.06,21.15,21.23,21.32,21.43,21.46,21.45,21.47,21.53],"phi":[36.4,36.4,37.2,37.9,38.7,39.4,40.0,40.6,41.2,41.8,42.2,42.6,43.1,43.7,44.2,44.8,45.3,45.9,46.4,47.0,47.6,48.1,48.6,49.0,49.3,49.6,49.9,50.3,50.6,51.0,51.4,51.8,52.1,52.5,52.8,53.0,53.3,53.6,53.9,54.1,54.4,54.7,54.9,55.1,55.3,55.5,55.7,55.9,56.2,56.4,56.6,56.8,57.0,57.3,57.5,57.8,58.0,58.3,58.6,59.1],"g0":-28878900.0},{"start":"s70","rep":"r1","final_psnr":19.6,"psnr_auc":18.58,"cov":0.29,"path":0.71,"phi_max":66.8,"curve":[16.81,16.85,16.72,16.84,17.15,17.56,17.97,18.25,18.46,18.6,18.68,18.78,18.84,18.84,18.84,18.92,19.02,19.04,19.1,19.27,19.32,19.3,19.27,19.27,19.21,19.17,19.31,19.29,19.34,19.53],"phi":[66.8,66.2,65.7,65.5,65.5,65.6,65.6,65.6,65.6,65.5,65.5,65.5,65.4,65.3,65.3,65.2,65.1,65.0,64.8,64.6,64.4,64.2,63.9,63.7,63.3,62.9,62.5,62.0,61.5,61.0,60.5,60.0,59.3,58.7,58.2,57.6,57.0,56.4,55.8,55.2,54.6,53.9,53.2,52.5,51.8,51.0,50.2,49.4,48.6,47.7,46.8,46.0,45.0,44.1,43.0,42.0,41.1,40.3,39.4,38.5],"g0":-1264131.0},{"start":"s70","rep":"r2","final_psnr":20.72,"psnr_auc":19.17,"cov":0.263,"path":0.61,"phi_max":78.9,"curve":[17.13,17.17,17.15,17.32,17.72,18.13,18.36,18.52,18.68,18.82,18.88,18.96,18.97,18.94,18.97,19.14,19.31,19.44,19.59,19.72,19.94,20.17,20.3,20.34,20.4,20.46,20.58,20.62,20.66,20.7],"phi":[66.7,67.7,68.9,70.1,71.1,72.1,72.9,73.5,74.2,74.5,74.8,75.1,75.6,76.2,76.7,77.1,77.5,77.8,78.0,78.2,78.3,78.5,78.6,78.7,78.8,78.8,78.9,78.9,78.9,78.9,78.8,78.7,78.6,78.3,77.9,77.4,76.9,76.4,75.8,75.2,74.5,73.8,73.1,72.3,71.4,70.5,69.7,68.8,68.0,67.1,66.2,65.2,64.2,63.3,62.3,61.4,60.4,59.5,58.5,57.6],"g0":3959388.0},{"start":"s70","rep":"r3","final_psnr":20.63,"psnr_auc":19.04,"cov":0.278,"path":0.7,"phi_max":75.0,"curve":[16.92,16.92,16.8,16.84,17.09,17.53,17.94,18.3,18.57,18.79,18.92,19.06,19.25,19.4,19.48,19.58,19.65,19.73,19.83,19.88,19.94,19.92,20.01,20.0,20.01,20.06,20.06,20.17,20.25,20.43],"phi":[66.7,67.8,68.5,69.1,69.9,70.8,71.8,72.6,73.2,73.5,73.8,74.1,74.3,74.5,74.6,74.8,74.9,75.0,75.0,74.9,74.7,74.4,74.1,73.7,73.1,72.6,72.0,71.4,70.8,70.2,69.6,68.9,68.1,67.4,66.6,65.8,64.9,64.0,63.2,62.2,61.4,60.5,59.6,58.7,57.7,56.7,55.8,54.9,54.0,53.1,52.1,51.1,50.1,49.2,48.2,47.2,46.3,45.5,44.5,43.5],"g0":1733142.0}],"0.2":[{"start":"s20","rep":"r1","final_psnr":17.94,"psnr_auc":17.07,"cov":0.085,"path":0.15,"phi_max":20.1,"curve":[12.96,14.67,15.17,15.69,16.09,16.49,16.78,16.96,17.15,17.25,17.28,17.34,17.39,17.44,17.49,17.51,17.54,17.54,17.57,17.63,17.66,17.67,17.73,17.75,17.8,17.82,17.85,17.88,17.92,17.94],"phi":[20.1,19.7,19.5,19.3,19.2,18.8,18.4,18.1,17.8,17.5,17.4,17.1,16.9,16.7,16.6,16.4,16.3,16.1,16.0,15.9,15.9,15.8,15.7,15.6,15.6,15.5,15.5,15.4,15.4,15.4,15.3,15.3,15.3,15.2,15.2,15.2,15.2,15.2,15.2,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0],"g0":-415432448.0},{"start":"s20","rep":"r2","final_psnr":17.54,"psnr_auc":16.72,"cov":0.08,"path":0.12,"phi_max":20.1,"curve":[12.83,14.52,14.96,15.42,15.7,16.05,16.33,16.53,16.69,16.84,16.95,17.04,17.09,17.13,17.17,17.2,17.24,17.26,17.29,17.31,17.34,17.36,17.39,17.39,17.4,17.41,17.43,17.47,17.48,17.51],"phi":[20.1,19.7,19.2,18.8,18.5,18.2,17.9,17.7,17.5,17.2,17.0,16.8,16.6,16.5,16.4,16.2,16.1,16.0,15.9,15.8,15.7,15.7,15.6,15.6,15.5,15.5,15.4,15.4,15.3,15.3,15.3,15.3,15.2,15.2,15.2,15.2,15.2,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0],"g0":-271128192.0},{"start":"s20","rep":"r3","final_psnr":17.69,"psnr_auc":16.89,"cov":0.08,"path":0.14,"phi_max":20.1,"curve":[12.84,14.55,15.15,15.62,16.05,16.33,16.61,16.82,16.97,17.08,17.17,17.25,17.26,17.33,17.32,17.34,17.35,17.36,17.4,17.41,17.43,17.43,17.47,17.49,17.52,17.56,17.59,17.59,17.65,17.68],"phi":[20.1,19.7,19.6,19.2,18.8,18.5,18.3,18.1,17.9,17.6,17.4,17.1,16.9,16.7,16.5,16.4,16.2,16.1,16.0,15.9,15.8,15.7,15.7,15.6,15.6,15.5,15.5,15.4,15.4,15.3,15.3,15.3,15.3,15.2,15.2,15.2,15.2,15.2,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.1,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0,15.0],"g0":-256195888.0},{"start":"s45","rep":"r1","final_psnr":21.7,"psnr_auc":19.99,"cov":0.23,"path":0.69,"phi_max":48.2,"curve":[16.19,16.84,16.96,17.18,17.51,18.0,18.56,19.0,19.43,19.7,19.95,20.16,20.33,20.44,20.58,20.73,20.78,20.81,20.89,21.0,21.12,21.15,21.26,21.44,21.5,21.56,21.64,21.65,21.65,21.7],"phi":[36.4,37.1,37.9,38.7,39.4,40.3,41.0,41.6,42.0,42.6,43.1,43.7,44.2,44.6,45.0,45.5,45.9,46.3,46.7,47.0,47.3,47.5,47.7,47.8,48.0,48.1,48.1,48.2,48.2,48.2,48.0,47.8,47.4,46.8,46.0,45.1,44.3,43.5,42.8,42.2,41.6,40.8,40.1,39.5,38.9,38.2,37.6,37.0,36.3,35.5,34.7,34.0,33.4,32.8,32.1,31.4,30.7,30.0,29.4,28.6],"g0":28374896.0},{"start":"s45","rep":"r2","final_psnr":21.57,"psnr_auc":19.74,"cov":0.24,"path":0.69,"phi_max":49.0,"curve":[16.22,16.82,16.9,17.02,17.26,17.64,18.09,18.53,18.92,19.24,19.49,19.69,19.9,20.07,20.17,20.29,20.41,20.55,20.72,20.92,21.04,21.12,21.21,21.29,21.35,21.42,21.46,21.5,21.54,21.55],"phi":[36.4,37.2,37.9,38.6,39.2,39.8,40.4,41.0,41.6,42.1,42.6,43.1,43.6,44.1,44.5,44.9,45.4,45.7,46.1,46.5,46.8,47.1,47.5,47.8,48.1,48.3,48.5,48.7,48.7,48.8,48.9,49.0,49.0,48.9,48.7,48.5,48.2,47.7,47.1,46.4,45.6,44.6,43.8,43.0,42.3,41.5,40.8,40.0,39.0,38.1,37.5,37.1,36.7,36.1,35.4,34.6,33.7,33.0,32.3,31.6],"g0":56324672.0},{"start":"s45","rep":"r3","final_psnr":20.8,"psnr_auc":19.68,"cov":0.203,"path":0.69,"phi_max":45.3,"curve":[16.28,16.92,17.06,17.19,17.46,17.87,18.41,18.93,19.34,19.64,19.84,20.03,20.12,20.25,20.34,20.42,20.47,20.56,20.58,20.68,20.78,20.83,20.83,20.83,20.79,20.75,20.78,20.78,20.8,20.82],"phi":[36.4,36.8,37.5,38.2,38.8,39.5,40.1,40.5,41.0,41.5,41.8,42.2,42.7,43.2,43.7,44.2,44.5,44.8,44.9,45.1,45.3,45.3,44.8,43.9,42.8,41.7,41.1,40.7,40.2,39.5,38.7,37.8,36.9,36.2,35.6,34.9,34.3,33.7,33.1,32.6,32.1,31.7,31.3,30.8,30.4,29.9,29.2,28.4,27.5,26.8,26.1,25.3,24.6,24.1,23.6,23.0,22.4,21.9,21.3,20.8],"g0":1761530.0},{"start":"s70","rep":"r1","final_psnr":20.74,"psnr_auc":19.19,"cov":0.282,"path":0.7,"phi_max":69.6,"curve":[17.06,17.04,16.96,17.06,17.35,17.82,18.21,18.57,18.83,18.98,19.21,19.31,19.44,19.56,19.65,19.7,19.77,19.83,19.76,19.7,19.74,19.77,19.95,20.1,20.14,20.27,20.38,20.49,20.57,20.64],"phi":[66.7,67.2,67.9,68.2,68.5,68.6,68.7,68.8,69.0,69.1,69.3,69.4,69.5,69.6,69.6,69.5,69.3,69.2,68.9,68.7,68.4,68.1,67.7,67.4,67.0,66.5,65.9,65.3,64.7,63.8,63.0,62.2,61.4,60.7,60.0,59.3,58.6,57.8,56.9,56.0,55.1,54.3,53.5,52.6,51.7,50.8,49.8,48.8,47.8,46.9,45.9,44.9,44.0,43.1,42.1,41.0,40.0,39.0,38.2,37.3],"g0":1550406.0},{"start":"s70","rep":"r2","final_psnr":21.26,"psnr_auc":19.31,"cov":0.287,"path":0.71,"phi_max":67.8,"curve":[16.93,16.89,16.77,16.93,17.26,17.79,18.26,18.6,18.82,19.0,19.15,19.26,19.3,19.3,19.43,19.51,19.59,19.72,19.81,19.94,20.04,20.22,20.55,20.65,20.71,20.81,20.93,21.02,21.09,21.14],"phi":[66.8,67.1,67.5,67.6,67.8,67.8,67.7,67.5,67.4,67.3,67.3,67.2,67.1,67.1,67.0,66.8,66.6,66.5,66.3,66.0,65.8,65.4,65.1,64.8,64.4,64.0,63.6,63.1,62.5,61.9,61.2,60.5,59.7,58.6,57.3,56.4,55.8,55.1,54.2,53.3,52.3,51.3,50.3,49.4,48.5,47.5,46.7,45.8,44.8,43.8,43.0,42.3,41.2,40.3,39.4,38.5,37.3,36.2,35.2,34.2],"g0":-1645855.0},{"start":"s70","rep":"r3","final_psnr":19.98,"psnr_auc":18.89,"cov":0.29,"path":0.7,"phi_max":70.9,"curve":[17.0,16.96,16.81,16.93,17.22,17.58,17.97,18.29,18.54,18.75,18.92,19.04,19.15,19.27,19.39,19.49,19.63,19.63,19.6,19.53,19.49,19.35,19.5,19.61,19.7,19.79,19.77,19.85,19.95,20.0],"phi":[66.7,66.7,67.2,67.4,67.8,68.4,68.9,69.5,69.8,70.1,70.7,70.8,70.9,70.8,70.8,70.7,70.6,70.5,70.3,70.2,70.1,69.9,69.6,69.4,69.1,68.7,68.3,67.8,67.4,66.8,66.3,65.6,64.9,64.1,63.3,62.6,61.8,61.1,60.4,59.5,58.7,57.7,56.8,55.9,54.9,54.0,53.0,52.0,51.0,50.1,49.1,48.1,47.1,46.1,45.1,44.1,43.0,41.9,40.8,39.8],"g0":-1963019.0}]},"contrib_steps":{"steps":[30,60,90,120,150,180,210,240,270],"cur_unobs":[0.036,0.036,0.035,0.033,0.033,0.031,0.029,0.042,0.035],"unc_unobs":[0.571,0.535,0.429,0.355,0.286,0.251,0.217,0.201,0.198],"cov_unobs":[0.498,0.404,0.281,0.24,0.199,0.162,0.144,0.132,0.115],"now_lam0.1":[2420.463,1818.462,1128.08,745.079,450.03,290.085,222.244,178.339,157.723],"now_lam1":[705.603,648.583,458.499,369.782,252.491,173.174,135.219,131.365,114.293],"now_lam10":[219.741,205.42,162.804,141.581,106.865,82.682,73.525,66.728,63.306],"now_lam100":[64.462,68.695,54.808,49.196,44.95,33.495,32.797,30.638,30.974],"now_observed_only":[1214.314,1115.672,684.964,577.771,381.043,264.139,200.925,179.676,151.729],"uc_lam0.1":[4.833,5.604,6.499,5.68,4.496,4.827,2.974,3.104,4.736],"uc_lam1":[4.92,5.032,5.553,5.518,3.852,3.899,2.672,3.018,4.395],"uc_lam10":[4.639,4.53,4.693,4.286,3.25,3.22,2.504,2.897,3.711],"uc_lam100":[4.149,4.118,4.226,2.961,2.643,2.539,2.168,2.372,2.528],"uc_observed_only":[5.11,5.051,5.544,5.409,4.105,4.459,3.091,3.246,4.506]},"bowl":[{"lo":0,"hi":5,"n":147,"med":0.8,"q1":0.7,"q3":1.2,"unobs":0.03},{"lo":5,"hi":10,"n":102,"med":3.7,"q1":1.7,"q3":20.2,"unobs":0.05},{"lo":10,"hi":15,"n":451,"med":22.8,"q1":7.0,"q3":140.0,"unobs":0.15},{"lo":15,"hi":25,"n":559,"med":62.3,"q1":28.5,"q3":344.9,"unobs":0.16},{"lo":25,"hi":40,"n":1274,"med":130.0,"q1":39.4,"q3":795.4,"unobs":0.23},{"lo":40,"hi":60,"n":1907,"med":212.9,"q1":64.0,"q3":1102.6,"unobs":0.28},{"lo":60,"hi":90,"n":2200,"med":234.0,"q1":25.8,"q3":5941.0,"unobs":0.35},{"lo":90,"hi":180,"n":1136,"med":2054.0,"q1":229.6,"q3":9999.7,"unobs":0.54}]}</script>
+<script>
+(function(){
+"use strict";
+const D = JSON.parse(document.getElementById("data").textContent);
+const NS = "http://www.w3.org/2000/svg";
+const $ = (s, r=document) => r.querySelector(s);
+const $$ = (s, r=document) => Array.from(r.querySelectorAll(s));
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const store = { get(k){ try { return localStorage.getItem(k); } catch(e){ return null; } }, set(k,v){ try { localStorage.setItem(k,v); } catch(e){} } };
+const renderers = [];
+function onRender(fn){ renderers.push(fn); fn(); }
+function rerender(){ renderers.forEach(f => f()); }
+
+function el(tag, attrs, parent){
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+function txt(parent, x, y, s, attrs={}){ const t = el("text", Object.assign({x, y}, attrs), parent); t.textContent = s; return t; }
+function fmt(v, d=2){ return v == null ? "–" : Number(v).toFixed(d); }
+function mean(a){ a = a.filter(v => v != null && isFinite(v)); return a.length ? a.reduce((s,v)=>s+v,0)/a.length : NaN; }
+function sd(a){ a = a.filter(v => v != null && isFinite(v)); if (a.length < 2) return 0; const m = mean(a); return Math.sqrt(a.reduce((s,v)=>s+(v-m)*(v-m),0)/(a.length-1)); }
+
+/* ---------- tooltip ---------- */
+function tipFor(container){
+  let t = container.querySelector(".tip");
+  if (!t){ t = document.createElement("div"); t.className = "tip"; t.hidden = true; container.appendChild(t); }
+  return {
+    show(html, px, py){
+      t.innerHTML = html; t.hidden = false;
+      const cw = container.clientWidth, tw = t.offsetWidth, th = t.offsetHeight;
+      let x = px + 14; if (x + tw > cw) x = px - tw - 14; if (x < 0) x = 0;
+      let y = py - th - 10; if (y < 0) y = py + 14;
+      t.style.left = x + "px"; t.style.top = y + "px";
+    },
+    hide(){ t.hidden = true; }
+  };
+}
+
+/* ---------- generic line chart with crosshair ---------- */
+function lineChart(container, o){
+  container.innerHTML = "";
+  const W = 760, H = o.height || 300, m = {l:48, r:16, t:14, b:36};
+  const svg = el("svg", {viewBox:`0 0 ${W} ${H}`, role:"img", "aria-label": o.aria || ""}, container);
+  const iw = W - m.l - m.r, ih = H - m.t - m.b;
+  const [x0,x1] = o.x, [y0,y1] = o.y;
+  const ylog = !!o.ylog;
+  const fy = v => ylog ? (Math.log10(v) - Math.log10(y0)) / (Math.log10(y1) - Math.log10(y0)) : (v - y0) / (y1 - y0);
+  const X = v => m.l + (v - x0) / (x1 - x0) * iw;
+  const Y = v => m.t + ih - Math.max(0, Math.min(1, fy(v))) * ih;
+  (o.bands || []).forEach(b => {
+    el("rect", {x:m.l, width:iw, y:Y(b.y1), height:Y(b.y0)-Y(b.y1), fill:css("--algo"), opacity:.07}, svg);
+  });
+  (o.yTicks || []).forEach(v => {
+    el("line", {x1:m.l, x2:m.l+iw, y1:Y(v), y2:Y(v), stroke:css("--grid"), "stroke-width":1}, svg);
+    txt(svg, m.l-8, Y(v)+4, o.fy ? o.fy(v) : String(v), {"text-anchor":"end"});
+  });
+  (o.xTicks || []).forEach(v => { txt(svg, X(v), m.t+ih+18, String(v), {"text-anchor":"middle"}); });
+  el("line", {x1:m.l, x2:m.l+iw, y1:m.t+ih, y2:m.t+ih, stroke:css("--axis")}, svg);
+  (o.hlines || []).forEach(h => {
+    el("line", {x1:m.l, x2:m.l+iw, y1:Y(h.y), y2:Y(h.y), stroke:css("--axis"), "stroke-dasharray":"4 4"}, svg);
+    if (h.label) txt(svg, m.l+iw-4, Y(h.y)-5, h.label, {"text-anchor":"end"});
+  });
+  if (o.xLabel) txt(svg, m.l+iw, H-4, o.xLabel, {"text-anchor":"end"});
+  if (o.yLabel) txt(svg, m.l, m.t-2 < 10 ? 10 : m.t-2, o.yLabel, {"text-anchor":"start", class:"lbl-strong", dy:"-2"});
+  const series = o.series.filter(s => !s.hidden);
+  series.forEach(s => {
+    let d = "", pen = false;
+    s.pts.forEach(([x,y]) => {
+      if (y == null || !isFinite(y)) { pen = false; return; }
+      d += (pen ? "L" : "M") + X(x).toFixed(1) + " " + Y(y).toFixed(1); pen = true;
+    });
+    el("path", {d, fill:"none", stroke:s.color, "stroke-width":s.width || 2, "stroke-linejoin":"round", "stroke-linecap":"round", opacity:s.opacity == null ? 1 : s.opacity, "stroke-dasharray": s.dash || ""}, svg);
+    const last = [...s.pts].reverse().find(p => p[1] != null);
+    if (last && !s.noEnd) el("circle", {cx:X(last[0]), cy:Y(last[1]), r:3.5, fill:s.color, stroke:css("--surface"), "stroke-width":2}, svg);
+  });
+  // crosshair
+  const tip = tipFor(container);
+  const cross = el("line", {y1:m.t, y2:m.t+ih, stroke:css("--axis"), "stroke-width":1, visibility:"hidden"}, svg);
+  const dots = el("g", {}, svg);
+  const hit = el("rect", {x:m.l, y:m.t, width:iw, height:ih, fill:"transparent"}, svg);
+  function move(ev){
+    const r = svg.getBoundingClientRect();
+    const sx = (ev.clientX - r.left) / r.width * W;
+    const xv = x0 + (sx - m.l) / iw * (x1 - x0);
+    dots.innerHTML = "";
+    const rows = [];
+    let snapX = null;
+    series.forEach(s => {
+      let best = null, bd = Infinity;
+      s.pts.forEach(p => { if (p[1] == null) return; const dd = Math.abs(p[0]-xv); if (dd < bd){ bd = dd; best = p; } });
+      if (!best) return;
+      if (snapX == null) snapX = best[0];
+      el("circle", {cx:X(best[0]), cy:Y(best[1]), r:4, fill:s.color, stroke:css("--surface"), "stroke-width":2}, dots);
+      if (!s.noTip) rows.push([s.tipLabel || s.label, s.color, best[1]]);
+    });
+    if (snapX == null) return;
+    cross.setAttribute("x1", X(snapX)); cross.setAttribute("x2", X(snapX)); cross.setAttribute("visibility","visible");
+    rows.sort((a,b) => b[2]-a[2]);
+    const head = `${o.xName || "x"} ${snapX}`;
+    const body = rows.slice(0, 10).map(r => `<span class="sw" style="background:${r[1]}"></span>${r[0]}  ${o.fv ? o.fv(r[2]) : fmt(r[2])}`).join("<br>");
+    const cr = container.getBoundingClientRect();
+    tip.show(`<b>${head}</b><br>${body}${rows.length > 10 ? "<br>…" : ""}`, ev.clientX - cr.left, ev.clientY - cr.top);
+  }
+  hit.addEventListener("pointermove", move);
+  hit.addEventListener("pointerleave", () => { tip.hide(); dots.innerHTML = ""; cross.setAttribute("visibility","hidden"); });
+}
+
+/* ---------- segmented controls ---------- */
+function seg(root, cb){
+  $$("button", root).forEach(b => b.addEventListener("click", () => {
+    $$("button", root).forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+    cb(b.dataset.v);
+  }));
+  const on = $("button[aria-pressed=true]", root);
+  return on ? on.dataset.v : null;
+}
+
+/* ================= category filter + rail ================= */
+const chapters = $$(".ch");
+const rail = $("#railList");
+chapters.forEach(ch => {
+  const li = document.createElement("li");
+  const cats = ch.dataset.cat.split(" ");
+  li.dataset.cat = ch.dataset.cat;
+  li.innerHTML = `<span class="pip ${cats[0]}"></span><a href="#${ch.id}"><span class="d">${ch.dataset.date} · ${ch.querySelector(".ch-no").textContent}</span>${ch.dataset.title}</a>`;
+  rail.appendChild(li);
+});
+function applyFilter(f){
+  $$(".chip").forEach(c => c.setAttribute("aria-pressed", String(c.dataset.f === f)));
+  $$(".kind").forEach(c => c.setAttribute("aria-pressed", String(c.dataset.f === f)));
+  chapters.forEach(ch => ch.classList.toggle("dim", f !== "all" && !ch.dataset.cat.split(" ").includes(f)));
+  $$("li", rail).forEach(li => li.classList.toggle("dim", f !== "all" && !li.dataset.cat.split(" ").includes(f)));
+  $$("#ledger tr[data-cat]").forEach(tr => tr.hidden = f !== "all" && tr.dataset.cat !== f);
+  store.set("ave-filter", f);
+}
+$$(".chip").forEach(c => c.addEventListener("click", () => applyFilter(c.dataset.f)));
+$$(".kind").forEach(c => c.addEventListener("click", () => applyFilter(c.getAttribute("aria-pressed") === "true" ? "all" : c.dataset.f)));
+const io = new IntersectionObserver(es => {
+  es.forEach(e => { if (e.isIntersecting){ const id = e.target.id; $$("li", rail).forEach((li,i) => li.classList.toggle("on", chapters[i].id === id)); } });
+}, {rootMargin:"-30% 0px -60% 0px"});
+chapters.forEach(c => io.observe(c));
+addEventListener("scroll", () => {
+  const h = document.documentElement; const p = h.scrollTop / Math.max(1, h.scrollHeight - h.clientHeight);
+  $("#progress").style.width = (p*100).toFixed(1) + "%";
+}, {passive:true});
+
+/* theme */
+$("#themeBtn").addEventListener("click", () => {
+  const root = document.documentElement;
+  const cur = root.dataset.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  root.dataset.theme = cur === "dark" ? "light" : "dark";
+  store.set("ave-theme", root.dataset.theme);
+  rerender();
+});
+const savedTheme = store.get("ave-theme"); if (savedTheme) document.documentElement.dataset.theme = savedTheme;
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", rerender);
+
+/* ================= 03 pole degeneracy ================= */
+(function(){
+  const slider = $("#phiSlider");
+  function draw(){
+    const phi = +slider.value, c = Math.cos(phi*Math.PI/180);
+    $("#phiVal").textContent = phi + "°";
+    const box = $("#poleSvg"); box.innerHTML = "";
+    const W = 360, H = 230, cx = 40, cy = 200, R = 170;
+    const svg = el("svg", {viewBox:`0 0 ${W} ${H}`, role:"img", "aria-label":"半球侧视图"}, box);
+    el("path", {d:`M ${cx+R} ${cy} A ${R} ${R} 0 0 0 ${cx} ${cy-R}`, fill:"none", stroke:css("--axis"), "stroke-width":1.5}, svg);
+    el("line", {x1:cx, y1:cy, x2:cx+R+10, y2:cy, stroke:css("--axis")}, svg);
+    el("line", {x1:cx, y1:cy, x2:cx, y2:cy-R-10, stroke:css("--axis"), "stroke-dasharray":"3 3"}, svg);
+    const px = cx + R*c, py = cy - R*Math.sin(phi*Math.PI/180);
+    el("line", {x1:cx, y1:cy, x2:px, y2:py, stroke:css("--muted"), "stroke-dasharray":"3 3"}, svg);
+    el("line", {x1:cx, y1:py, x2:px, y2:py, stroke:css("--hyper"), "stroke-width":3}, svg);
+    el("circle", {cx:px, cy:py, r:6, fill:css("--algo"), stroke:css("--surface"), "stroke-width":2}, svg);
+    txt(svg, (cx+px)/2, py-8, "纬线圈半径 R·cos φ", {"text-anchor":"middle"});
+    txt(svg, cx+R+8, cy+16, "赤道", {"text-anchor":"end"});
+    txt(svg, cx+6, cy-R-2, "北极", {});
+    txt(svg, px+10, py+4, "相机", {});
+    const rows = [
+      ["θ 探测弧长", c, "--hyper"],
+      ["θ 执行增益", c, "--hyper"],
+      ["合起来 cos²φ", c*c, "--bad"],
+      ["切空间（修复后）", 1, "--algo"]];
+    $("#poleBars").innerHTML = rows.map(r => `<div class="bar"><span>${r[0]}</span><span class="t"><i style="width:${(r[1]*100).toFixed(1)}%;background:var(${r[2]})"></i></span><span class="num">${r[1] < .01 ? r[1].toExponential(1) : r[1].toFixed(3)}</span></div>`).join("");
+    $("#poleNote").textContent = `φ=${phi}° 时，东向梯度在探测和执行两端各被乘一次 cos φ，合计压缩到 ${(c*c*100).toPrecision(2)}%。北向不受影响，所以各向异性约为 ${(1/Math.max(c*c,1e-6)).toFixed(0)}×。`;
+  }
+  slider.addEventListener("input", draw);
+  onRender(draw);
+})();
+
+/* ================= 04 pruning ================= */
+(function(){
+  let mode = seg($("#c4 .seg"), v => { mode = v; draw(); });
+  const counts = [["0.7（原 config）",1081,185],["0.4",1008,704],["0.005（标准 3DGS）",1031,1031]];
+  const signs = [["185 个高斯（饿死）",[10,12,12]],["1031 个高斯（健康）",[12,12,12]]];
+  function draw(){
+    const box = $("#pruneChart"); box.innerHTML = "";
+    const W = 760, H = 220, m = {l:150, r:60, t:10, b:28};
+    const svg = el("svg", {viewBox:`0 0 ${W} ${H}`, role:"img"}, box);
+    const iw = W - m.l - m.r, tip = tipFor(box);
+    if (mode === "count"){
+      const X = v => m.l + v/1200*iw, rowH = (H-m.t-m.b)/counts.length;
+      [0,300,600,900,1200].forEach(v => { el("line",{x1:X(v),x2:X(v),y1:m.t,y2:H-m.b,stroke:css("--grid")},svg); txt(svg,X(v),H-8,String(v),{"text-anchor":"middle"}); });
+      counts.forEach((c,i) => {
+        const y = m.t + i*rowH + 8;
+        txt(svg, m.l-10, y+rowH/2-4, "gaussian_th " + c[0], {"text-anchor":"end"});
+        const b1 = el("rect",{x:m.l,y:y,width:X(c[1])-m.l,height:rowH/2-10,rx:4,fill:css("--faint"),opacity:.55},svg);
+        const b2 = el("rect",{x:m.l,y:y+rowH/2-8,width:X(c[2])-m.l,height:rowH/2-10,rx:4,fill:i===0?css("--bad"):css("--algo")},svg);
+        txt(svg, X(c[1])+6, y+rowH/4, "峰值 "+c[1], {});
+        txt(svg, X(c[2])+6, y+rowH/2+rowH/4-6, "最终 "+c[2], {class:"lbl-strong"});
+        [b1,b2].forEach((b,j) => {
+          b.addEventListener("pointermove", ev => { const r = box.getBoundingClientRect(); tip.show(`gaussian_th ${c[0]}<br>${j?"最终":"峰值"} ${j?c[2]:c[1]} 个高斯${j?`<br>保留 ${(c[2]/c[1]*100).toFixed(0)}%`:""}`, ev.clientX-r.left, ev.clientY-r.top); });
+          b.addEventListener("pointerleave", () => tip.hide());
+        });
+      });
+    } else {
+      const eps = ["eps 0.01","eps 0.05","eps 0.2"], X = v => m.l + v/12*iw, rowH = (H-m.t-m.b)/signs.length;
+      [0,6,12].forEach(v => { el("line",{x1:X(v),x2:X(v),y1:m.t,y2:H-m.b,stroke:v===6?css("--axis"):css("--grid"),"stroke-dasharray":v===6?"4 4":""},svg); txt(svg,X(v),H-8,v===6?"6 = 抛硬币":v+"/12",{"text-anchor":"middle"}); });
+      signs.forEach((s,i) => {
+        const y0 = m.t + i*rowH + 6;
+        txt(svg, m.l-10, y0+rowH/2, s[0], {"text-anchor":"end"});
+        s[1].forEach((v,j) => {
+          const y = y0 + j*(rowH-12)/3;
+          const b = el("rect",{x:m.l,y,width:X(v)-m.l,height:(rowH-12)/3-4,rx:3,fill:[css("--q2"),css("--q3"),css("--q4")][j]},svg);
+          txt(svg, X(v)+6, y+(rowH-12)/6+2, `${eps[j]}: ${v}/12`, {});
+          b.addEventListener("pointermove", ev => { const r = box.getBoundingClientRect(); tip.show(`${s[0]}<br>${eps[j]}：${v}/12 同号`, ev.clientX-r.left, ev.clientY-r.top); });
+          b.addEventListener("pointerleave", () => tip.hide());
+        });
+      });
+    }
+  }
+  onRender(draw);
+})();
+
+/* ================= 07 ablation ================= */
+const ARMS = ["legacy","tangent_only","full","full_no_tangent","full_no_feas","full_no_mask","full_no_rate","full_no_stop"];
+const ARM_LABEL = {legacy:"legacy 原版",tangent_only:"仅切空间",full:"full 全开",full_no_tangent:"全开 − 切空间",full_no_feas:"全开 − 可行性",full_no_mask:"全开 − 掩码",full_no_rate:"全开 − 速率",full_no_stop:"全开 − 停止"};
+const armColor = a => css("--s" + (ARMS.indexOf(a)+1));
+(function(){
+  const A = D.ablation.ground;
+  let start = seg($("#ablStart"), v => { start = v; draw(); });
+  const on = new Set((store.get("ave-arms") || "legacy,full,full_no_mask").split(",").filter(a => ARMS.includes(a)));
+  const tg = $("#ablArms");
+  ARMS.forEach(a => {
+    const b = document.createElement("button");
+    b.className = "toggle"; b.dataset.a = a; b.setAttribute("aria-pressed", String(on.has(a)));
+    b.innerHTML = `<span class="sw" style="background:var(--s${ARMS.indexOf(a)+1})"></span>${ARM_LABEL[a]}`;
+    b.addEventListener("click", () => { on.has(a) ? on.delete(a) : on.add(a); b.setAttribute("aria-pressed", String(on.has(a))); store.set("ave-arms", [...on].join(",")); draw(); });
+    tg.appendChild(b);
+  });
+  function draw(){
+    const ser = ARMS.filter(a => on.has(a)).map(a => ({label:ARM_LABEL[a], color:armColor(a), pts:A[a][start].phi.map((v,i)=>[i*5, v])}));
+    lineChart($("#ablPhi"), {x:[0,300], y:[0,90], yTicks:[0,15,30,45,60,80], xTicks:[0,50,100,150,200,250,300], bands:[{y0:15,y1:80}],
+      series:ser, xName:"step", xLabel:"步数", yLabel:"φ (°)", fv:v=>v.toFixed(1)+"°", aria:"仰角轨迹"});
+    const ser2 = ARMS.filter(a => on.has(a)).map(a => ({label:ARM_LABEL[a], color:armColor(a), pts:A[a][start].curve}));
+    lineChart($("#ablPsnr"), {x:[0,300], y:[12,24], yTicks:[12,15,18,21,24], xTicks:[0,50,100,150,200,250,300],
+      series:ser2, xName:"step", xLabel:"步数", yLabel:"PSNR (dB)", fv:v=>v.toFixed(2)+" dB", aria:"PSNR 曲线", height:260});
+  }
+  onRender(draw);
+  // table
+  let sortBy = seg($("#ablSort"), v => { sortBy = v; table(); });
+  function table(){
+    const rows = ARMS.map(a => {
+      const v = Object.values(A[a]);
+      return {a, psnr:mean(v.map(r=>r.final_psnr)), psd:sd(v.map(r=>r.final_psnr)), phimin:mean(v.map(r=>r.phi_min_deg)), rim:mean(v.map(r=>r.rim_frac)), cov:mean(v.map(r=>r.view_coverage)), path:mean(v.map(r=>r.path_m)), lim:mean(v.map(r=>r.limiter_frac))};
+    });
+    if (sortBy === "final_psnr") rows.sort((p,q) => q.psnr - p.psnr);
+    $("#ablTable").innerHTML = `<tr><th>臂</th><th class="num">终态 PSNR (dB)</th><th class="num">最低仰角</th><th class="num">φ&lt;15° 步数</th><th class="num">视角覆盖</th><th class="num">路径 (m)</th><th class="num">撞限幅步数</th></tr>` +
+      rows.map(r => `<tr class="${r.a==="full"?"hl":r.a==="full_no_mask"?"lo":""}"><td><span class="tip-sw" style="display:inline-block;width:9px;height:9px;border-radius:2px;background:var(--s${ARMS.indexOf(r.a)+1});margin-right:7px"></span>${ARM_LABEL[r.a]}</td>
+        <td class="num">${r.psnr.toFixed(2)} ± ${r.psd.toFixed(2)}</td><td class="num">${r.phimin.toFixed(1)}°</td><td class="num">${(r.rim*100).toFixed(0)}%</td>
+        <td class="num">${r.cov.toFixed(2)}</td><td class="num">${r.path.toFixed(2)}</td><td class="num">${(r.lim*100).toFixed(0)}%</td></tr>`).join("");
+  }
+  table();
+})();
+
+/* ================= 08 noise ================= */
+(function(){
+  const A = D.ablation.ground;
+  function draw(){
+    const box = $("#noiseChart"); box.innerHTML = "";
+    const W = 760, H = 190, m = {l:110, r:30, t:16, b:30};
+    const svg = el("svg", {viewBox:`0 0 ${W} ${H}`, role:"img", "aria-label":"同配置两臂终态 PSNR"}, box);
+    const iw = W-m.l-m.r, X = v => m.l + (v-20)/(23-20)*iw, tip = tipFor(box);
+    [20,21,22,23].forEach(v => { el("line",{x1:X(v),x2:X(v),y1:m.t,y2:H-m.b,stroke:css("--grid")},svg); txt(svg,X(v),H-10,v+" dB",{"text-anchor":"middle"}); });
+    ["s20","s45","s70"].forEach((s,i) => {
+      const y = m.t + 20 + i*48, a = A.full[s].final_psnr, b = A.full_no_stop[s].final_psnr;
+      txt(svg, m.l-12, y+4, "起点 "+s, {"text-anchor":"end"});
+      el("line",{x1:X(Math.min(a,b)),x2:X(Math.max(a,b)),y1:y,y2:y,stroke:css("--axis"),"stroke-width":2},svg);
+      txt(svg, (X(a)+X(b))/2, y-10, "差 "+Math.abs(a-b).toFixed(2)+" dB", {"text-anchor":"middle", class:"lbl-strong"});
+      [[a,"full",css("--s3")],[b,"full − 停止（行为相同）",css("--s8")]].forEach(([v,l,c]) => {
+        const d = el("circle",{cx:X(v),cy:y,r:7,fill:c,stroke:css("--surface"),"stroke-width":2},svg);
+        d.addEventListener("pointermove", ev => { const r = box.getBoundingClientRect(); tip.show(`${s} · ${l}<br>${v.toFixed(2)} dB`, ev.clientX-r.left, ev.clientY-r.top); });
+        d.addEventListener("pointerleave", () => tip.hide());
+      });
+    });
+  }
+  onRender(draw);
+})();
+
+/* ================= 12 eps ================= */
+const EPS = ["0.01","0.05","0.1","0.2"];
+const epsColor = e => css("--q" + (EPS.indexOf(e)+1));
+(function(){
+  const E = D.eps;
+  let start = seg($("#epsStart"), v => { start = v; draw(); });
+  const on = new Set(EPS);
+  EPS.forEach(e => {
+    const b = document.createElement("button");
+    b.className = "toggle"; b.setAttribute("aria-pressed","true");
+    b.innerHTML = `<span class="sw" style="background:var(--q${EPS.indexOf(e)+1})"></span>eps ${e}`;
+    b.addEventListener("click", () => { on.has(e) ? on.delete(e) : on.add(e); b.setAttribute("aria-pressed", String(on.has(e))); draw(); });
+    $("#epsToggles").appendChild(b);
+  });
+  function draw(){
+    const ser = [];
+    EPS.filter(e => on.has(e)).forEach(e => E[e].filter(r => r.start === start).forEach(r => ser.push({label:`eps ${e} · ${r.rep}`, color:epsColor(e), width:1.8, opacity:.9, pts:r.phi.map((v,i)=>[i*5,v])})));
+    lineChart($("#epsPhi"), {x:[0,300], y:[0,90], yTicks:[0,15,30,45,60,80], xTicks:[0,50,100,150,200,250,300], bands:[{y0:15,y1:80}],
+      series:ser, xName:"step", xLabel:"步数", yLabel:"φ (°)", fv:v=>v.toFixed(1)+"°", aria:"不同 eps 的仰角轨迹"});
+  }
+  onRender(draw);
+  function dots(){
+    const box = $("#epsDots"); box.innerHTML = "";
+    const W = 760, H = 270, m = {l:48, r:16, t:14, b:34};
+    const svg = el("svg", {viewBox:`0 0 ${W} ${H}`, role:"img", "aria-label":"终态 PSNR 点图"}, box);
+    const iw = W-m.l-m.r, ih = H-m.t-m.b, cw = iw/EPS.length;
+    const Y = v => m.t + ih - (v-16.5)/(23.5-16.5)*ih, tip = tipFor(box);
+    [17,19,21,23].forEach(v => { el("line",{x1:m.l,x2:m.l+iw,y1:Y(v),y2:Y(v),stroke:css("--grid")},svg); txt(svg,m.l-8,Y(v)+4,String(v),{"text-anchor":"end"}); });
+    txt(svg, m.l, 10, "终态 PSNR (dB)", {class:"lbl-strong"});
+    const off = {s20:-0.27, s45:0, s70:0.27};
+    EPS.forEach((e,i) => {
+      const cx = m.l + cw*(i+.5);
+      txt(svg, cx, H-12, "eps "+e, {"text-anchor":"middle", class:"lbl-strong"});
+      const mu = mean(E[e].map(r=>r.final_psnr));
+      el("line",{x1:cx-cw*.42,x2:cx+cw*.42,y1:Y(mu),y2:Y(mu),stroke:css("--ink"),"stroke-width":1.5,"stroke-dasharray":"5 4"},svg);
+      txt(svg, cx+cw*.42, Y(mu)-5, "均值 "+mu.toFixed(2), {"text-anchor":"end"});
+      E[e].forEach((r,k) => {
+        const jitter = (["r1","r2","r3"].indexOf(r.rep)-1)*7;
+        const d = el("circle",{cx:cx+off[r.start]*cw+jitter, cy:Y(r.final_psnr), r:6, fill:epsColor(e), stroke:css("--surface"),"stroke-width":2},svg);
+        d.addEventListener("pointermove", ev => { const b = box.getBoundingClientRect(); tip.show(`eps ${e} · ${r.start} · ${r.rep}<br>终态 ${r.final_psnr.toFixed(2)} dB<br>覆盖 ${r.cov.toFixed(3)} · 路径 ${r.path.toFixed(2)} m<br>第 0 步北向梯度 ${r.g0 > 0 ? "+" : ""}${Number(r.g0).toExponential(1)}`, ev.clientX-b.left, ev.clientY-b.top); });
+        d.addEventListener("pointerleave", () => tip.hide());
+      });
+      ["s20","s45","s70"].forEach(s => txt(svg, cx+off[s]*cw, H-m.b+12, s, {"text-anchor":"middle"}));
+    });
+  }
+  onRender(dots);
+})();
+
+/* ================= 13 bowl + lambda + coverage ================= */
+(function(){
+  let mode = seg($("#bowlMode"), v => { mode = v; draw(); });
+  function draw(){
+    const B = D.bowl, box = $("#bowlChart"); box.innerHTML = "";
+    const W = 760, H = 290, m = {l:56, r:16, t:18, b:40};
+    const svg = el("svg", {viewBox:`0 0 ${W} ${H}`, role:"img", "aria-label":"碗形分数"}, box);
+    const iw = W-m.l-m.r, ih = H-m.t-m.b, bw = iw/B.length, tip = tipFor(box);
+    let Y, ticks, lab;
+    if (mode === "ratio"){
+      const lo = -0.5, hi = 4.5; Y = v => m.t + ih - (Math.log10(Math.max(v,0.3))-lo)/(hi-lo)*ih;
+      ticks = [1,10,100,1000,10000]; lab = v => v >= 1000 ? (v/1000)+"k" : String(v);
+      txt(svg, m.l, 12, "探测分数 / 当前视角（对数）", {class:"lbl-strong"});
+    } else { Y = v => m.t + ih - v*ih; ticks = [0,.25,.5,.75,1]; lab = v => (v*100)+"%"; txt(svg, m.l, 12, "分数中来自未观测元素的比例", {class:"lbl-strong"}); }
+    ticks.forEach(v => { el("line",{x1:m.l,x2:m.l+iw,y1:Y(v),y2:Y(v),stroke:css("--grid")},svg); txt(svg,m.l-8,Y(v)+4,lab(v),{"text-anchor":"end"}); });
+    if (mode === "ratio") el("line",{x1:m.l,x2:m.l+iw,y1:Y(1),y2:Y(1),stroke:css("--axis"),"stroke-dasharray":"4 4"},svg);
+    // covered / uncovered divider at 25°
+    const divX = m.l + bw*4;
+    el("line",{x1:divX,x2:divX,y1:m.t,y2:m.t+ih,stroke:css("--axis"),"stroke-dasharray":"2 4"},svg);
+    txt(svg, divX-6, m.t+12, "← 已覆盖", {"text-anchor":"end"}); txt(svg, divX+6, m.t+12, "未覆盖 →", {});
+    B.forEach((b,i) => {
+      const x = m.l + bw*i + bw*.18, w = bw*.64, v = mode === "ratio" ? b.med : b.unobs;
+      const r = el("rect",{x, y:Y(v), width:w, height:Math.max(1, m.t+ih-Y(v)), rx:4, fill: mode==="ratio" ? css("--algo") : css("--diag"), opacity:.85},svg);
+      if (mode === "ratio"){ el("line",{x1:x+w/2,x2:x+w/2,y1:Y(b.q1),y2:Y(b.q3),stroke:css("--ink"),"stroke-width":1.5},svg); }
+      txt(svg, x+w/2, Y(mode==="ratio"?Math.max(b.q3,v):v)-6, mode==="ratio" ? (v>=100?v.toFixed(0):v.toFixed(1))+"×" : (v*100).toFixed(0)+"%", {"text-anchor":"middle", class:"lbl-strong"});
+      txt(svg, x+w/2, H-20, `${b.lo}–${b.hi}°`, {"text-anchor":"middle"});
+      r.addEventListener("pointermove", ev => { const bb = box.getBoundingClientRect(); tip.show(`离已访问方向 ${b.lo}–${b.hi}°（n=${b.n}）<br>分数/当前 中位 ${b.med}×，四分位 [${b.q1}, ${b.q3}]<br>未观测元素占比 ${(b.unobs*100).toFixed(0)}%`, ev.clientX-bb.left, ev.clientY-bb.top); });
+      r.addEventListener("pointerleave", () => tip.hide());
+    });
+    txt(svg, m.l+iw, H-4, "离最近已访问视角方向的角距离", {"text-anchor":"end"});
+  }
+  onRender(draw);
+
+  let lam = seg($("#lamSeg"), v => { lam = v; drawLam(); });
+  function drawLam(){
+    const C = D.contrib_steps, st = C.steps;
+    lineChart($("#lamChart"), {x:[30,270], y:[1,5000], ylog:true, yTicks:[1,10,100,1000], fy:v=>v+"×", xTicks:st, height:260,
+      series:[
+        {label:"最佳未覆盖 / 当前视角", color:css("--s1"), pts:st.map((s,i)=>[s, C["now_"+lam][i]])},
+        {label:"最佳未覆盖 / 最佳已覆盖", color:css("--s3"), pts:st.map((s,i)=>[s, C["uc_"+lam][i]])}],
+      hlines:[{y:1}], xName:"step", xLabel:"步数", yLabel:"比值（中位数，对数）", fv:v=>v.toFixed(1)+"×", aria:"λ′ 反事实"});
+  }
+  onRender(drawLam);
+
+  const mt = $("#covMeter");
+  const P = v => (v/0.4*100).toFixed(1) + "%";
+  mt.innerHTML = `<span style="left:0;width:${P(0.125)};background:var(--faint);opacity:.45"></span>
+    <span style="left:${P(0.125)};width:calc(${P(0.25)} - ${P(0.125)});background:var(--algo);opacity:.25"></span>
+    <span style="left:${P(0.215)};width:calc(${P(0.25)} - ${P(0.215)});background:var(--algo)"></span>
+    <i class="tick" style="left:${P(0.275)}"></i>
+    <span class="mk" style="left:${P(0.0625)}">单个视角 0.125</span>
+    <span class="mk" style="left:${P(0.2325)}">实测 0.215–0.25</span>
+    <span class="mk b" style="left:${P(0.275)}">46° 路径上限 0.275</span>
+    <span class="mk b" style="left:96%">0.40</span>`;
+})();
+
+/* ================= ledger ================= */
+(function(){
+  const L = [
+    ["algo","切空间梯度（gradient_space=tangent）","θ 自由度按 cos²φ 塌陷，极点打转","各向异性 223→0.7；消融中质量差在噪声内（未进极区）","warn","几何成立，真机未验"],
+    ["algo","可行性投影（feasibility）","目标函数不知道哪里不可达，冲向桌下","下沿停留 63%→0%；仿真不罚撞限位，质量收益测不出","ok","成立（兜底）"],
+    ["algo","Fisher 可见性掩码（fisher_mask）","对全部高斯求和，地面/背景高斯拉相机","去掉后 −2.0 dB，相机停在 15° 边沿；ROI 用真值框","ok","成立，依赖特权 ROI"],
+    ["algo","速率映射（velocity_mapping=normalized）","梯度幅值直接当速度，100% 撞限幅","撞限幅 100%→0%，路径短一半；质量在噪声内","ok","成立"],
+    ["algo","停止判据：局部提名 + 全局确认","真机无停止条件；v1 会停在局部最优","30+36 个 run 从未触发；10-18 发现参照是碗底","bad","需要改"],
+    ["algo","提议：判据 A 改为未覆盖 vs 已覆盖","碗底不能当分母","碗外对碗外约 5×，阈值待标定","warn","未实现"],
+    ["algo","提议：Hybrid 重定位","当时以为是近视","覆盖受路径预算所限，Misimi 的 Hybrid 也只有边际收益","bad","搁置"],
+    ["algo","提议：给目标函数加饱和","以为远处高分来自 λ 放大","λ′ 放大 1000 倍差距仍在","bad","作废"],
+    ["hyper","gaussian_th 0.7 → 0.005（仿真 config）","新高斯出生 0.5 < 阈值 0.7 被剪掉","高斯 185→1031，符号一致 10/12→12/12","ok","成立；真机仍 0.7"],
+    ["hyper","grad_eps 放大到 0.2（09-13 提议）","在饿死的地图上梯度粗糙","同日推翻：病因是密度","bad","推翻"],
+    ["hyper","grad_eps 0.01 vs 0.05/0.1/0.2","Misimi 步长大 20 倍，想要前瞻","−1.4~−2.0 dB，s20 被钉在下沿","ok","不改，保留 0.01"],
+    ["hyper","手设常数：φ 带 15°/80°、margin 8°、v_nominal 0.05、κ 窗口 20、score_ratio 0.1、覆盖 0.9/25°、confirm 2","算法项需要的阈值","均未标定","warn","待标定"],
+    ["setup","--recolor texture","资产颜色全 0，Fisher 无物体信号","20 个 run 作废重跑","ok","已修"],
+    ["setup","消融配置关闭周期性 opacity reset","reset 让所有分数同时塌缩，误停 9.6 dB","真机保留，靠 confirm_checks","ok","已修"],
+    ["setup","留出视角 + 物体像素 PSNR","训练视角 PSNR 奖励重复观看","16 个不入图视角","ok","采用"],
+    ["setup","每格重复 3 次 + bootstrap CI","单次 run 噪声约 1 dB","10-18 实验起执行","ok","采用"],
+    ["setup","OOM 原样重跑","地面场景峰值约 14 GB","约 1/12 的 run 偶发","ok","采用"],
+    ["diag","Fisher 平方审计","审计称少了平方","平方在 CUDA kernel 里，不改","ok","成立"],
+    ["diag","Fisher 场在探针尺度粗糙","angle/tangent 对比出现矛盾","只在饿死的地图上成立","bad","推翻"],
+    ["diag","同配置噪声测量","full 与 full_no_stop 差 1 dB","+0.71 dB 不成立","ok","成立"],
+    ["diag","贡献分解 + λ′ 反事实（--contrib_diag_every）","停止判据为何不触发","碗；未观测元素非主因","ok","成立"],
+    ["diag","覆盖上界计算","覆盖 0.24 是否算低","上限 0.275，达到 78–90%","ok","成立"]];
+  const name = {algo:"算法",hyper:"超参数",setup:"实验设置",diag:"诊断"};
+  const cnt = {algo:0,hyper:0,setup:0,diag:0};
+  L.forEach(r => { if (!/^提议/.test(r[1])) cnt[r[0]]++; });
+  // counts shown in the hero: implemented / evaluated items only
+  $("#cnt-algo").textContent = cnt.algo; $("#cnt-hyper").textContent = cnt.hyper; $("#cnt-setup").textContent = cnt.setup; $("#cnt-diag").textContent = cnt.diag;
+  $("#ledger").innerHTML = `<tr><th>类别</th><th>改动 / 测量</th><th>为什么做</th><th>证据</th><th>状态</th></tr>` +
+    L.map(r => `<tr class="ledger-row" data-cat="${r[0]}"><td><span class="tag ${r[0]}">${name[r[0]]}</span></td><td>${r[1]}</td><td>${r[2]}</td><td>${r[3]}</td><td><span class="status ${r[4]}">${r[5]}</span></td></tr>`).join("");
+})();
+
+applyFilter(store.get("ave-filter") || "all");
+})();
+</script>
+</body>
+</html>
