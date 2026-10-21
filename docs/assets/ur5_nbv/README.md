@@ -37,3 +37,7 @@ python3 docs/assets/ur5_nbv/build_report.py
 | `reconstruction-focus.png` | Dursun 等，Object-Reconstruction-Aware Whole-body Control，Fig. 1；https://arxiv.org/html/2509.04094v3/Environment.png |
 
 论文结论、代码诊断和方案建议的边界以正文为准。未进行 UR5 真机验证，未修改控制代码。论文核查截至 2026 年 10 月；源码行号基于报告生成时的仓库快照。
+
+## 连续梯度方案（2026-10-21）
+
+新增归一化最小奇异值、二维方向差分与闭式半空间修正。页面含合成谱/椭圆和向量投影两组交互，均非 UR5 实测。流程图源文件为 `gradient-planning.drawio`；页面用响应式等价流程展示。更新正文和模板后仍按上述脚本构建。

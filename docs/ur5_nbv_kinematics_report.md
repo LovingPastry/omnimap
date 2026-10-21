@@ -2,18 +2,18 @@
 
 <section id="three-loops" class="report-section">
 <div class="section-heading"><span class="section-index">00 / THREE-LOOP REVIEW · 2026.10.19</span><h2>具体改什么：让信息决策闭合到真实执行与新观测</h2><p>以 info_flow/ 的 Tracking–Planning–Servo 为主线。以下是源码复盘与改造建议，尚未做新的真机实验或修改控制代码。</p></div>
-<div class="report-prose opening"><p><strong>下一步应从“沿 Fisher 梯度请求相机移动”，改为“从当前 UR5 构型出发，选择能执行、能产生有效新观测的短时信息动作”。</strong>三环继续解耦：Tracking 提供可信的新证据，Planning 选择可执行的信息动作，Servo 保持本机闭环并报告真实效果。先补反馈，再验证短时预测；自由 roll 与约束 QP 分别验证。</p><p>现有 Servo 已经读本机 TF 闭环控制，Planning 也会读更新的相机位姿。缺口是策略看不到下游为何限速/停止，也不区分“位姿消息仍在更新”和“新观测确实进入了地图”。进程分开降低了慢建图直接阻塞本机控制的风险；动作效果与感知收益仍需影响下一次决策。</p></div>
+<div class="report-prose opening"><p><strong>下一步应从“沿 Fisher 梯度请求相机移动”，改为“从当前 UR5 构型出发，选择能执行、能产生有效新观测的短时信息动作”。</strong>三环继续解耦：Tracking 提供可信的新证据，Planning 选择可执行的信息动作，Servo 保持本机闭环并报告真实效果。先补反馈，优先验证连续梯度修正（见新增 05A）；短时预测、自由 roll 与执行层 QP 分别比较。</p><p>现有 Servo 已经读本机 TF 闭环控制，Planning 也会读更新的相机位姿。缺口是策略看不到下游为何限速/停止，也不区分“位姿消息仍在更新”和“新观测确实进入了地图”。进程分开降低了慢建图直接阻塞本机控制的风险；动作效果与感知收益仍需影响下一次决策。</p></div>
 <div class="table-scroll"><table><thead><tr><th>三环</th><th>当前链路</th><th>下一步改变</th></tr></thead><tbody>
 <tr><td>Tracking<br>我知道了什么？</td><td>图像时间 TF → 关键帧 → OmniMap → 版本化 GS/TSDF 摘要。pose 在入图前就发布。</td><td>标出实际处理到的源帧、地图/ROI有效性、三模态证据就绪情况；记录新观测带来的任务收益。</td></tr>
-<tr><td>Planning<br>接下来做什么？</td><td>当前相机 pose＋GS 快照 → 局部 Fisher 梯度 → 两个球面速率。没有 q 或下游状态。</td><td>先接执行反馈；再从当前 q 评估少量方向/速度的短时动作，比较能实际取得的观测与运动代价。</td></tr>
+<tr><td>Planning<br>接下来做什么？</td><td>当前相机 pose＋GS 快照 → 局部 Fisher 梯度 → 两个球面速率。没有 q 或下游状态。</td><td>先接执行反馈；用归一化最小奇异值与方向差分修正信息运动，停滞时再采样 NBV。</td></tr>
 <tr><td>Servo<br>实际上做到了什么？</td><td>本机 TF → 切向＋径向 PI＋完整 look-at → Twist → MoveIt Servo / UR。</td><td>保持轻量；回传实际关节/相机进展、限速或停机原因，让 Planning 能够改道。</td></tr>
 </tbody></table></div>
 <div class="note"><span class="note-label">用一次受限动作解释</span><p>向北的 Fisher 梯度更大，但腕部构型让下游持续减速；向东北的信息斜率略小，却能连续执行并取得新图像。我们需要验证的是：选择后者，是否带来更高的实际重建收益。只让 Python 发出更大的 Twist，不能回答这个问题。</p></div>
-<div class="report-prose section-bridge"><h3>先补两条反馈，再改选动作的方法</h3><p><strong>Servo → Planning：</strong>在时间窗内对齐 joint_states、相机 TF、请求 Twist、MoveIt 状态及可取得的 UR 安全状态，复用已有 model_version / planner_tick 关联动作。比较请求切向运动与实际进展，同时区分径向回球、姿态调整和真正堵塞。受限持续发生时换方向或重评估；保护停机单独处理。</p><p><strong>Tracking → Planning：</strong>说明哪些实际图像进入了哪个地图版本，三模态证据是否可用。多 tick 可能共用快照，入图也可能滞后；不能把重复评分当作多次独立观测。当前 Fisher 只使用渲染对 xyz / opacity 的梯度，并非已验证的三模态联合信息增益；TSDF 包围盒也不是全臂碰撞距离场。</p><p><strong>Planning 的方法改动：</strong>保留梯度方向作为候选，在附近加入少量替代方向/速率。先做当前 q 为种子的终点 IK＋构型软评分基线，再比较短时 rollout：按执行端同样的径向、姿态与限速规律预测一段关节轨迹，检查沿途约束，评分预测相机能获得的信息。候选数、时域与更新频率由实测耗时决定。</p></div>
+<div class="report-prose section-bridge"><h3>先补两条反馈，再改选动作的方法</h3><p><strong>Servo → Planning：</strong>在时间窗内对齐 joint_states、相机 TF、请求 Twist、MoveIt 状态及可取得的 UR 安全状态，复用已有 model_version / planner_tick 关联动作。比较请求切向运动与实际进展，同时区分径向回球、姿态调整和真正堵塞。受限持续发生时换方向或重评估；保护停机单独处理。</p><p><strong>Tracking → Planning：</strong>说明哪些实际图像进入了哪个地图版本，三模态证据是否可用。多 tick 可能共用快照，入图也可能滞后；不能把重复评分当作多次独立观测。当前 Fisher 只使用渲染对 xyz / opacity 的梯度，并非已验证的三模态联合信息增益；TSDF 包围盒也不是全臂碰撞距离场。</p><p><strong>Planning 的优先改动：</strong>先做<a href="#gradient-design">连续梯度修正</a>，保留现有信息方向并最小化构型约束修正；停滞时用离散 NBV 恢复。以下原路线保留作对照：保留梯度方向作为候选，在附近加入少量替代方向/速率。先做当前 q 为种子的终点 IK＋构型软评分基线，再比较短时 rollout：按执行端同样的径向、姿态与限速规律预测一段关节轨迹，检查沿途约束，评分预测相机能获得的信息。候选数、时域与更新频率由实测耗时决定。</p></div>
 <div class="table-scroll"><table><thead><tr><th>优先级</th><th>交付内容</th><th>完成时应能回答</th></tr></thead><tbody>
 <tr><td>P0 / 正确基线</td><td>核对生效限速、数据新鲜度、外参、Fisher evaluator 与实际耗时；所有组共享修正。</td><td>是配置/时序异常，还是动作本身受限？</td></tr>
 <tr><td>P1 / 动作反馈</td><td>执行摘要进入 Planning；区分等待、约束堵塞、故障和信息完成。</td><td>请求移动后，机器人和地图各发生了什么？</td></tr>
-<tr><td>P2 / 短时预测</td><td>终点 IK/构型评分 → 当前 q 起步的短时方向/速度 rollout。</td><td>比只看终点，是否减少途中停滞并提高质量？</td></tr>
+<tr><td>P2 / 连续修正</td><td>归一化 σ_min → 二维方向差分 → 最小约束修正。</td><td>能否以更低计算量提前绕开减速区？采样与 rollout 作对照。</td></tr>
 <tr><td>P3 / 任务放宽</td><td>自由 roll 同时进入评分相机、规划消息和执行任务；QP 按证据另行设计。</td><td>改善是否确实来自释放姿态约束？</td></tr>
 </tbody></table></div>
 <p class="boundary">当前 StopMonitor 的路径/方向覆盖来自输入实际 pose，但 stall 用的是命令速度，检测不了“命令非零、机器人没动”；当前 YAML 的 stop 与 stall 开关均关闭。完成判据必须另行标定，不能把约束堵塞或预算耗尽当作信息收敛。同一地图在相机运动时可以复用；昂贵评分分频后仍需保持轻量命令发布与有效期检查。</p>
@@ -125,7 +125,7 @@
 
 <section id="design" class="report-section">
 <div class="section-heading"><span class="section-index">05 / PROPOSED DESIGN</span><h2>让信息策略知道，机器人接下来能做什么</h2><p>以下是针对 OmniMap 的组合设计建议，尚未实现或验证。切换任务形式，查看六轴 UR5 的局部自由度差异。</p></div>
-<div class="report-prose section-bridge"><p>实施顺序以首页三环复盘为准：正确基线 → 执行反馈 → 终点 IK/构型评分与短时预测 → 自由 roll 单独验证。先保留现有 MoveIt Servo 执行路径，验证反馈能否支持策略改道；约束 QP 根据瓶颈证据另行评估。五维任务还必须同时改变评分相机、消息和执行器，否则评分与真实观测不一致。</p></div>
+<div class="report-prose section-bridge"><p>以下保留原采样/预测路线作为对照；新增优先路线见下方“连续梯度”章节。原实施顺序：正确基线 → 执行反馈 → 终点 IK/构型评分与短时预测 → 自由 roll 单独验证。先保留现有 MoveIt Servo 执行路径，验证反馈能否支持策略改道；约束 QP 根据瓶颈证据另行评估。五维任务还必须同时改变评分相机、消息和执行器，否则评分与真实观测不一致。</p></div>
 <div id="task-demo-slot"></div>
 <div class="design-grid"><article class="design-card"><span class="step">STEP 01</span><h3>补齐动作反馈</h3><p>按时间对齐请求动作、实际关节/相机运动与下游状态，反馈到 Planning。区分约束堵塞、数据过期和任务完成。</p><span class="deliverable">产出：可诊断、能触发重规划的反馈</span></article><article class="design-card"><span class="step">STEP 02</span><h3>短时关节空间预测</h3><p>从当前 q 出发，为少量方向/速度预测短时轨迹；检查关节、速度、连续性和归一化奇异值。有可靠碰撞模型时再检查碰撞。</p><span class="deliverable">产出：路径上的可执行性评估</span></article><article class="design-card"><span class="step">STEP 03</span><h3>统一自由 roll 任务</h3><p>让评分相机、规划接口与执行器使用同一个 roll 或五维任务；主动选择有利构型，并验证实际视野收益。</p><span class="deliverable">产出：可独立消融的姿态任务</span></article><article class="design-card"><span class="step">OPTIONAL</span><h3>实际执行处的约束</h3><p>若证据表明需要自定义 QP，应明确实际关节控制权，处理下游改写；将连续约束与上游信息动作选择分别验证。</p><span class="deliverable">产出：有执行依据的约束控制方案</span></article></div>
 <div class="equation-panel"><div><span class="section-index">OPTIONAL CONTROL FORMULATION</span><h3>把信息运动作为目标，把奇异性作为约束</h3><p>J<sub>task</sub> 是所选相机任务的局部 Jacobian；v<sub>info</sub> 为信息策略期望的任务速度。五维任务使用位置和光轴指向的独立局部坐标。</p></div><div class="equations"><p>min<sub>q̇</sub> &nbsp; ‖J<sub>task</sub>(q)q̇ − v<sub>info</sub>‖²<sub>W</sub> + λ‖q̇‖²</p><p>∇h(q)ᵀq̇ ≥ −αh(q)</p><p>h(q) = m(q) − m<sub>min</sub></p><small>并施加关节位置、速度及碰撞约束。</small></div></div>
@@ -134,11 +134,33 @@
 <p class="caption">上述数字来自不同组件，不能直接比较为端到端速度优势。建议将昂贵信息更新与高频运动学约束分频运行；不将作者平台的耗时当作 UR5 性能承诺。</p>
 </section>
 
+
+<section id="gradient-design" class="report-section">
+<div class="section-heading"><span class="section-index">05A / CONTINUOUS GRADIENT · 2026.10.21</span><h2>让信息梯度，沿机械臂能走的方向前进</h2><p>新增优先验证方案：连续梯度修正；离散 NBV 采样用于停滞恢复。以下为 OmniMap 局部模型设计，尚未接入 UR5 控制或完成实测。</p></div>
+<div class="report-prose opening"><p><strong>保留 Fisher 信息方向，只在构型恶化过快时加入最小修正。</strong>无需每 tick 采样多个视点、渲染和求 IK。终点 IK 采样是有价值的基线，但不检查整条到达路径；短时 rollout 保留为模型失配时的后续比较。</p></div>
+<div class="gradient-flow" role="img" aria-label="当前关节状态计算归一化相机 Jacobian，得到最小奇异值和二维改善方向，与 Fisher 运动合成后交给 Servo，并接收实际反馈"><span>当前 q 与执行规则<br><b>本机运动学模型</b></span><i>→</i><span>归一化 Jacobian<br><b>m 与方向导数 a</b></span><i>→</i><span>Fisher 信息运动<br><b>二维最小修正</b></span><i>→</i><span>Servo 执行反馈<br><b>下一 tick 重算</b></span></div>
+<p class="caption">流程对应可编辑的 <a href="assets/ur5_nbv/gradient-planning.drawio">draw.io 源文件</a>。下方两个演示均为合成教学数据，不代表 UR5 仿真或真机结果。</p>
+<h3>① m(q) 选什么？看最薄弱方向，而不是总体积</h3>
+<div class="report-prose"><p>推荐 <strong>m(q) = σ<sub>min</sub>(J̄(q))</strong>。它衡量最弱方向的局部运动能力，不是到奇异点的几何距离。可操作度乘积可能被其他大奇异值补偿；条件数反映强弱比例；最小奇异值更直接对应薄弱方向。</p><p>先统一量纲：<code>J̄ = Dₓ⁻¹ J_camera Dq</code>。Dₓ = diag(v_ref × 3, ω_ref × 3)，Dq = diag(各关节参考速度)。它们使用固定任务尺度，且 Jacobian 与速度采用同一坐标系、同一相机参考点；二范数指标不能替代逐关节速度限制。当前先按完整 6D 相机任务评估，若改 5D，必须同步执行端和指标定义。</p></div>
+<div id="gradient-widget-0"></div>
+<h3>② 把关节构型改善方向，变成两个球面速率的修正</h3>
+<div class="report-prose"><p>令 u = (θ̇, φ̇)，由执行端相同的切向、look-at 与径向规则建立局部模型 <code>q̇ ≈ A(q)u + b(q)</code>。A 的两列表示两种球面运动引起的关节速度，b 是径向和姿态纠偏。可由任务 Jacobian 的阻尼逆求近似映射；接近奇异时必须检查预测残差，不能把阻尼逆当精确逆。</p><p>将构型梯度拉回动作空间：<strong>a = Aᵀ∇m</strong>。先把两个球面速率按固定参考速率缩放到无量纲坐标，下面的欧氏距离与向量图均在该坐标中定义，A 也应相应变换。设 h = m − m_min，要求 m 不要恶化过快：</p></div>
+<div class="equation-panel"><div><h3>只补上必要的改善分量</h3><p>α &gt; 0，单位 s⁻¹；阈值需按本机日志标定。右图采用 b = 0、‖a‖ = 1 的教学特例。</p></div><div class="equations"><p>aᵀu ≥ c，c = −αh − ∇mᵀb</p><p>min ½‖u − u_info‖²，满足 aᵀu ≥ c</p><p>u* = u_info + max(0, c − aᵀu_info) a / ‖a‖²</p><small>单个半空间、无其他约束且 ‖a‖ &gt; 0 时的闭式解。</small></div></div>
+<div id="gradient-widget-1"></div>
+<h3>③ 实时计算：只求两个方向导数，不必求完整六维梯度</h3>
+<div class="report-prose"><p>真正用到的是 a 的两个分量。冻结当前 A，对每一列直接中心差分：<code>aᵢ ≈ [m(q + δᵢAᵢ) − m(q − δᵢAᵢ)] / (2δᵢ)</code>。按关节扰动范数选择 δᵢ，并用不同步长检查稳定性；Aᵢ 接近零时不能再除以其范数。需估计 ∇mᵀb 时，再沿 b 做一次中心差分。</p></div>
+<div class="timing-strip"><div><span class="timing-number">1 + 4</span><p>当前值一次＋两个方向各两次<br>Jacobian / 小型 SVD</p></div><div><span class="timing-number">+ 2</span><p>b 非零且需数值求导时<br>额外两次运动学计算</p></div><div><span class="timing-number">0 <small>次</small></span><p>此修正步骤新增的候选渲染<br>与迭代 IK 调用</p></div></div>
+<div class="report-prose"><p>缓存 URDF、相机外参和运动学模型，在进程内计算，避免每次求导调用 ROS 服务。以上是评估次数，不是耗时承诺；构建 A、读状态与通信也有成本。若目标为 30 Hz，周期约 33 ms，应分别测总 tick 与运动学修正的 P50 / P95 / P99 耗时及状态年龄，再决定更新频率；昂贵 Fisher 更新与轻量运动学修正可以分频。</p></div>
+<details class="audit-item"><summary>什么时候这个公式不够用？</summary><div class="audit-body"><p>最弱奇异值切换时可能不可微，精确奇异处也可能缺少有效逃逸梯度。‖a‖ 接近零且约束不满足，表示当前动作空间没有有效修正方向，应触发停滞恢复，不能靠给分母加小常数宣称约束仍成立。</p><p>加入关节速度、加速度和其他约束后，应联合求小型 QP；先闭式修正再逐项裁剪可能破坏原约束。低频 Planning 的近似模型不构成执行层安全证明，仍需保留 Servo 保护，并对齐实际 q̇ 与模型残差。</p><p>m_min 通过实际日志与下游减速状态标定；另行监控 MoveIt 所用 Jacobian 的条件数。相机归一化指标与下游原始指标不一致，不能共用阈值。释放 roll 也必须修改执行端，六轴 UR5 完整 6D 满秩任务没有可供直接叠加的关节零空间。</p></div></details>
+<p class="caption">依据：<a href="https://arxiv.org/abs/2002.11901">Haviland &amp; Corke：可操作度优化与允许路径偏差</a>；<a href="https://arxiv.org/html/2503.06736v3#S4">Morton &amp; Pavone：OSCBF 约束过滤</a>；<a href="https://raw.githubusercontent.com/moveit/moveit/noetic-devel/moveit_ros/moveit_servo/src/servo_calcs.cpp">MoveIt Servo Noetic 源码</a>。二维动作空间映射和方向差分为本文针对 OmniMap 的组合推导。</p>
+<div class="note"><span class="note-label">验证顺序更新</span><p>执行反馈 → 归一化 σ_min 与方向差分 → 连续最小修正。对照原始 Fisher、简单加权合成、约束修正与 IK 可行视点采样；停滞时再使用离散 NBV 恢复。短时 rollout 与自由 roll 保留为后续独立比较。</p></div>
+</section>
+
 <section id="validation" class="report-section">
 <div class="section-heading"><span class="section-index">06 / VALIDATION</span><h2>验证“更能完成重建”，也验证“为什么停”</h2><p>所有组共享正确配置与时序基线，以相同真实时间预算比较；记录实际路径、入图帧数和终止类别。</p></div>
 <div class="report-prose section-bridge"><p>对照实验要同时报告实际运动与地图质量。固定场景、配对初始 q、时间预算和速度/加速度上限，按下表逐项增加能力。所有组都记录反馈，仅 D 用它改变决策；之后再单独比较自由 roll 与约束 QP。另做等实际路径的质量分析，判断收益来自多走了路，还是每米路径获取了更有效的信息。未完成任务的运行也应计入。</p></div>
 <div class="table-scroll"><table><thead><tr><th>对照组</th><th>增加的能力</th><th>要回答的问题</th></tr></thead><tbody><tr><td>A / 局部 Fisher</td><td>修正后的配置/时序基线，固定 roll</td><td>实际执行和重建质量如何？</td></tr><tr><td>B / 终点 IK＋构型评分</td><td>梯度附近的相同小动作集，连续 q 种子</td><td>简单运动学判断解决多少问题？</td></tr><tr><td>C / 短时 rollout</td><td>沿途可行性与执行预测</td><td>比只看终点，是否更少停滞？</td></tr><tr><td>D / C＋反馈重规划</td><td>实际受限时改变后续动作</td><td>预测失配后，反馈是否提高单位时间质量？</td></tr></tbody></table></div>
 <div class="metric-chips"><span>各类停机次数</span><span>任务完成率 / 停滞时间</span><span>最小归一化奇异值</span><span>关节峰值速度</span><span>覆盖率 / PSNR / 用时</span></div>
 <figure class="wide-figure"><img src="assets/ur5_nbv/compass-hardware.png" alt="COMPASS 原论文图 6：FR3 腕部相机在受限容器中进行主动观察与抓取的真机过程" width="1800" height="600" loading="lazy"><figcaption>真实系统参考：COMPASS 的 FR3 腕部相机实验（原论文 Fig. 6）。图片说明该论文的实验平台，不代表 OmniMap 已完成相同验证。<a href="https://arxiv.org/html/2509.14787v2#S6.F6">来源 ↗</a></figcaption></figure>
-<div class="closing"><span class="section-index">FIRST ACTION</span><h3>先让 Planning 看见实际动作效果。</h3><p>正确基线与同步记录完成后，补 Servo → Planning 的执行反馈，以及 Tracking → Planning 的有效新观测反馈，再验证短时信息动作选择。</p></div>
+<div class="closing"><span class="section-index">FIRST ACTION</span><h3>先让 Planning 看见实际动作效果。</h3><p>正确基线与同步记录完成后，补 Servo → Planning 的执行反馈，以及 Tracking → Planning 的有效新观测反馈，优先验证连续梯度修正，停滞时使用离散 NBV 恢复。</p></div>
 </section>
