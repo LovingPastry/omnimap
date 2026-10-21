@@ -61,7 +61,9 @@ class FisherMaskConfig:
     enabled: bool = False
     # Region of interest for gaussians that may contribute to the score,
     # [x_min, x_max, y_min, y_max, z_min, z_max]. "tsdf" = use tsdf.spatial_bounds
-    # (resolved by the wrapper), None = no ROI mask.
+    # (resolved by the wrapper), None = no ROI mask. Ignored once roi_query
+    # resolves to an instance (see below) -- that bbox replaces this one, it does
+    # not intersect with it, so a stale static box can't clip a found instance.
     roi_bounds: Any = None
     roi_padding_m: float = 0.0
     # Support plane (table top) height. Gaussians below it are dropped and a
@@ -69,6 +71,28 @@ class FisherMaskConfig:
     support_plane_z: Optional[float] = None
     # Soft width of the plane visibility gate (m).
     plane_softness_m: float = 0.01
+
+    # Open-vocabulary ROI: pick the tracked instance whose running SBERT caption
+    # embedding (tsdfs.instance_feature) is closest in cosine similarity to this
+    # text, and use *its* point bounding box (+ roi_padding_m) as the ROI instead
+    # of roi_bounds. None/"" = off, keep roi_bounds as-is.
+    #
+    # Why this instead of a live YOLO-World text prompt: YOLO-World's vocabulary
+    # is fixed at model-build time via reparameterize(yolo_texts) -- changing it
+    # means rerunning that step, which is too slow to do every tick. The mapper
+    # already runs YOLO-World -> TAP -> SBERT every `instance.instance_skip`
+    # frames and keeps one running caption embedding per tracked instance in
+    # `tsdfs.instance_feature`; a single query-text embedding compared against
+    # that table is cheap and reuses tracking instead of re-detecting.
+    roi_query: Optional[str] = "cup"
+    # Re-resolve the match every N ticks (re-encoding text is cheap; re-scanning
+    # the TSDF instance table is the same cost as one get_pointcloud_center()
+    # call, already made once per tick elsewhere, so this does not need to be 1).
+    roi_query_refresh_every: int = 30
+    # Minimum cosine similarity to accept a match; below this, fall back to
+    # roi_bounds (or no ROI if that is also unset) rather than lock onto a wrong
+    # instance. 1.0 = identical normalized embeddings, 0.0 = orthogonal.
+    roi_query_min_similarity: float = 0.2
 
 
 @dataclass
@@ -329,13 +353,101 @@ class FisherContributionMask:
             self.roi = (lo - pad, hi + pad)
         self.plane_z = None if cfg.support_plane_z is None else float(cfg.support_plane_z)
         self.softness = max(float(cfg.plane_softness_m), 1e-6)
+        self._query_text_embedding: Optional[torch.Tensor] = None
+        self._query_last_resolved_idx: Optional[int] = None
+        self.last_query_diag: dict[str, Any] = {}
 
-    def gaussian_weights(self, xyz: torch.Tensor) -> torch.Tensor:
+    def _resolve_query_roi(
+        self, tsdfs: Any, idx: Optional[int]
+    ) -> Optional[tuple[np.ndarray, np.ndarray]]:
+        """Pick the tracked instance best matching ``roi_query`` and return its
+        point bounding box (+ padding), or ``None`` if there is no usable match.
+
+        Cached by tick index so this only recomputes every
+        ``roi_query_refresh_every`` calls; the cosine comparison itself is a
+        handful of floats and negligible, but ``get_all_voxels()`` groups the
+        current TSDF point cloud by instance id and is worth not repeating
+        every tick.
+        """
+        query = self.cfg.roi_query
+        if not query or tsdfs is None:
+            return None
+        every = max(int(self.cfg.roi_query_refresh_every), 1)
+        if (
+            idx is not None
+            and self._query_last_resolved_idx is not None
+            and idx - self._query_last_resolved_idx < every
+            and self.last_query_diag.get("roi_query_box") is not None
+        ):
+            box = self.last_query_diag["roi_query_box"]
+            return np.asarray(box[0]), np.asarray(box[1])
+
+        sbert_model = getattr(tsdfs, "sbert_model", None)
+        instance_feature = getattr(tsdfs, "instance_feature", None)
+        if sbert_model is None or instance_feature is None or instance_feature.shape[0] <= 1:
+            self.last_query_diag = {"roi_query_match": None, "roi_query_similarity": float("nan")}
+            return None
+
+        if self._query_text_embedding is None:
+            emb = sbert_model.encode(
+                [query], convert_to_tensor=True, device=str(instance_feature.device),
+                show_progress_bar=False,
+            ).detach()
+            self._query_text_embedding = (emb / emb.norm(dim=-1, keepdim=True)).reshape(-1)
+
+        try:
+            points, _, _, instance_ids, _, _, _ = tsdfs.get_all_voxels(if_confidence=False)
+        except Exception:
+            self.last_query_diag = {"roi_query_match": None, "roi_query_similarity": float("nan")}
+            return None
+        if points.shape[0] == 0:
+            self.last_query_diag = {"roi_query_match": None, "roi_query_similarity": float("nan")}
+            return None
+
+        # Row 0 is the dummy slot instance id 0 (unassigned voxels) is gathered
+        # against; it was never written by a real caption and must not be a
+        # candidate match.
+        candidates = torch.unique(instance_ids)
+        candidates = candidates[candidates > 0]
+        candidates = candidates[candidates < instance_feature.shape[0]]
+        if candidates.numel() == 0:
+            self.last_query_diag = {"roi_query_match": None, "roi_query_similarity": float("nan")}
+            return None
+
+        sims = instance_feature[candidates].to(self._query_text_embedding.dtype) @ self._query_text_embedding
+        best = int(candidates[int(torch.argmax(sims).item())])
+        best_sim = float(sims.max().item())
+        if best_sim < float(self.cfg.roi_query_min_similarity):
+            self.last_query_diag = {
+                "roi_query_match": None,
+                "roi_query_similarity": best_sim,
+                "roi_query_box": None,
+            }
+            return None
+
+        pts = points[instance_ids == best].detach().cpu().numpy().astype(np.float64)
+        pad = float(self.cfg.roi_padding_m)
+        lo, hi = pts.min(axis=0) - pad, pts.max(axis=0) + pad
+        self._query_last_resolved_idx = idx
+        self.last_query_diag = {
+            "roi_query_match": best,
+            "roi_query_similarity": best_sim,
+            "roi_query_box": (lo.tolist(), hi.tolist()),
+        }
+        return lo, hi
+
+    def gaussian_weights(
+        self, xyz: torch.Tensor, *, tsdfs: Any = None, idx: Optional[int] = None
+    ) -> torch.Tensor:
         xyz = xyz.detach().reshape(-1, 3)
         keep = torch.ones(xyz.shape[0], dtype=torch.bool, device=xyz.device)
-        if self.roi is not None:
-            lo = torch.as_tensor(self.roi[0], dtype=xyz.dtype, device=xyz.device)
-            hi = torch.as_tensor(self.roi[1], dtype=xyz.dtype, device=xyz.device)
+        roi = self.roi
+        query_roi = self._resolve_query_roi(tsdfs, idx) if self.cfg.roi_query else None
+        if query_roi is not None:
+            roi = query_roi
+        if roi is not None:
+            lo = torch.as_tensor(roi[0], dtype=xyz.dtype, device=xyz.device)
+            hi = torch.as_tensor(roi[1], dtype=xyz.dtype, device=xyz.device)
             keep &= ((xyz >= lo) & (xyz <= hi)).all(dim=1)
         if self.plane_z is not None:
             keep &= xyz[:, 2] >= self.plane_z

@@ -97,14 +97,51 @@ class FakeFisherEval:
         return torch.tensor([float(g_t @ east), float(g_t @ north)])
 
 
-def make_backend(target_dir, amplitude=1000.0, n_gauss=500):
+def make_backend(target_dir, amplitude=1000.0, n_gauss=500, tsdfs=None):
     xyz = torch.randn(n_gauss, 3) * 0.1
     return SimpleNamespace(
         fisher_eval=FakeFisherEval(target_dir, amplitude),
         gaussians=SimpleNamespace(get_xyz=xyz),
         keyviewpoints=[],
+        tsdfs=tsdfs,
         get_fisher_scene_center=lambda: torch.zeros(3, device=DEVICE),
         get_runtime_device=lambda: DEVICE,
+    )
+
+
+class FakeSbertModel:
+    """Deterministic 1-hot-ish embedding by vocabulary index, so cosine similarity
+    is exactly 1.0 for the same word and 0.0 for a disjoint one."""
+
+    VOCAB = ["cup", "chair", "table"]
+
+    def encode(self, texts, convert_to_tensor=True, device="cpu", show_progress_bar=False):
+        out = torch.zeros(len(texts), len(self.VOCAB))
+        for i, t in enumerate(texts):
+            if t in self.VOCAB:
+                out[i, self.VOCAB.index(t)] = 1.0
+        return out.to(device)
+
+
+def make_fake_tsdfs(instance_words, points_by_instance):
+    """instance_words[k] is the caption for instance id k+1 (id 0 stays unassigned)."""
+    sbert = FakeSbertModel()
+    rows = [torch.zeros(len(sbert.VOCAB))]
+    for w in instance_words:
+        rows.append(sbert.encode([w])[0])
+    instance_feature = torch.stack(rows)
+    all_points, all_ids = [], []
+    for k, pts in enumerate(points_by_instance, start=1):
+        all_points.append(torch.as_tensor(pts, dtype=torch.float32))
+        all_ids.append(torch.full((len(pts),), k, dtype=torch.long))
+    points = torch.cat(all_points, dim=0)
+    ids = torch.cat(all_ids, dim=0)
+
+    def get_all_voxels(if_confidence=False):
+        return points, None, None, ids, None, None, None
+
+    return SimpleNamespace(
+        sbert_model=sbert, instance_feature=instance_feature, get_all_voxels=get_all_voxels
     )
 
 
@@ -323,6 +360,88 @@ def test_stop_zeroes_commands_and_mask_is_cleared():
     assert backend.fisher_eval.mask_installs == 5
     assert backend.fisher_eval.contribution_weight is None  # cleared after each tick
     assert "mask_kept_ratio" in res[0].nbv_diag
+
+
+def test_roi_query_picks_matching_instance_by_caption():
+    tsdfs = make_fake_tsdfs(
+        instance_words=["cup", "chair", "table"],
+        points_by_instance=[
+            [[0.1, 0.1, 0.1], [0.2, 0.1, 0.1]],  # instance 1 = "cup"
+            [[5.0, 5.0, 5.0], [5.1, 5.0, 5.0]],  # instance 2 = "chair"
+            [[-9.0, -9.0, -9.0], [-9.1, -9.0, -9.0]],  # instance 3 = "table"
+        ],
+    )
+    mask = FisherContributionMask(FisherMaskConfig(enabled=True, roi_query="cup", roi_padding_m=0.0))
+    xyz = torch.tensor([[0.15, 0.1, 0.1], [5.05, 5.0, 5.0], [-9.05, -9.0, -9.0]])
+    w = mask.gaussian_weights(xyz, tsdfs=tsdfs, idx=0)
+    assert w.tolist() == [1.0, 0.0, 0.0]  # only the "cup" instance's points kept
+    assert mask.last_query_diag["roi_query_match"] == 1
+    assert mask.last_query_diag["roi_query_similarity"] == 1.0
+
+
+def test_roi_query_below_threshold_falls_back_to_roi_bounds():
+    tsdfs = make_fake_tsdfs(
+        instance_words=["chair"],  # no "cup" tracked -> similarity to "cup" is 0
+        points_by_instance=[[[5.0, 5.0, 5.0]]],
+    )
+    mask = FisherContributionMask(
+        FisherMaskConfig(
+            enabled=True, roi_query="cup", roi_query_min_similarity=0.2,
+            roi_bounds=[-1, 1, -1, 1, -1, 1],
+        )
+    )
+    xyz = torch.tensor([[0.0, 0.0, 0.0], [5.0, 5.0, 5.0]])
+    w = mask.gaussian_weights(xyz, tsdfs=tsdfs, idx=0)
+    assert w.tolist() == [1.0, 0.0]  # fell back to the static box, not the unmatched instance
+    assert mask.last_query_diag["roi_query_match"] is None
+    assert mask.last_query_diag["roi_query_similarity"] == 0.0
+
+
+def test_roi_query_disabled_or_missing_tsdfs_is_a_noop():
+    mask = FisherContributionMask(FisherMaskConfig(enabled=True, roi_query=None,
+                                                     roi_bounds=[-1, 1, -1, 1, -1, 1]))
+    xyz = torch.tensor([[0.0, 0.0, 0.0], [5.0, 5.0, 5.0]])
+    assert mask.gaussian_weights(xyz, tsdfs=None, idx=0).tolist() == [1.0, 0.0]
+
+    tsdfs = make_fake_tsdfs(["cup"], [[[5.0, 5.0, 5.0]]])
+    mask2 = FisherContributionMask(FisherMaskConfig(enabled=True, roi_query="cup"))
+    # tsdfs=None even though roi_query is set: must not raise, must not filter.
+    assert mask2.gaussian_weights(xyz, tsdfs=None, idx=0).tolist() == [1.0, 1.0]
+
+
+def test_roi_query_caches_between_refreshes():
+    calls = {"n": 0}
+    tsdfs = make_fake_tsdfs(["cup"], [[[0.0, 0.0, 0.0]]])
+    real_get_all_voxels = tsdfs.get_all_voxels
+
+    def counting_get_all_voxels(if_confidence=False):
+        calls["n"] += 1
+        return real_get_all_voxels(if_confidence)
+
+    tsdfs.get_all_voxels = counting_get_all_voxels
+    mask = FisherContributionMask(FisherMaskConfig(enabled=True, roi_query="cup", roi_query_refresh_every=5))
+    xyz = torch.tensor([[0.0, 0.0, 0.0]])
+    for idx in range(12):
+        mask.gaussian_weights(xyz, tsdfs=tsdfs, idx=idx)
+    # idx 0 (first resolve), 5, 10 -> 3 rescans over 12 ticks with refresh_every=5.
+    assert calls["n"] == 3, calls
+
+
+def test_roi_query_end_to_end_through_motion_policy():
+    """roi_query flows through _install_fisher_mask into nbv_diag, with no error
+    when gs_backend.tsdfs is a plain object with the two attributes it needs."""
+    tsdfs = make_fake_tsdfs(
+        instance_words=["cup", "chair"],
+        points_by_instance=[[[0.0, 0.0, 0.3]], [[1.0, 1.0, 1.0]]],
+    )
+    backend = make_backend([1.0, 0.0, 0.3], tsdfs=tsdfs)
+    pol = FisherMotionPolicy(
+        **POLICY_KW,
+        nbv_config={"fisher_mask": {"enabled": True, "roi_query": "cup", "roi_padding_m": 0.5}},
+    )
+    res = rollout(pol, backend, 0.0, 0.6, 3)
+    assert res[0].nbv_diag.get("roi_query_match") == 1
+    assert res[0].nbv_diag.get("roi_query_similarity") == 1.0
 
 
 def test_normalized_speed_matches_nominal_scale():

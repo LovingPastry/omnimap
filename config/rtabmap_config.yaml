@@ -125,6 +125,11 @@ nbv_policy:
     roi_padding_m: 0.0
     support_plane_z: null       # 桌面高度；tsdf_min_z = 用 spatial_bounds 的 z_min
     plane_softness_m: 0.01
+    # 开放词汇 ROI：从 tsdfs.instance_feature（YOLO-World+TAP+SBERT 持续维护的实例语义表）里，
+    # 选与下面文本余弦最相似的实例，用它的点包围盒替换 roi_bounds；null/空串 = 关闭，退回 roi_bounds。
+    roi_query: cup              # 默认 "cup"；只有 fisher_mask.enabled=true 时才生效；null/"" 关闭，退回 roi_bounds
+    roi_query_refresh_every: 30 # 每隔多少 tick 重新匹配一次（文本只编码一次，重新扫 TSDF 实例表的开销约等于一次 get_pointcloud_center）
+    roi_query_min_similarity: 0.2  # 低于这个余弦相似度就认为没找到，退回 roi_bounds
   # 修复3 速度尺度：normalized = 梯度只给方向，速率 = v_nominal·|g|/(|g|+κ)，κ=|g| 滑动中位数
   velocity_mapping:
     mode: legacy                # legacy | normalized

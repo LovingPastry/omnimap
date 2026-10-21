@@ -1341,7 +1341,7 @@ class FisherMotionPolicy:
         )
         return rates
 
-    def _install_fisher_mask(self, gs_backend: Any) -> None:
+    def _install_fisher_mask(self, gs_backend: Any, idx: int) -> None:
         if self.fisher_mask is None:
             return
         fisher_eval = gs_backend.fisher_eval
@@ -1350,12 +1350,18 @@ class FisherMotionPolicy:
                 "nbv_policy.fisher_mask requires a Fisher evaluator with set_score_mask()"
             )
         xyz = gs_backend.gaussians.get_xyz
-        weights = self.fisher_mask.gaussian_weights(xyz)
+        weights = self.fisher_mask.gaussian_weights(
+            xyz, tsdfs=getattr(gs_backend, "tsdfs", None), idx=int(idx)
+        )
         fisher_eval.set_score_mask(
             FisherContributionMask.expand_to_contribution(weights),
             lambda cam: self.fisher_mask.view_gate(cam.camera_center),
         )
         self._tick_diag["mask_kept_ratio"] = float(weights.mean().item()) if weights.numel() else 1.0
+        if self.fisher_mask.cfg.roi_query:
+            for key, value in self.fisher_mask.last_query_diag.items():
+                if key != "roi_query_box":  # box is logged via mask_kept_ratio's effect, not raw
+                    self._tick_diag[key] = value
 
     @staticmethod
     def _clear_fisher_mask(gs_backend: Any) -> None:
@@ -1455,7 +1461,7 @@ class FisherMotionPolicy:
     ) -> MotionPolicyResult:
         """Compute the next pose; wraps the core chain with the nbv_policy mask and stop monitor."""
         self._tick_diag = {}
-        self._install_fisher_mask(gs_backend)
+        self._install_fisher_mask(gs_backend, idx)
         try:
             result = self._next_pose_core(
                 gs_backend=gs_backend,

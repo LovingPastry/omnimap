@@ -29,8 +29,13 @@ GROUND=(--ground --ground_z -0.076 --ground_size 2.0)
 TANGENT=(--nbv_set gradient_space=tangent)
 ANGLE=(--nbv_set gradient_space=angle)
 FEAS=(--nbv_set feasibility.enabled=true)
+# roi_query defaults to "cup" (resolved via SBERT against tracked instance
+# captions) and takes priority over roi_bounds when it matches. This ablation's
+# mask arm is documented as using the privileged ground-truth object bbox, so
+# roi_query is disabled here to keep that meaning fixed.
 MASK=(--nbv_set fisher_mask.enabled=true --nbv_set fisher_mask.roi_bounds=object
-      --nbv_set fisher_mask.roi_padding_m=0.02 --nbv_set fisher_mask.support_plane_z=object_min_z)
+      --nbv_set fisher_mask.roi_padding_m=0.02 --nbv_set fisher_mask.support_plane_z=object_min_z
+      --nbv_set fisher_mask.roi_query=null)
 RATE=(--nbv_set velocity_mapping.mode=normalized --nbv_set velocity_mapping.v_nominal_mps=0.05)
 STOP=(--nbv_set stop.enabled=true)
 

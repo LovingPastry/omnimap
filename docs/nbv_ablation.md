@@ -27,9 +27,22 @@ cartesian / spherical_rate / angular 三条路径都继承。
 **2. 可见性掩码 `fisher_mask`**：贡献向量 `cur/(history+λ)` 按 `[xyz(N·3), opacity(N)]` 布局逐元素乘权重：
 ROI 盒外、支撑面以下的高斯权重为 0；相机低于支撑面时整幅打分乘以 sigmoid 门（被桌面挡住）。
 这是用支撑面近似 TSDF 遮挡，不是逐高斯的 TSDF 光线投射。
-**没有用分割模型。** ROI 和支撑面高度来自：仿真 `object` / `object_min_z` = **真值物体点云的包围盒**（特权信息，
-现实中拿不到）；真机 `tsdf` / `tsdf_min_z` = 手设的 `tsdf.spatial_bounds`。改用 OmniMap 的实例分割需要先解决
-"选哪个实例"（离半球中心最近 / 被 spatial_bounds 包含最多 / YOLO-World 文本查询），尚未实现。
+
+**ROI 盒有两种来源。** 一是静态 `roi_bounds`：仿真 `object` / `object_min_z` = **真值物体点云的包围盒**（特权信息，
+现实中拿不到）；真机 `tsdf` / `tsdf_min_z` = 手设的 `tsdf.spatial_bounds`。
+
+二是 **2026-10-19 新增** 的 `roi_query`（默认 `"cup"`，`fisher_mask.enabled=true` 时才生效）：在建图本就在维护的
+`tsdfs.instance_feature`（YOLO-World 检测 + TAP 分割 + SBERT 文本特征，按 `instance.instance_skip` 帧持续累积
+的每实例语义向量表）里，选与查询文本余弦相似度最高的实例，取**该实例当前点云的包围盒**（+`roi_padding_m`）
+替换 `roi_bounds`；低于 `roi_query_min_similarity`（默认 0.2）则放弃匹配、退回 `roi_bounds`。匹配结果按
+`roi_query_refresh_every`（默认 30 tick）缓存，不每 tick 重算。
+
+**没有给 YOLO-World 一个运行时文本提示直接出框**：`reparameterize(yolo_texts)` 只在建模型时调一次，换文本意味着
+重新跑一次这一步，建图主循环里每 tick 做一次代价过高。`roi_query` 复用已经在运行的检测/分割/建库流程，只加一次
+文本编码和一次余弦比较。代价：**不是地面真值**，依赖分割、分类和文本匹配都对；实例 id 0（未分配体素）已在匹配
+候选里排除，匹配不到时的退回行为已覆盖测试（`tests/test_nbv_policy_improvements.py` 的 `test_roi_query_*`）。
+下方的消融报告（2026-10-17）测的仍是 `roi_bounds=object` 这条静态真值路径，`roi_query` 在跑消融时被显式关闭
+（见 `sim/ablation/run_nbv_ablation.sh`），两者的结果不可直接比较。
 
 **3. 速率映射 `velocity_mapping: normalized`**：梯度只给方向，速率与梯度绝对尺度无关：
 
@@ -63,12 +76,13 @@ m/s，`linear_vel_max` 退回安全兜底。
 nbv_policy:
   gradient_space: tangent          # angle = 原版
   feasibility:      {enabled: true, phi_min_deg: 15, phi_max_deg: 80}
-  fisher_mask:      {enabled: true, roi_bounds: tsdf, support_plane_z: tsdf_min_z}
+  fisher_mask:      {enabled: true, roi_bounds: tsdf, support_plane_z: tsdf_min_z, roi_query: cup}
   velocity_mapping: {mode: normalized, v_nominal_mps: 0.03}
   stop:             {enabled: true}
 ```
 
 - `roi_bounds: tsdf` / `support_plane_z: tsdf_min_z` 取 `tsdf.spatial_bounds`；仿真里可用 `object` / `object_min_z`（物体 AABB）。
+- `roi_query`（默认 `cup`）命中时优先于 `roi_bounds`；设为 `null` 或空串关闭，固定用 `roi_bounds`。
 - 仿真命令行覆盖：`--nbv_config file.yaml`、`--nbv_set fisher_mask.enabled=true`（可重复）；`--gradient_space` 仍有效且优先。
 - 真机两个规划入口（`info_flow_planning_node.py`、`info_flow_node.py`）读取同一节。**真机侧只同步了代码，未上机验证**；
   真机配置里窗口按 30 Hz 规划 tick 计（`score_window: 300`、`min_steps: 600`），预算用墙钟。
