@@ -444,6 +444,66 @@ def test_roi_query_end_to_end_through_motion_policy():
     assert res[0].nbv_diag.get("roi_query_similarity") == 1.0
 
 
+def test_roi_query_yolo_live_uses_detect_text_query_bbox():
+    """yolo_live mode must call tsdfs.detect_text_query_bbox(query, ...), not
+    touch sbert_model/instance_feature at all."""
+    calls = []
+
+    class FakeTsdfsYoloLive:
+        def detect_text_query_bbox(self, query_text, score_thresh=0.05, max_candidates=5):
+            calls.append((query_text, score_thresh))
+            return np.array([1.0, 2.0, 3.0]), np.array([1.5, 2.5, 3.5])
+
+    mask = FisherContributionMask(
+        FisherMaskConfig(enabled=True, roi_query="banana", roi_query_mode="yolo_live",
+                          roi_query_score_thresh=0.07, roi_padding_m=0.1)
+    )
+    xyz = torch.tensor([[1.2, 2.2, 3.2], [100.0, 100.0, 100.0]])
+    w = mask.gaussian_weights(xyz, tsdfs=FakeTsdfsYoloLive(), idx=0)
+    assert w.tolist() == [1.0, 0.0]
+    assert calls == [("banana", 0.07)]
+    assert mask.last_query_diag["roi_query_box"] == (
+        [0.9, 1.9, 2.9],
+        [1.6, 2.6, 3.6],
+    )
+
+
+def test_roi_query_yolo_live_no_frame_falls_back():
+    class FakeTsdfsNoFrame:
+        def detect_text_query_bbox(self, query_text, score_thresh=0.05, max_candidates=5):
+            return None  # no cached frame yet / nothing detected
+
+    mask = FisherContributionMask(
+        FisherMaskConfig(
+            enabled=True, roi_query="cup", roi_query_mode="yolo_live",
+            roi_bounds=[-1, 1, -1, 1, -1, 1],
+        )
+    )
+    xyz = torch.tensor([[0.0, 0.0, 0.0], [5.0, 5.0, 5.0]])
+    w = mask.gaussian_weights(xyz, tsdfs=FakeTsdfsNoFrame(), idx=0)
+    assert w.tolist() == [1.0, 0.0]  # fell back to roi_bounds
+    assert mask.last_query_diag["roi_query_match"] is None
+
+
+def test_roi_query_yolo_live_missing_method_is_a_noop():
+    """An old-style gs_backend.tsdfs without detect_text_query_bbox must not crash."""
+    mask = FisherContributionMask(
+        FisherMaskConfig(enabled=True, roi_query="cup", roi_query_mode="yolo_live")
+    )
+    xyz = torch.tensor([[0.0, 0.0, 0.0]])
+    w = mask.gaussian_weights(xyz, tsdfs=SimpleNamespace(), idx=0)
+    assert w.tolist() == [1.0]  # no roi_bounds either -> unfiltered, not a crash
+
+
+def test_roi_query_mode_validated():
+    try:
+        NBVPolicyConfig.from_dict({"fisher_mask": {"roi_query_mode": "yolo_once"}})
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("invalid roi_query_mode must be rejected")
+
+
 def test_normalized_speed_matches_nominal_scale():
     pol = FisherMotionPolicy(
         **POLICY_KW,

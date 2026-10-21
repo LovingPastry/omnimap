@@ -102,6 +102,7 @@ class TSDFBackEnd():
         self.all_pc = o3d.geometry.PointCloud()
         self.last_spatial_keep_mask = None
         self.last_spatial_mask_applied = False
+        self._latest_frame = None
         
         self.load_models()
         
@@ -345,6 +346,16 @@ class TSDFBackEnd():
         depth_m = depth_im
         depth_m_filtered = depth_m
         color_im_filtered = color_im
+        # Cached unconditionally (not just under vis_gui) so an open-vocabulary
+        # ROI query (nbv_policy.fisher_mask.roi_query_mode="yolo_live") always has
+        # a frame to run YOLO-World on, in headless sim and on the real robot too.
+        self._latest_frame = {
+            "color_im": color_im.detach(),
+            "depth_im": depth_im.detach(),
+            "cam_intr": cam_intr.detach().clone(),
+            "cam_pose": cam_pose.detach().clone(),
+            "tstamp": int(tstamp),
+        }
         self.cam_pose = torch.inverse(cam_pose).to(self.device)
         cam_pose = np.linalg.inv(cam_pose.detach().cpu().numpy().astype(np.float64, copy=False))
         extrinsic = o3c.Tensor.from_numpy(cam_pose)
@@ -706,9 +717,97 @@ class TSDFBackEnd():
             self.logger.info("当前实例数量：%d", len(self.instance_feature))
         if self.vis_gui:
             self.update_vis()
-        return   
-            
-            
+        return
+
+
+    def detect_text_query_bbox(
+        self,
+        query_text: str,
+        score_thresh: float = 0.05,
+        max_candidates: int = 5,
+    ):
+        """Run YOLO-World on the most recent frame with one ad-hoc query text and
+        back-project the best box into a world-frame AABB.
+
+        This is the true open-vocabulary path: it does NOT call
+        ``self.yolo_world.reparameterize()`` (that mutates the shared
+        ``self.text_feats`` used by every other call, including the main
+        detect-and-track loop in :meth:`integrate`, so repointing it at a
+        one-off query text would corrupt instance tracking for every frame
+        after this call). Instead it builds a *separate* ``data_samples.texts``
+        for this call only; ``YOLOWorldDetector.extract_feat`` runs the text
+        encoder fresh for that list and leaves ``self.text_feats`` untouched
+        (see ``thirdparty/YOLO-World/yolo_world/models/detectors/yolo_world.py``,
+        the ``elif ... hasattr(batch_data_samples[0], 'texts')`` branch).
+
+        Returns ``(bounds_min, bounds_max)`` as float64 ``(3,)`` numpy arrays,
+        or ``None`` if there is no cached frame yet, no detection clears
+        ``score_thresh``, or the chosen box has no valid depth to back-project.
+        """
+        frame = self._latest_frame
+        if frame is None:
+            return None
+
+        img = frame["color_im"].cpu().numpy()[:, :, ::-1]
+        query_texts = [[query_text]]
+        data_info = dict(img=img, img_id=0, texts=query_texts)
+        data_info = self.yolo_world_test_pipeline(data_info)
+        data_batch = dict(
+            inputs=data_info["inputs"].unsqueeze(0),
+            data_samples=[data_info["data_samples"]],
+        )
+        with torch.no_grad():
+            output = self.yolo_world.test_step(data_batch)[0]
+        pred_instances = output.pred_instances
+        pred_instances = pred_instances[pred_instances.scores.float() > score_thresh]
+        if len(pred_instances.scores) == 0:
+            return None
+        if len(pred_instances.scores) > max_candidates:
+            indices = pred_instances.scores.float().topk(max_candidates)[1]
+            pred_instances = pred_instances[indices]
+        best = int(pred_instances.scores.float().argmax().item())
+        x0, y0, x1, y1 = [float(v) for v in pred_instances["bboxes"][best].tolist()]
+
+        depth_im_scaled = frame["depth_im"] * self.depth_scale
+        cam_pose_np = np.linalg.inv(
+            frame["cam_pose"].cpu().numpy().astype(np.float64, copy=False)
+        )
+        extrinsic = o3c.Tensor.from_numpy(cam_pose_np)
+        coords, valid = self.depth_to_point_cloud(
+            depth_im_scaled.cpu().numpy(),
+            extrinsic,
+            self.intrinsic,
+            self.width,
+            self.height,
+            self.depth_scale,
+        )
+        # depth_to_point_cloud flattens width-major (permute(1, 0, 2) before the
+        # final reshape), so index as (width, height) here to match, not (height, width).
+        coords = coords.reshape(self.width, self.height, 3)
+        valid = valid.reshape(self.width, self.height)
+        xi0, xi1 = int(max(x0, 0)), int(min(x1, self.width))
+        yi0, yi1 = int(max(y0, 0)), int(min(y1, self.height))
+        if xi1 <= xi0 or yi1 <= yi0:
+            return None
+        box_coords = coords[xi0:xi1, yi0:yi1].reshape(-1, 3)
+        box_valid = valid[xi0:xi1, yi0:yi1].reshape(-1)
+        box_points = box_coords[box_valid]
+        if box_points.shape[0] == 0:
+            return None
+        pts = box_points.detach().cpu().numpy().astype(np.float64)
+        # A 2D detector box is not a tight mask: background/edge pixels at a
+        # different depth than the object fall inside the same box and would
+        # otherwise stretch the z-extent of the returned AABB (observed ~2x too
+        # deep on a real cup frame without this). Drop them the same way the
+        # instance-tracking path already does for its own per-mask point sets.
+        if pts.shape[0] >= 10:
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(pts)
+            _, ind = pcd.remove_statistical_outlier(nb_neighbors=10, std_ratio=2.0)
+            if len(ind) > 0:
+                pts = pts[ind]
+        return pts.min(axis=0), pts.max(axis=0)
+
     def get_instance_color(self):
         combined_indices = self.combined_indices[self.all_vaild]
         # get the max_id for the voxel_coords

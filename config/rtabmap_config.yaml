@@ -128,6 +128,9 @@ nbv_policy:
     # 开放词汇 ROI：从 tsdfs.instance_feature（YOLO-World+TAP+SBERT 持续维护的实例语义表）里，
     # 选与下面文本余弦最相似的实例，用它的点包围盒替换 roi_bounds；null/空串 = 关闭，退回 roi_bounds。
     roi_query: cup              # 默认 "cup"；只有 fisher_mask.enabled=true 时才生效；null/"" 关闭，退回 roi_bounds
+    roi_query_mode: sbert       # sbert = 比对 tsdfs.instance_feature 里已跟踪实例的语义特征（受限于已检测到的东西）；
+                                # yolo_live = 用这段文本重新单独跑一次 YOLO-World（真正的开放词汇检测，见下方注释）
+    roi_query_score_thresh: 0.05  # yolo_live 专用：检测置信度阈值
     roi_query_refresh_every: 30 # 每隔多少 tick 重新匹配一次（文本只编码一次，重新扫 TSDF 实例表的开销约等于一次 get_pointcloud_center）
     roi_query_min_similarity: 0.2  # 低于这个余弦相似度就认为没找到，退回 roi_bounds
   # 修复3 速度尺度：normalized = 梯度只给方向，速率 = v_nominal·|g|/(|g|+κ)，κ=|g| 滑动中位数
