@@ -1,0 +1,14 @@
+std_msgs/Header header
+uint32 planner_tick
+string source_frame
+string task_frame
+float64 sigma_min
+float64 sigma_max
+float64 condition_number
+float64 manipulability
+float64 command_speed_norm
+float64 actual_speed_norm
+int8 moveit_status
+string moveit_status_text
+bool transform_chain_valid
+string reason

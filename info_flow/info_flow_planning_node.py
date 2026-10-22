@@ -49,10 +49,17 @@ class InfoFlowPlanningNode:
     def __init__(self, args, config):
         rospy.init_node("info_flow_planning_node", anonymous=True)
         _, SphericalCommandMsg = import_omnimap_msgs()
+        try:
+            from omnimap_msgs.msg import KinematicStatus
+        except ImportError as exc:
+            raise RuntimeError(
+                "KinematicStatus is unavailable; build ros_ws and source ros_ws/devel/setup.bash"
+            ) from exc
 
         self.args = args
         self.config = config
         self.SphericalCommandMsg = SphericalCommandMsg
+        self.KinematicStatusMsg = KinematicStatus
         self.main_logger = get_section_logger("entry.infoflow_planning", "main")
         self.planner_logger = get_section_logger("planner.infoflow_planning", "planner")
         self.profile_logger = get_section_logger("profile.infoflow_planning", "profile")
@@ -63,6 +70,11 @@ class InfoFlowPlanningNode:
         self.pose_stamp_stale_timeout_sec = 1e6
         self.pose_receipt_stale_timeout_sec = 1e6
         self.status_log_interval_sec = max(0.2, float(args.status_log_interval_sec))
+        self.kinematic_status_timeout_sec = max(0.05, float(args.kinematic_status_timeout_sec))
+        self.kinematic_source_frame = str(args.kinematic_source_frame)
+        self.kinematic_task_frame = str(args.kinematic_task_frame)
+        self.kinematic_status_lock = threading.Lock()
+        self.latest_kinematic_status = None
 
         self.main_logger.info("正在等待相机内参消息...")
         _, K, calib, image_size_hw = wait_for_camera_calibration(args.camera_info_topic)
@@ -142,6 +154,12 @@ class InfoFlowPlanningNode:
             self.snapshot_ref_callback,
             queue_size=1,
         )
+        self.kinematic_status_sub = rospy.Subscriber(
+            args.kinematic_status_topic,
+            KinematicStatus,
+            self.kinematic_status_callback,
+            queue_size=1,
+        )
         self.timer = rospy.Timer(
             rospy.Duration(1.0 / max(self.planner_hz, 1e-6)),
             self._planning_timer_callback,
@@ -164,6 +182,27 @@ class InfoFlowPlanningNode:
             float(self.pose_stamp_stale_timeout_sec),
             float(self.pose_receipt_stale_timeout_sec),
         )
+
+    def kinematic_status_callback(self, msg):
+        with self.kinematic_status_lock:
+            self.latest_kinematic_status = (msg, time.monotonic())
+
+    def _kinematic_feedback(self):
+        with self.kinematic_status_lock:
+            cached = self.latest_kinematic_status
+        if cached is None:
+            return None, "kinematic_status_missing"
+        msg, received_wall = cached
+        age = time.monotonic() - float(received_wall)
+        if age > self.kinematic_status_timeout_sec:
+            return None, f"kinematic_status_stale:{age:.3f}s"
+        if not bool(msg.transform_chain_valid):
+            return None, "kinematic_transform_chain_invalid"
+        if self.kinematic_source_frame and str(msg.source_frame) != self.kinematic_source_frame:
+            return None, f"kinematic_source_frame_mismatch:{msg.source_frame}"
+        if self.kinematic_task_frame and str(msg.task_frame) != self.kinematic_task_frame:
+            return None, f"kinematic_task_frame_mismatch:{msg.task_frame}"
+        return msg, ""
 
     def _planner_log_throttle(
         self, key: str, interval_sec: float, level: str, msg: str, *args
@@ -288,6 +327,7 @@ class InfoFlowPlanningNode:
                     else "missing_fallback"
                 )
             return
+
         live_center = np.asarray(geometry["center"], dtype=np.float64).reshape(3)
         if self.fixed_hemisphere_center is None:
             self.fixed_hemisphere_center = live_center.copy()
@@ -631,6 +671,28 @@ class InfoFlowPlanningNode:
             self._maybe_log_status()
             return
 
+        # 下游反馈失效时不能继续发送旧的运动意图；等待诊断恢复并显式停车。
+        kin_status, kin_reason = self._kinematic_feedback()
+        if kin_status is None:
+            self._planner_log_throttle(
+                "kinematic_feedback_invalid", 1.0, "warning",
+                "运动学反馈不可用，发布 stop command：%s", kin_reason,
+            )
+            self._publish_stop_command(
+                reason=kin_reason, stamp=pose_state.stamp,
+                model_version=int(snapshot.model_version),
+            )
+            self._maybe_log_status()
+            return
+        moveit_status = int(getattr(kin_status, "moveit_status", 0))
+        if moveit_status == 2:  # MoveIt Servo HALT_FOR_SINGULARITY
+            self._publish_stop_command(
+                reason="moveit_halt_for_singularity", stamp=pose_state.stamp,
+                model_version=int(snapshot.model_version),
+            )
+            self._maybe_log_status()
+            return
+
         try:
             with self.motion_policy_lock:
                 # 半球参考约束每个 tick 施加；动态值来自 snapshot 中的 TSDF 几何元数据。
@@ -679,18 +741,26 @@ class InfoFlowPlanningNode:
             getattr(motion_result, "reference_scene_center", [0.0, 0.0, 0.0]),
             dtype=np.float64,
         ).reshape(3)
+        if moveit_status == 1:  # DECELERATE_FOR_SINGULARITY
+            theta_rate = 0.5 * float(getattr(motion_result, "theta_rate_applied", 0.0))
+            phi_rate = 0.5 * float(getattr(motion_result, "phi_rate_applied", 0.0))
+            feedback_reason = "moveit_decelerate_for_singularity"
+        else:
+            theta_rate = float(getattr(motion_result, "theta_rate_applied", 0.0))
+            phi_rate = float(getattr(motion_result, "phi_rate_applied", 0.0))
+            feedback_reason = str(getattr(motion_result, "stop_reason", "unknown"))
         self._publish_spherical_command(
             stamp=pose_state.stamp,
             model_version=int(snapshot.model_version),
             planner_tick=int(self.planner_tick),
             dt=float(getattr(motion_result, "dt", self.motion_policy.dt)),
-            theta_rate=float(getattr(motion_result, "theta_rate_applied", 0.0)),
-            phi_rate=float(getattr(motion_result, "phi_rate_applied", 0.0)),
+            theta_rate=theta_rate,
+            phi_rate=phi_rate,
             reference_radius=reference_radius,
             reference_scene_center=reference_scene_center,
             fisher_score=float(getattr(motion_result, "fisher_score", 0.0)),
             should_stop=bool(getattr(motion_result, "should_stop", False)),
-            stop_reason=str(getattr(motion_result, "stop_reason", "unknown")),
+            stop_reason=feedback_reason,
         )
         self._planner_log_throttle(
             "reference_sphere_publish",
@@ -785,6 +855,10 @@ def build_argparser():
     )
     parser.add_argument("--log_every", type=int, default=10)
     parser.add_argument("--status_log_interval_sec", type=float, default=1.0)
+    parser.add_argument("--kinematic_status_topic", type=str, default="/omnimap/kinematic_status")
+    parser.add_argument("--kinematic_status_timeout_sec", type=float, default=0.5)
+    parser.add_argument("--kinematic_source_frame", type=str, default="base_link")
+    parser.add_argument("--kinematic_task_frame", type=str, default="tool0")
     parser.add_argument(
         "--log_file",
         action=argparse.BooleanOptionalAction,
