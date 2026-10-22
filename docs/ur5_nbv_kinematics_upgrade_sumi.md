@@ -4,17 +4,32 @@
 
 ## 现场核查状态
 
-本轮从算力侧执行 `ssh sumi` 时，远端在 SSH key exchange 阶段返回 `Connection closed by remote host`；`sumi` 解析到的两个地址均无法进入。因此下面的“桥接节点文件名和行号”不能写成已确认事实，必须先在上位机执行第 1 节的 inventory 命令。MoveIt 官方 Noetic 源码行号已经核对，远端若使用未修改的 noetic-devel，应与这些位置一致；若有本地 fork，以 inventory 输出为准。
+SSH 已恢复，以下文件和行号已经在 `sumi` 的 `~/ros/catkin_ws/src` 中只读核对。源码中没有找到 `cam_1_baselink`；实际相机 frame 是 `cam_1_color_optical_frame`。当前桥接输入和输出都标记为 `base_link`，桥接通过 TF 读取 camera/tool0 的位置差，修正同一 `base_link` 表达下的参考点速度。
 
-## 1. 在 sumi 上先生成精确文件和行号清单
+运行时 ROS master 当前不可访问，因此节点是否正在运行还没有核实；仓库状态干净，没有远端工作区修改。
 
-不要先改代码。登录后运行：
+## 1. 已核实的桥接和启动链路
+
+已核实的文件：
+
+| 文件与行 | 已确认行为 |
+|---|---|
+| `robot_else_nodes/scripts/camera_twist_bridge.py:33–37` | 输入 `/servo_server/delta_twist_camera`，输出 `/servo_server/delta_twist_cmds`，相机为 `cam_1_color_optical_frame`，末端为 `tool0` |
+| `camera_twist_bridge.py:64–66` | 订阅输入并发布输出；`74–80` 只接受 `header.frame_id == base_link` |
+| `camera_twist_bridge.py:84–90` | 查询 `base_link→camera` 和 `base_link→tool0` 的平移，构造 `r_tc=p_C−p_T` |
+| `camera_twist_bridge.py:111–138` | 使用 `v_T=v_C−ω×r_tc`、`ω_T=ω_C`，输出 frame 仍为 `base_link` |
+| `robot_else_nodes/scripts/camera_twist_bridge_kf.py:47–52, 169–208` | KF 版本使用相同 frame、TF 和参考点公式，只是在输出前对 six components 做滤波 |
+| `robot_else_nodes/launch/launch_robot.launch:12–15` | `start_servo` 默认 `false` |
+| `launch_robot.launch:78–85` | Servo 可启动，但 `camera_twist_bridge.py` 节点目前被注释，没有自动启动 |
+| `universal_robot/ur5_moveit_config/config/ur5_servo.yaml:29–43` | MoveIt 使用 `base_link` planning/command frame、`tool0` EE、输入 `/servo_server/delta_twist_cmds`、status `/servo_server/status`，奇异阈值为 17/30 |
+
+若需要重复生成清单，使用：
 
 ```bash
 cd ~/ros/catkin_ws/src
 printf '%s\n' '=== bridge candidates ==='
 rg -n --hidden -g '*.cpp' -g '*.h' -g '*.py' -g '*.launch' -g '*.yaml' \
-  'cam_1_baselink|tool0|delta_twist_camera|TwistStamped|lookupTransform|lookup_transform|tf2' .
+  'cam_1_baselink|cam_1_color_optical_frame|tool0|delta_twist_camera|TwistStamped|lookupTransform|lookup_transform|tf2' .
 
 printf '%s\n' '=== MoveIt Servo source/config ==='
 find . -path '*moveit_servo*' -type f | sort
@@ -24,10 +39,10 @@ rg -n 'condition|singular|lower_singularity_threshold|hard_stop_singularity_thre
 printf '%s\n' '=== runtime graph ==='
 rosnode list | sort
 rostopic list | rg 'servo|twist|joint|status|cam_1|tool0'
-rosnode list | while read n; do rosnode info "$n" 2>/dev/null | rg -q 'cam_1_baselink|tool0|delta_twist_camera' && { echo "--- $n"; rosnode info "$n"; }; done
+rosnode list | while read n; do rosnode info "$n" 2>/dev/null | rg -q 'cam_1_baselink|cam_1_color_optical_frame|tool0|delta_twist_camera' && { echo "--- $n"; rosnode info "$n"; }; done
 ```
 
-把输出保存为 `~/omnimap_kinematic_inventory_$(date +%Y%m%d_%H%M%S).txt`。这一步会给出桥接源文件的真实文件名和行号，也能确认桥接节点究竟是发布给 MoveIt Servo，还是直接发布给 UR 控制器。
+把输出保存为 `~/omnimap_kinematic_inventory_$(date +%Y%m%d_%H%M%S).txt`。运行时还要先 `source /opt/ros/noetic/setup.bash` 和 `source ~/ros/catkin_ws/devel/setup.bash`；本次检查发现 ROS master 不可访问，所以没有把空的 `rosnode list` 当作运行链路证据。
 
 ## 2. MoveIt Servo 需要记录的指标
 
@@ -56,27 +71,30 @@ rostopic echo -n 1 /servo_server/status
 
 ## 3. 桥接节点的推荐改法
 
-### 3.1 先确认输入和输出
+### 3.1 已确认输入和输出
 
-从第 1 节 inventory 找到桥接源文件后，在该文件当前行号附近确认以下四件事：
+当前真实链路是：
 
-1. 订阅的输入 topic 和 `TwistStamped.header.frame_id`；
-2. TF 查询的父子 frame，是 `cam_1_baselink -> tool0` 还是反方向；
-3. 输出 topic 是否是 MoveIt Servo 的 `cartesian_command_in_topic`；
-4. 输出是 `TwistStamped`，还是已经转换成 `JointJog`/厂商速度命令。
+```text
+OmniMap Servo Runtime
+  /servo_server/delta_twist_camera  (TwistStamped, frame_id=base_link)
+    → camera_twist_bridge.py 或 camera_twist_bridge_kf.py
+  /servo_server/delta_twist_cmds   (TwistStamped, frame_id=base_link)
+    → MoveIt Servo (ur5_servo.yaml:34)
+```
 
-桥接必须只做一次 frame 变换。若桥接已经输出 `tool0` frame 的 Twist，则输出消息的 `header.frame_id` 要写成 `tool0`，并在诊断消息中记录 `source_frame=cam_1_baselink`、`task_frame=tool0`、TF 时间戳和变换年龄。
+桥接不是把消息改成 `tool0` frame，也不是把相机轴旋转到基座轴；输入和输出都用 `base_link` 表达。它利用 `base_link→cam_1_color_optical_frame` 与 `base_link→tool0` 的平移，改变 Twist 的参考点。`launch_robot.launch:82–85` 当前把普通桥接节点注释掉，所以必须确认实际启动命令是否另行运行了 bridge/KF 节点。
 
 ### 3.2 检查 Twist 变换是否包含平移项
 
-刚体变换的完整空间速度变换为：
+这里的代码已经实现了平移项。它定义 `r_tc=p_C−p_T`，并在 `camera_twist_bridge.py:122–130` 使用：
 
 ```text
-v_tool = R v_cam + p × (R ω_cam)
-ω_tool = R ω_cam
+v_T^B = v_C^B − ω^B × (p_C^B − p_T^B)
+ω_T^B = ω_C^B
 ```
 
-如果现有桥接只执行 `R*v` 和 `R*ω`，它相当于只变换轴方向，没有变换参考点。此时要么把参考点固定为同一个 frame 并在 Planning 侧使用对应 Jacobian，要么在桥接中补上 `p × (Rω)`。补项前必须用静态 TF 和一组手工角速度命令验证符号。
+这与完整刚体速度关系一致，因为所有向量已经在 `base_link` 中表达；不应再给 MoveIt 发送一次 `cam→tool0` 变换。Planning 侧的 `J̄(q)` 应使用与 Servo 一致的 `base_link` 表达和 `tool0` 参考点。KF 版本只对变换后的 six components 做滤波，不能把滤波器当作奇异性诊断。
 
 ### 3.3 在桥接节点增加诊断输出
 
@@ -87,7 +105,7 @@ v_tool = R v_cam + p × (R ω_cam)
 - `TwistStamped` 的输入/输出 frame、时间戳和变换年龄日志；
 - 输入速度、桥接后速度、MoveIt status 的同一序号或时间戳关联。
 
-诊断输出建议放在桥接节点，因为它同时看到 camera-frame 命令、tool0-frame 命令和最终发布 topic。MoveIt 内部 condition number 仍由 Servo 自己计算；桥接只负责收集，不应从 status code 伪造数值。
+诊断输出建议放在桥接节点或独立 monitor；当前桥接能看到输入命令、变换后的 tool-reference 速度和最终输出 topic，但它不拥有 MoveIt `RobotState`，不能自行计算可靠的 Jacobian。MoveIt 内部 condition number 仍由 Servo 自己计算；桥接只负责收集，不应从 status code 伪造数值。
 
 ## 4. 运动学指标的落地位置
 
@@ -114,7 +132,7 @@ m(q) = σmin(J̄)
 ## 5. 建议的上位机改动顺序
 
 1. 只增加 status、frame 和速度日志，不改变 Twist 数值。
-2. 确认 `cam_1_baselink -> tool0` 的方向、静态 TF、时间戳和是否含 `p×ω`。
+2. 确认 `base_link -> cam_1_color_optical_frame`、`base_link -> tool0` 的 TF 时间戳和 `p×ω` 项；不要再寻找不存在的 `cam_1_baselink`。
 3. 新增 `omnimap_kinematic_monitor.cpp`，发布 `sigma_min`/condition，不参与控制。
 4. 用日志标定 Planning 的 `m_min`，并比较 MoveIt 开始减速时的 condition 与本机 `sigma_min`。
 5. 仅在诊断稳定后，让 Planning 的二维球面命令使用最小半空间修正。
@@ -126,7 +144,10 @@ m(q) = σmin(J̄)
 cd ~/ros/catkin_ws
 catkin_make --pkg <现有_robot_pkg>
 source devel/setup.bash
-rosrun tf tf_echo cam_1_baselink tool0
+rosrun tf tf_echo base_link cam_1_color_optical_frame
+rosrun tf tf_echo base_link tool0
+rostopic info /servo_server/delta_twist_camera
+rostopic info /servo_server/delta_twist_cmds
 rostopic hz /joint_states
 rostopic echo -n 5 /servo_server/status
 rostopic echo -n 5 <bridge_input_topic>

@@ -2,7 +2,7 @@
 
 更新时间：2026-10-22
 
-本文只描述本机仓库 `/home/fuyx/lanzc/omnimap` 的改动。上位机 `sumi` 的改动见 [`ur5_nbv_kinematics_upgrade_sumi.md`](ur5_nbv_kinematics_upgrade_sumi.md)。本次检查中 `ssh sumi` 在 SSH 密钥交换阶段被远端关闭，因此远端文件名和行号不能伪装成已核实事实。
+本文只描述本机仓库 `/home/fuyx/lanzc/omnimap` 的改动。上位机 `sumi` 的改动见 [`ur5_nbv_kinematics_upgrade_sumi.md`](ur5_nbv_kinematics_upgrade_sumi.md)。远端文件已通过只读 SSH 核对；实际代码使用 `cam_1_color_optical_frame`，没有找到 `cam_1_baselink`。
 
 ## 已核实的当前链路
 
@@ -104,25 +104,26 @@ rostopic echo -n 1 /omnimap/kinematic_status
 
 ## frame 与桥接的具体判定
 
-当前本机代码默认 `cmd_frame=base_link`，但用户提供的实际链路还包含 `cam_1_baselink -> tool0` 桥接节点。必须先确认桥接节点的输入输出：
+当前本机代码默认 `cmd_frame=base_link`。已核实的 sumi 桥接为 `robot_else_nodes/scripts/camera_twist_bridge.py:33–138`（另有 KF 版本）：输入 `/servo_server/delta_twist_camera`、输出 `/servo_server/delta_twist_cmds`，输入输出均是 `base_link`，通过 `base_link` 下 camera/tool0 的位置差修正参考点速度。必须先确认实际启动了哪个桥接节点：
 
 ```bash
 rosnode info <bridge_node>
 rostopic info /servo_server/delta_twist_camera
-rostopic info <bridge_output_topic>
-rosrun tf tf_echo cam_1_baselink tool0
+rostopic info /servo_server/delta_twist_cmds
+rosrun tf tf_echo base_link cam_1_color_optical_frame
+rosrun tf tf_echo base_link tool0
 ```
 
-如果桥接节点已经将 Twist 变换到 `tool0` 并发布给 MoveIt Servo，Planning/Servo 侧只应记录原始命令和桥接后的命令，不能再次做 camera-to-tool0 变换。如果桥接节点只发布 TF 而 MoveIt Servo 直接订阅 camera-frame Twist，则让 `TwistStamped.header.frame_id` 明确为 `cam_1_baselink`，由 MoveIt 做一次 frame 旋转。
+桥接已经在 `base_link` 表达下完成 camera-reference 到 tool-reference 的平移项修正，并发布给 MoveIt Servo；Planning/Servo 侧不能再次做 camera-to-tool0 变换。MoveIt 配置 `universal_robot/ur5_moveit_config/config/ur5_servo.yaml:29–37` 也确认 planning/command frame 为 `base_link`、EE 为 `tool0`、输入为 `/servo_server/delta_twist_cmds`。
 
-`cam_1_baselink` 与 `tool0` 之间有平移时，要确认桥接实现是否使用完整 Twist adjoint：
+桥接实现的等价关系为：
 
 ```text
 v_tool = R v_cam + p × (R ω_cam)
 ω_tool = R ω_cam
 ```
 
-MoveIt Noetic 的 `servo_calcs.cpp:472–500` 对普通 incoming frame 只旋转 linear/angular 两个向量；如果桥接节点已经加入 `p × ω`，再把它当作普通 frame 交给 MoveIt 会重复处理。这个细节决定 `J_camera` 应取相机参考点，还是取 `J_tool0`。
+MoveIt Noetic 的 `servo_calcs.cpp:472–500` 对普通 incoming frame 只旋转 linear/angular 两个向量；本链路已在 `base_link` 中完成参考点变换，因此不能再把输出伪装成 camera-frame 交给 MoveIt。构型指标应使用与 Servo 相同的 `tool0` 参考点。
 
 ## 接受标准
 
