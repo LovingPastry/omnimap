@@ -685,9 +685,23 @@ class InfoFlowPlanningNode:
             self._maybe_log_status()
             return
         moveit_status = int(getattr(kin_status, "moveit_status", 0))
+        moveit_status_text = str(getattr(kin_status, "moveit_status_text", ""))
         if moveit_status == 2:  # MoveIt Servo HALT_FOR_SINGULARITY
             self._publish_stop_command(
                 reason="moveit_halt_for_singularity", stamp=pose_state.stamp,
+                model_version=int(snapshot.model_version),
+            )
+            self._maybe_log_status()
+            return
+        if moveit_status not in (0, 1):
+            self._planner_log_throttle(
+                "moveit_unsafe_status", 1.0, "warning",
+                "MoveIt status=%d (%s)，发布 stop command",
+                moveit_status, moveit_status_text,
+            )
+            self._publish_stop_command(
+                reason=f"moveit_status_{moveit_status}:{moveit_status_text}",
+                stamp=pose_state.stamp,
                 model_version=int(snapshot.model_version),
             )
             self._maybe_log_status()
