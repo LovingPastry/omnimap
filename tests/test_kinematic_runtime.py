@@ -10,7 +10,7 @@ import sys
 import threading
 import unittest
 from pathlib import Path
-from types import SimpleNamespace as NS
+from types import SimpleNamespace as NS, ModuleType
 from unittest.mock import Mock, patch
 
 import numpy as np
@@ -24,11 +24,17 @@ from omnimap_msgs.msg import KinematicStatus, SphericalCommand
 from kinematic_feedback import KinematicFeedbackGate
 from test_kinematic_feedback import feedback
 
-# GaussianModel deserialization needs CUDA extensions; these checks use a fixed
-# snapshot/result and do not evaluate the Fisher objective or map quality.
+# Compute-side modules need torch/CUDA. These callback checks use a fixed
+# snapshot/Fisher result and never call those modules. Empty torch deliberately
+# has no numerical implementation: an accidental call must fail, not be mocked
+# into a passing result. This also runs in the execution-side InfoFlow env.
 snapshot_stub = NS(PlannerSnapshot=object, load_planner_snapshot_file=Mock(),
                    save_planner_snapshot_file=Mock())
-with patch.dict(sys.modules, {"planner_snapshot": snapshot_stub}):
+with patch.dict(sys.modules, {
+        "planner_snapshot": snapshot_stub, "torch": ModuleType("torch"),
+        "matplotlib": NS(cm=None),
+        "omnimap.gaussian.renderer.nbv.motion_policy": NS(FisherMotionPolicy=object),
+        "omnimap.gaussian.renderer.nbv.policy_improvements": NS(nbv_policy_from_config=None)}):
     import info_flow_planning_node as planning
 import info_flow_servo_runtime as servo
 
@@ -180,8 +186,9 @@ class ServoTests(unittest.TestCase):
                 angular_accel_max=0).items():
             setattr(args, key, value)
         self.pub = Publisher()
+        self.trace_pub = Publisher()
         self.log = logger()
-        with patch.object(rospy, "init_node"), patch.object(rospy, "Publisher", return_value=self.pub), \
+        with patch.object(rospy, "init_node"), patch.object(rospy, "Publisher", side_effect=[self.pub, self.trace_pub]), \
                 patch.object(rospy, "Subscriber"), patch.object(rospy, "Timer"), \
                 patch.object(tf2_ros, "Buffer"), patch.object(tf2_ros, "TransformListener"), \
                 patch.object(servo, "get_section_logger", return_value=self.log):
@@ -233,6 +240,13 @@ class ServoTests(unittest.TestCase):
         self.assertIn("linear=[0 0.06 0]", trace)
         self.assertIn("tick=42 model_v=7", trace)
         self.assertIn("twist_stamp=100.000000000", trace)
+        companion = self.trace_pub.messages[-1]
+        self.assertEqual(companion.planner_tick, 42)
+        self.assertEqual(companion.model_version, 7)
+        self.assertEqual(companion.command, msg)
+        buffer = io.BytesIO()
+        companion.serialize(buffer)
+        self.assertEqual(type(companion)().deserialize(buffer.getvalue()), companion)
 
     def test_missing_stale_and_nonfinite_commands_stop(self):
         cached = self.node.latest_cmd

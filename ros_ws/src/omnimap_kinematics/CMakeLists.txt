@@ -1,0 +1,20 @@
+cmake_minimum_required(VERSION 3.5)
+project(omnimap_kinematics)
+add_compile_options(-std=c++14 -Wall -Wextra)
+find_package(catkin REQUIRED COMPONENTS roscpp rospy std_msgs geometry_msgs
+  sensor_msgs omnimap_msgs moveit_core moveit_ros_planning tf2_ros)
+find_package(Eigen3 REQUIRED)
+catkin_package(CATKIN_DEPENDS roscpp rospy std_msgs geometry_msgs sensor_msgs
+  omnimap_msgs moveit_core moveit_ros_planning tf2_ros)
+include_directories(${catkin_INCLUDE_DIRS} ${EIGEN3_INCLUDE_DIRS})
+add_executable(omnimap_kinematic_monitor src/omnimap_kinematic_monitor.cpp)
+add_dependencies(omnimap_kinematic_monitor ${catkin_EXPORTED_TARGETS})
+target_link_libraries(omnimap_kinematic_monitor ${catkin_LIBRARIES})
+catkin_install_python(PROGRAMS scripts/camera_twist_bridge.py
+  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION})
+install(TARGETS omnimap_kinematic_monitor RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION})
+install(DIRECTORY launch config DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION})
+if(CATKIN_ENABLE_TESTING)
+  find_package(rostest REQUIRED)
+  add_rostest(tests/kinematics.test)
+endif()

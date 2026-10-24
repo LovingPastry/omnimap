@@ -1,0 +1,17 @@
+<robot name="kinematics_test_chain">
+  <!-- Deliberately rotate model, planning and group-root frames independently. -->
+  <link name="world"/><link name="base_link"/><link name="chain_root"/>
+  <joint name="base_mount" type="fixed"><parent link="world"/><child link="base_link"/><origin xyz="0.3 -0.2 0.4" rpy="0.2 -0.3 0.4"/></joint>
+  <joint name="root_mount" type="fixed"><parent link="base_link"/><child link="chain_root"/><origin xyz="0.1 -0.05 0.1" rpy="0.15 0.25 -0.35"/></joint>
+  <link name="l1"/><link name="l2"/><link name="l3"/>
+  <link name="l4"/><link name="l5"/><link name="l6"/>
+  <joint name="j1" type="revolute"><parent link="chain_root"/><child link="l1"/><origin xyz="0 0 0.1"/><axis xyz="0 0 1"/><limit lower="-6.28" upper="6.28" effort="100" velocity="1"/></joint>
+  <joint name="j2" type="revolute"><parent link="l1"/><child link="l2"/><origin xyz="0.1 0 0.1"/><axis xyz="0 1 0"/><limit lower="-6.28" upper="6.28" effort="100" velocity="2"/></joint>
+  <joint name="j3" type="revolute"><parent link="l2"/><child link="l3"/><origin xyz="0.3 0 0"/><axis xyz="0 1 0"/><limit lower="-6.28" upper="6.28" effort="100" velocity="3"/></joint>
+  <joint name="j4" type="revolute"><parent link="l3"/><child link="l4"/><origin xyz="0.25 0 0"/><axis xyz="1 0 0"/><limit lower="-6.28" upper="6.28" effort="100" velocity="4"/></joint>
+  <joint name="j5" type="revolute"><parent link="l4"/><child link="l5"/><origin xyz="0.08 0 0"/><axis xyz="0 1 0"/><limit lower="-6.28" upper="6.28" effort="100" velocity="5"/></joint>
+  <joint name="j6" type="revolute"><parent link="l5"/><child link="l6"/><origin xyz="0.06 0 0"/><axis xyz="0 0 1"/><limit lower="-6.28" upper="6.28" effort="100" velocity="6"/></joint>
+  <link name="tool0"/>
+  <joint name="tool_mount" type="fixed"><parent link="l6"/><child link="tool0"/><origin xyz="0.07 0.01 0.09" rpy="0.1 0.2 -0.1"/></joint>
+  <!-- The calibrated optical frame is external TF, as on the real workcell. -->
+</robot>

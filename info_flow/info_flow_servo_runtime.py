@@ -10,6 +10,7 @@ import numpy as np
 import rospy
 import tf2_ros
 from geometry_msgs.msg import TwistStamped
+from omnimap_msgs.msg import ServoTwistTrace
 from scipy.spatial.transform import Rotation as R
 
 from servo_runtime_common import (
@@ -59,6 +60,8 @@ class InfoFlowServoRuntime:
         self.camera_frame = str(args.camera_frame)
         self.cmd_frame = str(args.cmd_frame)
         self.cmd_topic = str(args.cmd_topic)
+        if rospy.resolve_name(args.twist_trace_topic) == rospy.resolve_name(self.cmd_topic):
+            raise ValueError("twist_trace_topic and cmd_topic must differ")
         if (not self.world_frame.lstrip("/") or
                 self.cmd_frame.lstrip("/") != self.world_frame.lstrip("/")):
             raise ValueError("servo computes Twist in world_frame; cmd_frame must match it")
@@ -88,6 +91,7 @@ class InfoFlowServoRuntime:
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
         self.cmd_pub = rospy.Publisher(args.cmd_topic, TwistStamped, queue_size=1)
+        self.twist_trace_pub = rospy.Publisher(args.twist_trace_topic, ServoTwistTrace, queue_size=10)
         self.latest_cmd: Optional[CachedSphericalCommand] = None
         self._last_cmd_receipt_wall: Optional[float] = None
         self._cmd_interval_ema_sec: Optional[float] = None
@@ -253,6 +257,15 @@ class InfoFlowServoRuntime:
                 linear_cmd=linear_cmd, angular_cmd=angular_cmd,
             )
         linear, angular = msg.twist.linear, msg.twist.angular
+        trace = ServoTwistTrace()
+        trace.header.stamp = msg.header.stamp
+        trace.header.frame_id = msg.header.frame_id
+        trace.planner_tick = int(cmd.planner_tick) if cmd is not None else 0
+        trace.model_version = int(cmd.model_version) if cmd is not None else 0
+        trace.command_stamp = cmd.header.stamp if cmd is not None else rospy.Time()
+        trace.command = msg
+        trace.reason = reason
+        self.twist_trace_pub.publish(trace)
         self.profile_logger.info(
             "servo_twist: tick=%d model_v=%d command_stamp=%.9f twist_stamp=%.9f "
             "topic=%s frame=%s reference=%s linear=[%.9g %.9g %.9g] "
@@ -576,6 +589,7 @@ def build_argparser():
     parser.add_argument("-c", "--config", type=str, default="config/rtabmap_config.yaml", help="YAML config file path")
     parser.add_argument("--spherical_cmd_topic", type=str, default="/omnimap/spherical_cmd")
     parser.add_argument("--cmd_topic", type=str, default="/servo_server/delta_twist_camera")
+    parser.add_argument("--twist_trace_topic", type=str, default="/omnimap/servo_twist_trace")
     parser.add_argument("--cmd_frame", type=str, default="base_link")
     parser.add_argument("--world_frame", type=str, default="base_link")
     parser.add_argument("--camera_frame", type=str, default="cam_1_color_optical_frame")

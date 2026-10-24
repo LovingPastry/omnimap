@@ -1,5 +1,9 @@
 # 执行侧最小化环境指南
 
+运动学诊断扩展见 [sumi 诊断实现与验收](ur5_nbv_kinematics_validation_sumi.md)：
+`./scripts/build_ros_ws.sh --with-kinematics` 构建 MoveIt C++ monitor 和带 watchdog 的普通/KF 桥接；
+默认 `build_ros_ws.sh` 仍只构建消息包。
+
 这份指南面向已经具备以下基础的执行侧主机：
 
 - 已安装并可运行 `ROS Noetic`

@@ -505,6 +505,7 @@ pip install -r info_flow/requirements-servo.txt
 ```
 
 完整步骤见 [docs/execution_side_setup.md](docs/execution_side_setup.md)。
+执行侧运动学诊断、桥接升级与现场验收见 [sumi 诊断说明](docs/ur5_nbv_kinematics_validation_sumi.md)。
 
 ## 数据集
 

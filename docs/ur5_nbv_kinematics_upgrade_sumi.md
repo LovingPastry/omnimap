@@ -1,12 +1,17 @@
 # UR5 上位机（sumi）升级方案：桥接节点与 MoveIt Servo 诊断
 
-更新时间：2026-10-22
+更新时间：2026-10-24
+
+实现与部署记录见 [sumi 运动学诊断验收](ur5_nbv_kinematics_validation_sumi.md)。
+普通/KF 桥接入口已升级，MoveIt C++ monitor 已构建；以下清单保留 2026-10-22 的方案基线。
+真实 ROS master 当前不可访问，尚未标定 `m_min` 或启用二维半空间控制修正。
 
 ## 现场核查状态
 
 SSH 已恢复，以下文件和行号已经在 `sumi` 的 `~/ros/catkin_ws/src` 中只读核对。源码中没有找到 `cam_1_baselink`；实际相机 frame 是 `cam_1_color_optical_frame`。当前桥接输入和输出都标记为 `base_link`，桥接通过 TF 读取 camera/tool0 的位置差，修正同一 `base_link` 表达下的参考点速度。
 
-运行时 ROS master 当前不可访问，因此节点是否正在运行还没有核实；仓库状态干净，没有远端工作区修改。
+方案基线核查时 ROS master 不可访问，节点运行情况尚未核实；当时没有写入远端工作区。
+2026-10-24 的实际代码和本机工作区部署变化以链接的验收记录为准。
 
 ## 1. 已核实的桥接和启动链路
 

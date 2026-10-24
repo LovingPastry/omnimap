@@ -1,0 +1,7 @@
+# Dx: task velocity units [m/s, m/s, m/s, rad/s, rad/s, rad/s].
+# Jbar = inverse(Dx) J Dq. Dq defaults to the RobotModel velocity bounds
+# (including robot_description_planning overrides), in MoveIt variable order.
+task_velocity_scales: [0.10, 0.10, 0.10, 0.15, 0.15, 0.15]
+sample_timeout: 0.3
+max_sample_skew: 0.1
+publish_hz: 20.0

@@ -2,6 +2,9 @@
 
 日期：2026-10-24。对应 [本机升级计划](ur5_nbv_kinematics_upgrade_local.md)。
 
+执行侧桥接与 MoveIt monitor 现已实现并部署源文件入口；构建、启动、指标定义及待完成的硬件验收见
+[sumi 诊断实现与验收](ur5_nbv_kinematics_validation_sumi.md)。本文下方“现场验收仍待完成”保留此前本机接入核查记录。
+
 ## 运行模式
 
 Planning 默认使用 `--kinematic_feedback_mode observe`，符合先发布诊断、对齐现场数据后再启用控制干预的顺序。

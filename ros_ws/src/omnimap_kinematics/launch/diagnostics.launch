@@ -1,0 +1,26 @@
+<launch>
+  <!-- Requires the existing robot_description + SRDF and running Servo.
+       This launch never starts a robot driver or MoveIt Servo. -->
+  <arg name="servo_ns" default="/servo_server"/>
+  <arg name="robot_description" default="robot_description"/>
+  <arg name="start_bridge" default="false"/>
+  <arg name="filter_mode" default="none"/>
+  <arg name="input_topic" default="/servo_server/delta_twist_camera"/>
+  <arg name="output_topic" default="/servo_server/delta_twist_cmds"/>
+  <arg name="bridge_status_topic" default="/omnimap/bridge_status"/>
+  <node if="$(arg start_bridge)" pkg="omnimap_kinematics" type="camera_twist_bridge.py"
+        name="omnimap_camera_twist_bridge" output="screen" required="true">
+    <param name="input_topic" value="$(arg input_topic)"/>
+    <param name="output_topic" value="$(arg output_topic)"/>
+    <param name="bridge_status_topic" value="$(arg bridge_status_topic)"/>
+    <param name="status_topic" value="$(arg servo_ns)/status"/>
+    <param name="filter_mode" value="$(arg filter_mode)"/>
+  </node>
+  <node pkg="omnimap_kinematics" type="omnimap_kinematic_monitor"
+        name="omnimap_kinematic_monitor" output="screen" required="true">
+    <rosparam command="load" file="$(find omnimap_kinematics)/config/kinematics.yaml"/>
+    <param name="servo_ns" value="$(arg servo_ns)"/>
+    <param name="robot_description" value="$(arg robot_description)"/>
+    <param name="bridge_status_topic" value="$(arg bridge_status_topic)"/>
+  </node>
+</launch>
