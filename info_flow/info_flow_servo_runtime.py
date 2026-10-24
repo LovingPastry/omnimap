@@ -43,6 +43,7 @@ class ServoStats:
     servo_zero_pose_stale: int = 0
     servo_zero_tf_fail: int = 0
     servo_zero_policy_stop: int = 0
+    servo_zero_frame_mismatch: int = 0
     servo_exception: int = 0
 
 
@@ -57,6 +58,10 @@ class InfoFlowServoRuntime:
         self.world_frame = str(args.world_frame)
         self.camera_frame = str(args.camera_frame)
         self.cmd_frame = str(args.cmd_frame)
+        self.cmd_topic = str(args.cmd_topic)
+        if (not self.world_frame.lstrip("/") or
+                self.cmd_frame.lstrip("/") != self.world_frame.lstrip("/")):
+            raise ValueError("servo computes Twist in world_frame; cmd_frame must match it")
         self.servo_hz = float(args.servo_hz)
         self.pose_stale_timeout_sec = float(args.pose_stale_timeout_sec)
         self.spherical_cmd_timeout_sec = float(args.spherical_cmd_timeout_sec)
@@ -91,6 +96,12 @@ class InfoFlowServoRuntime:
         self._last_servo_wall: Optional[float] = None
         self._radial_integral_error = 0.0
 
+        self.stats = ServoStats()
+        self._last_status_wall = float(time.monotonic())
+        self._last_status_steps = 0
+        self._last_status_nonzero = 0
+        self._throttle_last = {}
+
         self.cmd_sub = rospy.Subscriber(
             args.spherical_cmd_topic,
             spherical_command_msg,
@@ -101,12 +112,6 @@ class InfoFlowServoRuntime:
             rospy.Duration(1.0 / max(self.servo_hz, 1e-6)),
             self._servo_timer_callback,
         )
-
-        self.stats = ServoStats()
-        self._last_status_wall = float(time.monotonic())
-        self._last_status_steps = 0
-        self._last_status_nonzero = 0
-        self._throttle_last = {}
 
         self.main_logger.info(
             ("轻量 Servo runtime 已启动：spherical_cmd_topic=%s cmd_topic=%s servo_hz=%.1f cmd_timeout=%.3fs adaptive_scale=%.2f adaptive_cap=%.3fs"),
@@ -237,6 +242,29 @@ class InfoFlowServoRuntime:
         adaptive_timeout = min(adaptive_timeout, float(self.adaptive_cmd_timeout_cap_sec))
         return max(timeout_sec, adaptive_timeout)
 
+    def _publish_twist(self, *, cmd=None, stamp=None, linear_cmd=None,
+                       angular_cmd=None, reason):
+        """Log the exact camera-reference Twist sent to the bridge, including zeros."""
+        if linear_cmd is None:
+            msg = publish_zero_twist(self.cmd_pub, cmd_frame=self.cmd_frame, stamp=stamp)
+        else:
+            msg = publish_motion_components(
+                self.cmd_pub, cmd_frame=self.cmd_frame, stamp=stamp,
+                linear_cmd=linear_cmd, angular_cmd=angular_cmd,
+            )
+        linear, angular = msg.twist.linear, msg.twist.angular
+        self.profile_logger.info(
+            "servo_twist: tick=%d model_v=%d command_stamp=%.9f twist_stamp=%.9f "
+            "topic=%s frame=%s reference=%s linear=[%.9g %.9g %.9g] "
+            "angular=[%.9g %.9g %.9g] reason=%s",
+            int(cmd.planner_tick) if cmd is not None else 0,
+            int(cmd.model_version) if cmd is not None else 0,
+            cmd.header.stamp.to_sec() if cmd is not None else 0.0,
+            msg.header.stamp.to_sec(), self.cmd_topic, msg.header.frame_id,
+            self.camera_frame, linear.x, linear.y, linear.z,
+            angular.x, angular.y, angular.z, reason,
+        )
+
     def _maybe_log_status(self) -> None:
         now = float(time.monotonic())
         elapsed = now - self._last_status_wall
@@ -251,7 +279,7 @@ class InfoFlowServoRuntime:
         self.planner_logger.info(
             (
                 "Servo 状态：servo_hz=%.1f cmd_hz=%.1f "
-                "conn(sub=%d pub=%d) 累计(rx=%d steps=%d nonzero=%d missing_cmd=%d cmd_stale=%d pose_stale=%d tf_fail=%d policy_stop=%d exc=%d)"
+                "conn(sub=%d pub=%d) 累计(rx=%d steps=%d nonzero=%d missing_cmd=%d cmd_stale=%d pose_stale=%d tf_fail=%d policy_stop=%d frame_mismatch=%d exc=%d)"
             ),
             float(d_steps / max(elapsed, 1e-6)),
             float(d_nonzero / max(elapsed, 1e-6)),
@@ -265,6 +293,7 @@ class InfoFlowServoRuntime:
             int(stats.servo_zero_pose_stale),
             int(stats.servo_zero_tf_fail),
             int(stats.servo_zero_policy_stop),
+            int(stats.servo_zero_frame_mismatch),
             int(stats.servo_exception),
         )
 
@@ -278,7 +307,7 @@ class InfoFlowServoRuntime:
         cmd_cache = self.latest_cmd
         if cmd_cache is None:
             # 尚未收到任何规划命令：主动发布零速，保证执行侧静止安全。
-            publish_zero_twist(self.cmd_pub, cmd_frame=self.cmd_frame)
+            self._publish_twist(reason="missing_command")
             self._reset_slew_state()
             self.stats.servo_zero_missing_cmd += 1
             self._maybe_log_status()
@@ -299,9 +328,22 @@ class InfoFlowServoRuntime:
                 self.spherical_cmd_timeout_sec,
                 float(self._cmd_interval_ema_sec if self._cmd_interval_ema_sec is not None else -1.0),
             )
-            publish_zero_twist(self.cmd_pub, cmd_frame=self.cmd_frame)
+            self._publish_twist(cmd=cmd, reason="command_stale")
             self._reset_slew_state()
             self.stats.servo_zero_cmd_stale += 1
+            self._maybe_log_status()
+            return
+
+        if bool(cmd.should_stop):
+            self._publish_twist(cmd=cmd, reason=str(cmd.stop_reason))
+            self._reset_slew_state()
+            self.stats.servo_zero_policy_stop += 1
+            self._maybe_log_status()
+            return
+        if cmd.header.frame_id.lstrip("/") != self.world_frame.lstrip("/"):
+            self._publish_twist(cmd=cmd, reason="command_frame_mismatch")
+            self._reset_slew_state()
+            self.stats.servo_zero_frame_mismatch += 1
             self._maybe_log_status()
             return
 
@@ -330,14 +372,14 @@ class InfoFlowServoRuntime:
                 "servo 本机 TF 查询失败，发布零速度：%s",
                 exc,
             )
-            publish_zero_twist(self.cmd_pub, cmd_frame=self.cmd_frame)
+            self._publish_twist(cmd=cmd, reason="tf_failure")
             self._reset_slew_state()
             self.stats.servo_zero_tf_fail += 1
             self._maybe_log_status()
             return
 
         pose_age = float((rospy.Time.now() - pose_stamp).to_sec())
-        if pose_age > self.pose_stale_timeout_sec:
+        if pose_age > self.pose_stale_timeout_sec or pose_age < -0.05:
             # 位姿过期：停止输出运动，防止基于过时状态运动。
             self._planner_log_throttle(
                 "pose_stale",
@@ -353,17 +395,9 @@ class InfoFlowServoRuntime:
                 float(cmd_age),
                 float(pose_stamp.to_sec()),
             )
-            publish_zero_twist(self.cmd_pub, cmd_frame=self.cmd_frame, stamp=pose_stamp)
+            self._publish_twist(cmd=cmd, stamp=pose_stamp, reason="pose_stale")
             self._reset_slew_state()
             self.stats.servo_zero_pose_stale += 1
-            self._maybe_log_status()
-            return
-
-        if bool(cmd.should_stop):
-            # planner 明确要求 stop（如策略收敛/风险条件触发）。
-            publish_zero_twist(self.cmd_pub, cmd_frame=self.cmd_frame, stamp=pose_stamp)
-            self._reset_slew_state()
-            self.stats.servo_zero_policy_stop += 1
             self._maybe_log_status()
             return
 
@@ -378,6 +412,9 @@ class InfoFlowServoRuntime:
             e_theta, e_phi, n_hat = local_frame_from_theta_phi(theta, phi)
             theta_rate = float(cmd.theta_rate)
             phi_rate = float(cmd.phi_rate)
+            if not np.all(np.isfinite([theta_rate, phi_rate, cmd.reference_radius,
+                                       *reference_scene_center])):
+                raise ValueError("nonfinite spherical command")
             # 切向速度：沿球面切平面的角速度分量。
             v_t = radius * (theta_rate * e_theta + phi_rate * e_phi)
 
@@ -463,12 +500,12 @@ class InfoFlowServoRuntime:
             self._last_linear_cmd = linear_cmd.copy()
             self._last_angular_cmd = angular_cmd.copy()
 
-            publish_motion_components(
-                self.cmd_pub,
-                cmd_frame=self.cmd_frame,
+            self._publish_twist(
+                cmd=cmd,
                 linear_cmd=linear_cmd,
                 angular_cmd=angular_cmd,
                 stamp=pose_stamp,
+                reason="motion",
             )
             self._planner_log_throttle(
                 "reference_sphere_servo",
@@ -526,7 +563,7 @@ class InfoFlowServoRuntime:
                 exc,
             )
             # 任意异常都 fail-safe 到零速，保护执行侧。
-            publish_zero_twist(self.cmd_pub, cmd_frame=self.cmd_frame, stamp=pose_stamp)
+            self._publish_twist(cmd=cmd, stamp=pose_stamp, reason=f"servo_exception:{exc}")
             self._reset_slew_state()
             self.stats.servo_exception += 1
         self._maybe_log_status()

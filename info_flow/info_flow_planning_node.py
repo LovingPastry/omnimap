@@ -27,6 +27,7 @@ from omnimap.gaussian.renderer.nbv.motion_policy import FisherMotionPolicy
 from omnimap.gaussian.renderer.nbv.policy_improvements import nbv_policy_from_config
 from omnimap.util.utils import get_section_logger
 from planner_snapshot import PlannerSnapshot, load_planner_snapshot_file
+from kinematic_feedback import KinematicFeedbackGate, MOVEIT_STATUS_TEXT
 
 
 @dataclass
@@ -42,6 +43,7 @@ class PlanningStats:
     planner_stop_pose_stale: int = 0
     planner_stop_snapshot_load: int = 0
     planner_stop_policy: int = 0
+    planner_stop_kinematic: int = 0
     planner_exception: int = 0
 
 
@@ -70,11 +72,17 @@ class InfoFlowPlanningNode:
         self.pose_stamp_stale_timeout_sec = 1e6
         self.pose_receipt_stale_timeout_sec = 1e6
         self.status_log_interval_sec = max(0.2, float(args.status_log_interval_sec))
-        self.kinematic_status_timeout_sec = max(0.05, float(args.kinematic_status_timeout_sec))
-        self.kinematic_source_frame = str(args.kinematic_source_frame)
-        self.kinematic_task_frame = str(args.kinematic_task_frame)
+        self.kinematic_feedback_mode = str(args.kinematic_feedback_mode)
+        self.kinematic_gate = KinematicFeedbackGate(
+            timeout_sec=float(args.kinematic_status_timeout_sec),
+            source_frame=str(args.kinematic_source_frame),
+            task_frame=str(args.kinematic_task_frame),
+            deceleration_duration_sec=float(args.kinematic_deceleration_duration_sec),
+            deceleration_scale=float(args.kinematic_deceleration_scale),
+        )
         self.kinematic_status_lock = threading.Lock()
-        self.latest_kinematic_status = None
+        if rospy.resolve_name(args.raw_spherical_cmd_topic) == rospy.resolve_name(args.spherical_cmd_topic):
+            raise ValueError("raw and execution spherical command topics must differ")
 
         self.main_logger.info("正在等待相机内参消息...")
         _, K, calib, image_size_hw = wait_for_camera_calibration(args.camera_info_topic)
@@ -143,6 +151,18 @@ class InfoFlowPlanningNode:
             SphericalCommandMsg,
             queue_size=1,
         )
+        self.raw_spherical_cmd_pub = rospy.Publisher(
+            args.raw_spherical_cmd_topic, SphericalCommandMsg, queue_size=1,
+        )
+
+        # All callback state must exist before ROS subscribers/timers can run.
+        self.stats_lock = threading.Lock()
+        self.stats = PlanningStats()
+        self.planner_tick = 0
+        self._last_status_wall = float(time.monotonic())
+        self._last_status_steps = 0
+        self._last_status_nonzero = 0
+        self._throttle_last = {}
 
         self.pose_sub = rospy.Subscriber(
             args.pose_topic, PoseStamped, self.pose_callback, queue_size=1
@@ -165,14 +185,6 @@ class InfoFlowPlanningNode:
             self._planning_timer_callback,
         )
 
-        self.stats_lock = threading.Lock()
-        self.stats = PlanningStats()
-        self.planner_tick = 0
-        self._last_status_wall = float(time.monotonic())
-        self._last_status_steps = 0
-        self._last_status_nonzero = 0
-        self._throttle_last = {}
-
         self.main_logger.info(
             "Planning 节点已启动：pose_topic=%s snapshot_ref_topic=%s spherical_cmd_topic=%s planner_hz=%.1f stale(T1=%.1fs,T2=%.1fs)",
             args.pose_topic,
@@ -182,27 +194,26 @@ class InfoFlowPlanningNode:
             float(self.pose_stamp_stale_timeout_sec),
             float(self.pose_receipt_stale_timeout_sec),
         )
+        self.main_logger.warning(
+            "kinematic_feedback: mode=%s topic=%s source_frame=%s task_frame=%s "
+            "timeout=%.3fs raw_command_topic=%s",
+            self.kinematic_feedback_mode, args.kinematic_status_topic,
+            self.kinematic_gate.source_frame, self.kinematic_gate.task_frame,
+            self.kinematic_gate.timeout_sec, args.raw_spherical_cmd_topic,
+        )
 
     def kinematic_status_callback(self, msg):
         with self.kinematic_status_lock:
-            self.latest_kinematic_status = (msg, time.monotonic())
+            self.kinematic_gate.update(
+                msg, ros_now=rospy.Time.now().to_sec(), wall_now=time.monotonic(),
+            )
 
     def _kinematic_feedback(self):
         with self.kinematic_status_lock:
-            cached = self.latest_kinematic_status
-        if cached is None:
-            return None, "kinematic_status_missing"
-        msg, received_wall = cached
-        age = time.monotonic() - float(received_wall)
-        if age > self.kinematic_status_timeout_sec:
-            return None, f"kinematic_status_stale:{age:.3f}s"
-        if not bool(msg.transform_chain_valid):
-            return None, "kinematic_transform_chain_invalid"
-        if self.kinematic_source_frame and str(msg.source_frame) != self.kinematic_source_frame:
-            return None, f"kinematic_source_frame_mismatch:{msg.source_frame}"
-        if self.kinematic_task_frame and str(msg.task_frame) != self.kinematic_task_frame:
-            return None, f"kinematic_task_frame_mismatch:{msg.task_frame}"
-        return msg, ""
+            decision = self.kinematic_gate.decision(
+                ros_now=rospy.Time.now().to_sec(), wall_now=time.monotonic(),
+            )
+            return self.kinematic_gate.latest, decision
 
     def _planner_log_throttle(
         self, key: str, interval_sec: float, level: str, msg: str, *args
@@ -476,6 +487,7 @@ class InfoFlowPlanningNode:
         fisher_score: float,
         should_stop: bool,
         stop_reason: str,
+        publisher=None,
     ) -> None:
         msg = self.SphericalCommandMsg()
         msg.header.stamp = stamp if stamp is not None else rospy.Time.now()
@@ -494,7 +506,7 @@ class InfoFlowPlanningNode:
         msg.fisher_score = float(fisher_score)
         msg.should_stop = bool(should_stop)
         msg.stop_reason = str(stop_reason)
-        self.spherical_cmd_pub.publish(msg)
+        (self.spherical_cmd_pub if publisher is None else publisher).publish(msg)
 
     def _publish_stop_command(
         self,
@@ -538,7 +550,7 @@ class InfoFlowPlanningNode:
             (
                 "Planning 状态：plan_hz=%.1f cmd_hz=%.1f 累计(steps=%d nonzero=%d "
                 "missing_pose=%d missing_snapshot=%d pose_stale=%d snapshot_load_fail=%d "
-                "policy_stop=%d exception=%d snapshot_ok=%d snapshot_fail=%d)"
+                "policy_stop=%d kinematic_stop=%d exception=%d snapshot_ok=%d snapshot_fail=%d)"
             ),
             float(d_steps / max(elapsed, 1e-6)),
             float(d_nonzero / max(elapsed, 1e-6)),
@@ -549,6 +561,7 @@ class InfoFlowPlanningNode:
             int(stats.planner_stop_pose_stale),
             int(stats.planner_stop_snapshot_load),
             int(stats.planner_stop_policy),
+            int(stats.planner_stop_kinematic),
             int(stats.planner_exception),
             int(stats.snapshot_load_success),
             int(stats.snapshot_load_fail),
@@ -671,42 +684,6 @@ class InfoFlowPlanningNode:
             self._maybe_log_status()
             return
 
-        # 下游反馈失效时不能继续发送旧的运动意图；等待诊断恢复并显式停车。
-        kin_status, kin_reason = self._kinematic_feedback()
-        if kin_status is None:
-            self._planner_log_throttle(
-                "kinematic_feedback_invalid", 1.0, "warning",
-                "运动学反馈不可用，发布 stop command：%s", kin_reason,
-            )
-            self._publish_stop_command(
-                reason=kin_reason, stamp=pose_state.stamp,
-                model_version=int(snapshot.model_version),
-            )
-            self._maybe_log_status()
-            return
-        moveit_status = int(getattr(kin_status, "moveit_status", 0))
-        moveit_status_text = str(getattr(kin_status, "moveit_status_text", ""))
-        if moveit_status == 2:  # MoveIt Servo HALT_FOR_SINGULARITY
-            self._publish_stop_command(
-                reason="moveit_halt_for_singularity", stamp=pose_state.stamp,
-                model_version=int(snapshot.model_version),
-            )
-            self._maybe_log_status()
-            return
-        if moveit_status not in (0, 1):
-            self._planner_log_throttle(
-                "moveit_unsafe_status", 1.0, "warning",
-                "MoveIt status=%d (%s)，发布 stop command",
-                moveit_status, moveit_status_text,
-            )
-            self._publish_stop_command(
-                reason=f"moveit_status_{moveit_status}:{moveit_status_text}",
-                stamp=pose_state.stamp,
-                model_version=int(snapshot.model_version),
-            )
-            self._maybe_log_status()
-            return
-
         try:
             with self.motion_policy_lock:
                 # 半球参考约束每个 tick 施加；动态值来自 snapshot 中的 TSDF 几何元数据。
@@ -755,26 +732,60 @@ class InfoFlowPlanningNode:
             getattr(motion_result, "reference_scene_center", [0.0, 0.0, 0.0]),
             dtype=np.float64,
         ).reshape(3)
-        if moveit_status == 1:  # DECELERATE_FOR_SINGULARITY
-            theta_rate = 0.5 * float(getattr(motion_result, "theta_rate_applied", 0.0))
-            phi_rate = 0.5 * float(getattr(motion_result, "phi_rate_applied", 0.0))
-            feedback_reason = "moveit_decelerate_for_singularity"
-        else:
-            theta_rate = float(getattr(motion_result, "theta_rate_applied", 0.0))
-            phi_rate = float(getattr(motion_result, "phi_rate_applied", 0.0))
-            feedback_reason = str(getattr(motion_result, "stop_reason", "unknown"))
-        self._publish_spherical_command(
+        command_fields = dict(
             stamp=pose_state.stamp,
             model_version=int(snapshot.model_version),
             planner_tick=int(self.planner_tick),
             dt=float(getattr(motion_result, "dt", self.motion_policy.dt)),
-            theta_rate=theta_rate,
-            phi_rate=phi_rate,
+            theta_rate=float(getattr(motion_result, "theta_rate_applied", 0.0)),
+            phi_rate=float(getattr(motion_result, "phi_rate_applied", 0.0)),
             reference_radius=reference_radius,
             reference_scene_center=reference_scene_center,
             fisher_score=float(getattr(motion_result, "fisher_score", 0.0)),
             should_stop=bool(getattr(motion_result, "should_stop", False)),
-            stop_reason=feedback_reason,
+            stop_reason=str(getattr(motion_result, "stop_reason", "unknown")),
+        )
+        # Preserve the exact Fisher output, including stops, for isolated replay.
+        self._publish_spherical_command(
+            **command_fields, publisher=self.raw_spherical_cmd_pub,
+        )
+        # Use the freshest feedback AFTER the potentially long Fisher computation.
+        kin_status, decision = self._kinematic_feedback()
+        if self.kinematic_feedback_mode == "enforce":
+            if decision.should_stop:
+                command_fields.update(theta_rate=0.0, phi_rate=0.0,
+                                      should_stop=True, stop_reason=decision.reason)
+                with self.stats_lock:
+                    self.stats.planner_stop_kinematic += 1
+            elif not command_fields["should_stop"]:
+                command_fields["theta_rate"] *= decision.speed_scale
+                command_fields["phi_rate"] *= decision.speed_scale
+                if decision.speed_scale < 1.0:
+                    command_fields["stop_reason"] = decision.reason
+        self._publish_spherical_command(**command_fields)
+        self.profile_logger.info(
+            "kinematic_feedback: tick=%d command_stamp=%.9f mode=%s feedback_tick=%d "
+            "feedback_stamp=%.9f source=%s task=%s status=%d status_name=%s status_text=%s "
+            "sigma_min=%.6g sigma_max=%.6g condition=%.6g manipulability=%.6g "
+            "command_speed=%.6g actual_speed=%.6g chain_valid=%s upstream_reason=%s "
+            "decision=%s proposed_scale=%.3f output_stop=%s",
+            self.planner_tick, pose_state.stamp.to_sec(), self.kinematic_feedback_mode,
+            int(getattr(kin_status, "planner_tick", 0)),
+            kin_status.header.stamp.to_sec() if kin_status is not None else 0.0,
+            str(getattr(kin_status, "source_frame", "")),
+            str(getattr(kin_status, "task_frame", "")),
+            int(getattr(kin_status, "moveit_status", -1)),
+            MOVEIT_STATUS_TEXT.get(int(getattr(kin_status, "moveit_status", -1)), "UNKNOWN"),
+            str(getattr(kin_status, "moveit_status_text", "")),
+            float(getattr(kin_status, "sigma_min", float("nan"))),
+            float(getattr(kin_status, "sigma_max", float("nan"))),
+            float(getattr(kin_status, "condition_number", float("nan"))),
+            float(getattr(kin_status, "manipulability", float("nan"))),
+            float(getattr(kin_status, "command_speed_norm", float("nan"))),
+            float(getattr(kin_status, "actual_speed_norm", float("nan"))),
+            bool(getattr(kin_status, "transform_chain_valid", False)),
+            str(getattr(kin_status, "reason", "")), decision.reason,
+            decision.speed_scale, command_fields["should_stop"],
         )
         self._planner_log_throttle(
             "reference_sphere_publish",
@@ -811,7 +822,7 @@ class InfoFlowPlanningNode:
         if bool(getattr(motion_result, "should_stop", False)):
             with self.stats_lock:
                 self.stats.planner_stop_policy += 1
-        else:
+        elif not command_fields["should_stop"]:
             with self.stats_lock:
                 self.stats.planner_nonzero += 1
         self._maybe_log_status()
@@ -869,10 +880,15 @@ def build_argparser():
     )
     parser.add_argument("--log_every", type=int, default=10)
     parser.add_argument("--status_log_interval_sec", type=float, default=1.0)
+    parser.add_argument("--raw_spherical_cmd_topic", type=str, default="/omnimap/spherical_cmd_raw")
+    parser.add_argument("--kinematic_feedback_mode", choices=("observe", "enforce"), default="observe",
+                        help="observe logs only; enable enforce after validating execution-side diagnostics")
     parser.add_argument("--kinematic_status_topic", type=str, default="/omnimap/kinematic_status")
     parser.add_argument("--kinematic_status_timeout_sec", type=float, default=0.5)
     parser.add_argument("--kinematic_source_frame", type=str, default="base_link")
     parser.add_argument("--kinematic_task_frame", type=str, default="tool0")
+    parser.add_argument("--kinematic_deceleration_duration_sec", type=float, default=0.1)
+    parser.add_argument("--kinematic_deceleration_scale", type=float, default=0.5)
     parser.add_argument(
         "--log_file",
         action=argparse.BooleanOptionalAction,

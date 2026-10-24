@@ -4,6 +4,9 @@
 
 本文只描述本机仓库 `/home/fuyx/lanzc/omnimap` 的改动。上位机 `sumi` 的改动见 [`ur5_nbv_kinematics_upgrade_sumi.md`](ur5_nbv_kinematics_upgrade_sumi.md)。远端文件已通过只读 SSH 核对；实际代码使用 `cam_1_color_optical_frame`，没有找到 `cam_1_baselink`。
 
+本机实现的模式、参数、回放方法和未完成的现场验收见
+[`ur5_nbv_kinematics_validation_local.md`](ur5_nbv_kinematics_validation_local.md)。
+
 ## 已核实的当前链路
 
 | 文件与行 | 当前行为 | 升级含义 |
