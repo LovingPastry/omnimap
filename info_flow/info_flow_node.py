@@ -31,6 +31,7 @@ from geometry_msgs.msg import TransformStamped, TwistStamped
 from message_filters import ApproximateTimeSynchronizer, Subscriber
 from omni import OMNI
 from omnimap.gaussian.renderer.nbv.motion_policy import FisherMotionPolicy
+from omnimap.gaussian.renderer.nbv.policy_improvements import nbv_policy_from_config
 from omnimap.util.lookat import look_at_c2w
 from omnimap.util.utils import (
     configure_logging,
@@ -267,6 +268,9 @@ class InfoFlowROSNode:
             grad_eps=args.grad_eps,
             spherical_speed_min=args.spherical_speed_min,
             planner_output_mode=self.planner_output_mode,
+            # nbv_policy 节：四项可切换修复（可行性/掩码/速率映射/停止判据）。
+            # 缺省或全部 disabled 时与原版逐位一致；gradient_space 也从这里读。
+            nbv_config=nbv_policy_from_config(config),
             verbose=True,
             # control_law_mode="dt_consistent",
         )

@@ -108,6 +108,8 @@ class SceneSimulator:
         path: str,
         voxel_size: Optional[float] = None,
         scale: float = 1.0,
+        recolor: Optional[str] = None,
+        texture_period_m: float = 0.06,
     ) -> o3d.geometry.PointCloud:
         """加载点云并将其加入渲染场景。
 
@@ -115,6 +117,10 @@ class SceneSimulator:
             path: `.ply` 或 `.pcd` 点云文件路径。
             voxel_size: 可选的体素下采样尺寸，单位为世界坐标单位。
             scale: 对点云坐标应用的全局缩放因子。
+            recolor: None 保留原色；"texture" 用位置决定的确定性彩色纹理覆盖颜色。
+                Fisher 打分来自渲染图像对高斯参数的梯度，纯黑物体在黑背景上几乎没有
+                梯度（instance_gs.ply 的颜色全是 0），所以主动视角实验需要有纹理的物体。
+            texture_period_m: 纹理条纹周期（米）。
 
         返回:
             清洗后的 Open3D 点云对象，同时会保存到模拟器内部状态中。
@@ -145,6 +151,20 @@ class SceneSimulator:
 
         if scale != 1.0:
             points = points * float(scale)
+
+        if recolor == "texture":
+            k = 2.0 * np.pi / float(texture_period_m)
+            x, y, z = points[:, 0], points[:, 1], points[:, 2]
+            colors = np.stack(
+                [
+                    0.5 + 0.4 * np.sin(k * x + 0.3 * k * z),
+                    0.5 + 0.4 * np.sin(k * y + 2.1),
+                    0.5 + 0.4 * np.sin(k * z + 0.7 * k * x + 4.2),
+                ],
+                axis=1,
+            )
+        elif recolor is not None:
+            raise ValueError(f"unknown recolor mode {recolor!r}")
 
         clean_pcd = o3d.geometry.PointCloud()
         clean_pcd.points = o3d.utility.Vector3dVector(points.astype(np.float64))

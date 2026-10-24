@@ -1,0 +1,152 @@
+# 消融专用：与 sim_rtabmap_config.yaml 相同，只关掉周期性 opacity reset。
+# reset_opacity() 把所有不透明度置 0.01，几步内渲染变暗、所有视角的 Fisher 分数同时塌缩；
+# 触发时刻取决于各臂的关键帧数，会污染终态 PSNR 并与停止判据相互作用。它是建图启发式，不是被测对象。
+Training:
+  init_itr_num: 1000
+  init_gaussian_update: 100
+  init_gaussian_reset: 500
+  init_gaussian_th: 0.005
+  init_gaussian_extent: 30
+  gaussian_extent: 1.0
+  gaussian_update_every: 201
+  gaussian_reset: 1000000000   # 原 301，消融中关闭
+  # 剪枝的 min_opacity。新高斯出生在 0.5（gaussian_model.create_pcd_from_tsdfs），
+  # 所以 0.7 会把每个还没被优化抬过 0.7 的新生高斯删掉：实测峰值 1081 -> 最终 185，
+  # 损失 83% 密度，且此后长期停在 ~180 不再增长。稀疏到这个程度时 Fisher 分数变成
+  # 少数离散贡献者之和，一个高斯跨过光栅化瓦片边界就让总分可见跳变，梯度符号随之
+  # 不稳（φ=30° 时 12 个相距 0.5° 的基点只有 10/12 同号）。改回标准 3DGS 的 0.005
+  # 后密度保持 1031，同一测量变成 12/12。
+  gaussian_th: 0.005
+  size_threshold: 20
+  rgb_boundary_threshold: 0.01
+  max_keyframe_skip: 20
+  window_size: 19
+  frame_itr: 1
+  alpha: 0.9
+  use_ssim: true
+  ssim_weight: 0.25
+  use_omni_normal: false
+  normal_weight: 0.05
+  compensate_exposure: false
+  deblur: false
+
+
+opt_params:
+  pose_lr: 0.0001
+  position_lr_init: 0.00016
+  position_lr_final: 0.0000016
+  feature_lr: 0.0025
+  opacity_lr: 0.05
+  scaling_lr: 0.001
+  rotation_lr: 0.001
+  percent_dense: 0.01
+  lambda_dssim: 0.2
+  densify_grad_threshold: 0.0002
+  exposure_lr: 0.02
+  post_refine: true
+  post_itr: 500
+  deblur_trans: 0.001
+  deblur_weight: 0.01
+
+
+tsdf:
+  voxel_size: 0.006
+  block_resolution: 8
+  block_count: 30000
+  unregistered_threshold: 0.005
+  depth_scale: 1000.0
+  depth_max: 20.0
+  # spatial_bounds: [-1.0, -0.2, -0.4, 0.4, -0.3, 0.5]
+  reference_radius_default_m: 0.35
+  reference_radius_use_adaptive: true
+  reference_radius_diag_scale: 0.20
+  reference_radius_min_m: 0.25
+  reference_radius_max_m: 0.80
+  reference_center_mode: dynamic
+  reference_center_ema_alpha: 0.10
+
+
+instance:
+  instance_skip: 1
+  pro_thre: 0.40
+  ins_min_count: 3
+  vox_min_count: 3
+  ins_min_voxel: 15
+  fill_dis: 0.05
+
+
+path:
+  # Dedicated config for simulation-driven Phase 2/3 experiments.
+  # Keep weights pointed at the locations that actually exist in this repo.
+  data_path: /home/fuyx/lanzc/omnimap/replica/input
+  yolo_config: /home/fuyx/lanzc/omnimap/thirdparty/YOLO-World/configs/pretrain/yolo_world_v2_l_clip_large_vlpan_bn_2e-3_100e_4x8gpus_obj365v1_goldg_train_800ft_lvis_minival.py
+  yolo_cp: /home/fuyx/lanzc/omnimap/thirdparty/YOLO-World/weights/yolo_world_v2_l_clip_large_o365v1_goldg_pretrain_800ft-9df82e55.pth
+  tap_cp1: /home/fuyx/lanzc/omnimap/thirdparty/TAP/weights/tap_vit_l_v1_1.pkl
+  tap_cp2: /home/fuyx/lanzc/omnimap/thirdparty/TAP/weights/merged_2560.pkl
+  sbert_cp: /home/fuyx/lanzc/omnimap/thirdparty/all-MiniLM-L6-v2
+
+# Fisher / NBV debug defaults for the simulation toolchain.
+fisher_local_velocity_only: false
+enable_velocity_field: true
+show_velocity_field: true
+show_fisher_heatmap: true
+velocity_arrow_length: 0.07
+velocity_debug_log: false
+fisher_window_mode: combined
+fisher_heatmap_window_name: Fisher Heatmap Viewer
+fisher_velocity_window_name: Fisher Velocity Viewer
+fisher_num_samples: 64
+fisher_num_dense_points: 4096
+fisher_idw_power: 2.0
+fisher_display_radius_scale: 0.92
+fisher_arrow_radius_scale: 0.90
+
+# ── 主动视角策略：可切换修复（消融 / 回退开关）────────────────────────
+# 每一项默认关闭；整节缺省或全部关闭时，与原版实现逐位一致。
+# 实现见 omnimap/gaussian/renderer/nbv/policy_improvements.py，消融见 docs/nbv_ablation.md。
+nbv_policy:
+  # angle = 原版 (theta,phi) 探测+控制；tangent = 大圆等弧长探测 + 单位切基（消除极点 cos²φ 退化）
+  gradient_space: angle
+  # 修复1 可达性：仰角带/工作空间盒外的速度分量做切锥投影，阻止"冲向半球边缘/桌下"
+  feasibility:
+    enabled: false
+    phi_min_deg: 15.0
+    phi_max_deg: 80.0
+    margin_deg: 8.0
+    workspace_bounds: null      # 相机位置可达盒 [x_min,x_max,y_min,y_max,z_min,z_max]（世界系）
+    workspace_margin_m: 0.03
+    hard_clamp: true
+  # 修复2 可见性掩码：只统计 ROI 内、支撑面以上的高斯；相机低于支撑面时打分为 0
+  fisher_mask:
+    enabled: false
+    roi_bounds: tsdf            # tsdf = 用 tsdf.spatial_bounds；或显式 6 元组；null = 不限
+    roi_padding_m: 0.0
+    support_plane_z: null       # 桌面高度；tsdf_min_z = 用 spatial_bounds 的 z_min
+    plane_softness_m: 0.01
+  # 修复3 速度尺度：normalized = 梯度只给方向，速率 = v_nominal·|g|/(|g|+κ)，κ=|g| 滑动中位数
+  velocity_mapping:
+    mode: legacy                # legacy | normalized
+    v_nominal_mps: 0.03
+    kappa_window: 20
+  # 修复4 停止判据（取或）：信息饱和 / 视角球覆盖 / 预算 / 停滞
+  stop:
+    enabled: false
+    min_steps: 20
+    saturation_enabled: true
+    score_window: 10
+    score_ratio: 0.10
+    global_probe_views: 12       # 局部饱和只是提名：再给未覆盖的可达方向打分，全局也饱和才停
+    global_check_every: 10
+    confirm_checks: 2            # 连续确认次数，防止建图侧 opacity reset 造成的瞬时全局塌缩误触发
+    coverage_enabled: true
+    coverage_threshold: 0.90
+    coverage_radius_deg: 25.0
+    coverage_phi_min_deg: 15.0
+    coverage_phi_max_deg: 80.0
+    max_steps: null
+    max_path_m: null
+    max_time_s: null
+    wall_clock: false
+    stall_enabled: false
+    stall_speed_mps: 0.001
+    stall_steps: 15

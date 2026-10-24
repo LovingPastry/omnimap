@@ -10,6 +10,7 @@ add_message_files(
   FILES
   PlannerSnapshotRef.msg
   SphericalCommand.msg
+  KinematicStatus.msg
 )
 
 generate_messages(

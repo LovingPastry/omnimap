@@ -161,11 +161,12 @@ def lookup_latest_pose_from_tf(
     return transform_to_c2w(transform), transform.header.stamp
 
 
-def publish_zero_twist(pub, *, cmd_frame: str, stamp: Optional[rospy.Time] = None) -> None:
+def publish_zero_twist(pub, *, cmd_frame: str, stamp: Optional[rospy.Time] = None) -> TwistStamped:
     msg = TwistStamped()
     msg.header.stamp = stamp if stamp is not None else rospy.Time.now()
     msg.header.frame_id = cmd_frame
     pub.publish(msg)
+    return msg
 
 
 def publish_motion_components(
@@ -175,7 +176,7 @@ def publish_motion_components(
     linear_cmd: np.ndarray,
     angular_cmd: np.ndarray,
     stamp: Optional[rospy.Time] = None,
-) -> None:
+) -> TwistStamped:
     msg = TwistStamped()
     msg.header.stamp = stamp if stamp is not None else rospy.Time.now()
     msg.header.frame_id = cmd_frame
@@ -188,6 +189,7 @@ def publish_motion_components(
     msg.twist.angular.y = float(angular[1])
     msg.twist.angular.z = float(angular[2])
     pub.publish(msg)
+    return msg
 
 
 def position_to_spherical(

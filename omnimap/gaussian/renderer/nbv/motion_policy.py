@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any, Optional, Sequence
 
 import numpy as np
@@ -12,6 +12,14 @@ import torch
 from scipy.spatial.transform import Rotation as R
 from omnimap.util.lookat import look_at_c2w
 from omnimap.util.utils import get_section_logger
+
+from .policy_improvements import (
+    AdaptiveRateMapper,
+    FeasibilityProjector,
+    FisherContributionMask,
+    NBVPolicyConfig,
+    StopMonitor,
+)
 
 
 def _as_matrix44(matrix: np.ndarray, name: str) -> np.ndarray:
@@ -293,6 +301,9 @@ class MotionPolicyResult:
     should_stop: bool
     stop_reason: str
     planner_output_mode: str = "cartesian_legacy"
+    # Diagnostics of the switchable nbv_policy fixes (feasibility / mask / rate
+    # mapping / stop monitor). Empty for the legacy configuration's extras only.
+    nbv_diag: dict = field(default_factory=dict)
 
     def to_jsonable(self) -> dict[str, object]:
         data = asdict(self)
@@ -359,9 +370,17 @@ class FisherMotionPolicy:
         orientation_roll_mode: str = "world_up_lookat",
         control_law_mode: str = "gain",
         planner_output_mode: str = "cartesian_legacy",
-        gradient_space: str = "angle",
+        gradient_space: str | None = None,
+        nbv_config: NBVPolicyConfig | dict | None = None,
         verbose: bool = True,
     ) -> None:
+        if not isinstance(nbv_config, NBVPolicyConfig):
+            nbv_config = NBVPolicyConfig.from_dict(nbv_config)
+        # An explicit gradient_space argument wins over the config section, so the
+        # pre-existing CLI flags keep working; otherwise the config decides.
+        if gradient_space is None:
+            gradient_space = nbv_config.gradient_space
+        nbv_config.gradient_space = str(gradient_space)
         if not np.isfinite(fisher_step_scale):
             raise ValueError("fisher_step_scale must be finite")
         if dt <= 0 or not np.isfinite(dt):
@@ -442,6 +461,31 @@ class FisherMotionPolicy:
         self.control_law_mode = str(control_law_mode)
         self.planner_output_mode = str(planner_output_mode)
         self.gradient_space = str(gradient_space)
+        self.nbv_config = nbv_config
+        self.feasibility = (
+            FeasibilityProjector(nbv_config.feasibility)
+            if nbv_config.feasibility.enabled
+            else None
+        )
+        if self.feasibility is not None and nbv_config.feasibility.hard_clamp:
+            # The integrated pose is also held inside the reachable band; the
+            # soft projection alone only stops the gradient from pushing outward.
+            self.phi_min = max(self.phi_min, self.feasibility.phi_lo)
+            self.phi_max = min(self.phi_max, self.feasibility.phi_hi)
+        self.fisher_mask = (
+            FisherContributionMask(nbv_config.fisher_mask)
+            if nbv_config.fisher_mask.enabled
+            else None
+        )
+        self.rate_mapper = (
+            AdaptiveRateMapper(nbv_config.velocity_mapping)
+            if nbv_config.velocity_mapping.mode == "normalized"
+            else None
+        )
+        # Always constructed so its coverage / saturation state is logged for
+        # every arm; it only ends the run when stop.enabled is true.
+        self.stop_monitor = StopMonitor(nbv_config.stop)
+        self._tick_diag: dict[str, object] = {}
         self.verbose = bool(verbose)
         self.logger = get_section_logger("planner.motion_policy", "planner")
         self._omega_cmd_preclip_norm = 0.0
@@ -1243,7 +1287,205 @@ class FisherMotionPolicy:
         )
         return HemisphereCamera.from_camera(temp_camera, scene_center), "c2w_matrix"
 
+    def _command_basis(self, theta: float, phi: float) -> tuple[np.ndarray, np.ndarray]:
+        """World basis the 2-D command is expressed on: v_t = R * (u1*b1 + u2*b2)."""
+        if self.gradient_space == "tangent":
+            b1, b2, _ = _unit_tangent_basis(theta, phi)
+        else:
+            b1, b2, _ = _local_frame_from_theta_phi(theta, phi)
+        return b1, b2
+
+    def _apply_nbv_rate_fixes(
+        self,
+        *,
+        scaled_spherical_velocity: np.ndarray,
+        grad_theta: float,
+        grad_phi: float,
+        current_theta: float,
+        current_phi: float,
+        current_position: np.ndarray,
+        radius: float,
+    ) -> np.ndarray:
+        """Fix 3 (direction/rate separation) then fix 1 (feasibility projection).
+
+        Both act on the 2-D command every downstream branch consumes, so the
+        cartesian, spherical_rate and angular integration paths all inherit them.
+        With both switches off the input is returned unchanged.
+        """
+        rates = np.asarray(scaled_spherical_velocity, dtype=np.float64).copy()
+        diag = self._tick_diag
+        if self.rate_mapper is not None:
+            rates, rate_info = self.rate_mapper.map(
+                np.array([grad_theta, grad_phi], dtype=np.float64), radius
+            )
+            diag["rate_kappa"] = float(rate_info["kappa"])
+            diag["rate_gate"] = float(rate_info["gate"])
+            diag["rate_speed_mps"] = float(rate_info["speed_mps"])
+        if self.feasibility is not None:
+            b1, b2 = self._command_basis(current_theta, current_phi)
+            _, north_hat, _ = _unit_tangent_basis(current_theta, current_phi)
+            rates, feas_info = self.feasibility.project_rates(
+                rates=rates,
+                basis_1=b1,
+                basis_2=b2,
+                radius=radius,
+                phi=current_phi,
+                north_hat=north_hat,
+                position=current_position,
+            )
+            diag["feasibility_active"] = str(feas_info["active"])
+            diag["feasibility_removed_ratio"] = float(feas_info["removed_ratio"])
+        b1, b2 = self._command_basis(current_theta, current_phi)
+        diag["tangent_speed_mps"] = float(
+            np.linalg.norm(float(radius) * (rates[0] * b1 + rates[1] * b2))
+        )
+        return rates
+
+    def _install_fisher_mask(self, gs_backend: Any, idx: int) -> None:
+        if self.fisher_mask is None:
+            return
+        fisher_eval = gs_backend.fisher_eval
+        if not hasattr(fisher_eval, "set_score_mask"):
+            raise AttributeError(
+                "nbv_policy.fisher_mask requires a Fisher evaluator with set_score_mask()"
+            )
+        xyz = gs_backend.gaussians.get_xyz
+        weights = self.fisher_mask.gaussian_weights(
+            xyz, tsdfs=getattr(gs_backend, "tsdfs", None), idx=int(idx)
+        )
+        fisher_eval.set_score_mask(
+            FisherContributionMask.expand_to_contribution(weights),
+            lambda cam: self.fisher_mask.view_gate(cam.camera_center),
+        )
+        self._tick_diag["mask_kept_ratio"] = float(weights.mean().item()) if weights.numel() else 1.0
+        if self.fisher_mask.cfg.roi_query:
+            for key, value in self.fisher_mask.last_query_diag.items():
+                if key != "roi_query_box":  # box is logged via mask_kept_ratio's effect, not raw
+                    self._tick_diag[key] = value
+
+    @staticmethod
+    def _clear_fisher_mask(gs_backend: Any) -> None:
+        fisher_eval = getattr(gs_backend, "fisher_eval", None)
+        if fisher_eval is not None and hasattr(fisher_eval, "set_score_mask"):
+            fisher_eval.set_score_mask(None, None)
+
+    def _make_global_probe(
+        self,
+        *,
+        gs_backend: Any,
+        intrinsics_vec: Sequence[float] | None,
+        image_size: Sequence[int] | None,
+        idx: int,
+    ):
+        """Score reachable view directions on the reference sphere (stop criterion A)."""
+        if intrinsics_vec is None or image_size is None or not self.reference_initialized:
+            return None
+        center = np.asarray(self.reference_scene_center, dtype=np.float64)
+        radius = float(self.reference_radius)
+
+        def probe(dirs: np.ndarray) -> float:
+            fisher_eval = gs_backend.fisher_eval
+            history_stat = fisher_eval.get_history_stat(
+                getattr(gs_backend, "keyviewpoints", None), prefer_cached=True
+            )
+            device = self._infer_runtime_device(gs_backend)
+            best = -float("inf")
+            for direction in np.asarray(dirs, dtype=np.float64).reshape(-1, 3):
+                c2w = _look_at_c2w(eye=center + radius * direction, target=center)
+                cam = self._build_tracking_camera_from_c2w(
+                    c2w=c2w,
+                    intrinsics_vec=intrinsics_vec,
+                    image_size=image_size,
+                    idx=int(idx),
+                    device=device,
+                )
+                best = max(best, float(fisher_eval.compute_view_score(cam, history_stat).score))
+            return best
+
+        return probe
+
+    def _apply_stop_monitor(
+        self, result: MotionPolicyResult, global_probe: Any = None
+    ) -> MotionPolicyResult:
+        """Fix 4: feed the stop monitor; on a stop, zero every command in the result."""
+        position = np.asarray(result.current_c2w[:3, 3], dtype=np.float64)
+        center = np.asarray(result.reference_scene_center, dtype=np.float64)
+        speed = float(self._tick_diag.get("tangent_speed_mps", 0.0))
+        if result.should_stop:
+            speed = 0.0
+        stop, reason, state = self.stop_monitor.update(
+            score=float(result.fisher_score),
+            position=position,
+            view_dir=position - center,
+            dt=self.dt,
+            commanded_speed_mps=speed,
+            global_probe=global_probe,
+        )
+        self._tick_diag.update(state)
+        if stop and not result.should_stop:
+            zeros = np.zeros(3, dtype=np.float64)
+            result.should_stop = True
+            result.stop_reason = str(reason)
+            result.next_c2w = result.current_c2w.copy()
+            result.desired_c2w = result.current_c2w.copy()
+            result.next_theta = result.current_theta
+            result.next_phi = result.current_phi
+            result.next_position = position.tolist()
+            result.theta_rate_applied = 0.0
+            result.phi_rate_applied = 0.0
+            result.spherical_speed_applied = 0.0
+            result.vt_world = zeros.copy()
+            result.vn_world = zeros.copy()
+            result.velocity_world = zeros.copy()
+            result.angular_velocity_world = zeros.copy()
+            result.linear_speed_applied = 0.0
+            result.angular_speed_applied = 0.0
+            if self.verbose:
+                self.logger.info(
+                    "idx=%d nbv 停止判据触发：reason=%s state=%s",
+                    int(result.idx),
+                    reason,
+                    {k: round(float(v), 4) for k, v in state.items()},
+                )
+        result.nbv_diag = dict(self._tick_diag)
+        return result
+
     def next_pose(
+        self,
+        *,
+        gs_backend: Any,
+        current_viewpoint: Any,
+        idx: int,
+        intrinsics_vec: Sequence[float] | None = None,
+        image_size: Sequence[int] | None = None,
+    ) -> MotionPolicyResult:
+        """Compute the next pose; wraps the core chain with the nbv_policy mask and stop monitor."""
+        self._tick_diag = {}
+        self._install_fisher_mask(gs_backend, idx)
+        try:
+            result = self._next_pose_core(
+                gs_backend=gs_backend,
+                current_viewpoint=current_viewpoint,
+                idx=idx,
+                intrinsics_vec=intrinsics_vec,
+                image_size=image_size,
+            )
+            # Inside the try so the global saturation probe sees the same mask.
+            result = self._apply_stop_monitor(
+                result,
+                self._make_global_probe(
+                    gs_backend=gs_backend,
+                    intrinsics_vec=intrinsics_vec,
+                    image_size=image_size,
+                    idx=idx,
+                ),
+            )
+        finally:
+            if self.fisher_mask is not None:
+                self._clear_fisher_mask(gs_backend)
+        return result
+
+    def _next_pose_core(
         self,
         *,
         gs_backend: Any,
@@ -1334,6 +1576,15 @@ class FisherMotionPolicy:
             grad_theta=grad_theta,
             grad_phi=grad_phi,
             gaussian_count=gaussian_count,
+        )
+        scaled_spherical_velocity = self._apply_nbv_rate_fixes(
+            scaled_spherical_velocity=scaled_spherical_velocity,
+            grad_theta=grad_theta,
+            grad_phi=grad_phi,
+            current_theta=current_theta,
+            current_phi=current_phi,
+            current_position=np.asarray(current_c2w[:3, 3], dtype=np.float64),
+            radius=radius,
         )
 
         scaled_spherical_speed = float(np.linalg.norm(scaled_spherical_velocity))
