@@ -60,6 +60,16 @@ class BridgeTests(unittest.TestCase):
             self.assertEqual(call.args[2], self.command.header.stamp)
             self.assertEqual(call.args[3], rospy.Duration(0))
 
+    def test_status_subscription_uses_effective_servo_config_or_explicit_override(self):
+        params = {"~servo_ns": "/custom/servo", "/custom/servo/status_topic": "feedback"}
+        with patch("rospy.get_param", side_effect=lambda key, default: params.get(key, default)):
+            node = bridge.CameraTwistBridge()
+            self.assertEqual(node.status_topic, "/custom/servo/feedback")
+            self.assertEqual(rospy.Subscriber.call_args.args[0], "/custom/servo/feedback")
+            params["~status_topic"] = "/override/status"
+            node = bridge.CameraTwistBridge()
+            self.assertEqual(rospy.Subscriber.call_args.args[0], "/override/status")
+
     def test_ros_clock_pause_receipt_timeout_and_no_tf_block(self):
         # ROS time is unchanged, wall time has advanced; stale must still stop.
         with patch("time.monotonic", return_value=101):

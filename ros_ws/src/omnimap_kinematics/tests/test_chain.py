@@ -36,7 +36,7 @@ class ChainTest(unittest.TestCase):
                     for topic, kind, key in [("/test/kinematic", KinematicStatus, "kinematic"),
                         ("/test/bridge", BridgeStatus, "bridge"), ("/test/tool_twist", TwistStamped, "output")]]
         cls.joint_pub = rospy.Publisher("/test/joints", JointState, queue_size=1)
-        cls.status_pub = rospy.Publisher("/test/status", Int8, queue_size=1)
+        cls.status_pub = rospy.Publisher("/test/servo/feedback", Int8, queue_size=1)
         cls.input_pub = rospy.Publisher("/test/camera_twist", TwistStamped, queue_size=1)
         cls.trace_pub = rospy.Publisher("/test/trace", ServoTwistTrace, queue_size=1)
         cls.clock_pub = rospy.Publisher("/clock", Clock, queue_size=1)

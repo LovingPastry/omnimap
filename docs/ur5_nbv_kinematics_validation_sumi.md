@@ -114,6 +114,9 @@ roslaunch omnimap_kinematics diagnostics.launch start_bridge:=true
 
 不要同时启动普通桥接、KF 桥接和 launch 内的桥接。Servo 参数命名空间变化时传
 `servo_ns:=/实际命名空间`；输入/输出 topic 用 `input_topic`、`output_topic` 配置。
+桥接默认从该 Servo 命名空间的 `status_topic` 参数读取实际状态话题，配置中的相对名称也在该命名空间解析；
+只有参数尚不存在时才回退为 `<servo_ns>/status`。可用 `status_topic:=/实际话题` 显式覆盖。
+桥接启动日志包含最终订阅的状态话题。
 Planning 保持 `--kinematic_feedback_mode observe`，真实诊断与标定完成后再启用 enforce。
 本次没有猜测 `m_min`，也没有启用二维半空间控制修正。
 
@@ -130,14 +133,16 @@ python tests/test_kinematic_feedback.py
 python tests/test_kinematic_runtime.py
 python tests/test_camera_twist_bridge.py
 python tests/test_sumi_deploy.py
+python tests/test_sumi_inventory.py
 # rostest 自建隔离 master，只使用 /test/* 控制话题，不启动机器人驱动。
 rostest omnimap_kinematics kinematics.test use_sim_time:=true
 ```
 
-本次：消息与 C++ 构建通过；InfoFlow 数值/反馈 8 项、Planning/Servo 回调 9 项、桥接失效测试 6 项、部署保留/幂等测试 3 项通过；
+本次：消息与 C++ 构建通过；InfoFlow 数值/反馈 8 项、Planning/Servo 回调 9 项、桥接失效/配置测试 7 项、部署保留/幂等测试 3 项、有效配置采集测试 1 项通过；
 真实 ROS 桥接 + MoveIt monitor 的隔离集成测试 6 项通过。
 集成测试以独立 NumPy FK 有限差分校验 SVD、归一化、实测速度、坐标系和参考点，
 覆盖关节倒序、外部相机 TF、奇异构型、状态码、失效停车/恢复，以及暂停 `/clock` 后的墙钟 watchdog。
+状态话题使用自定义命名空间中的相对名称，验证桥接与 monitor 都遵循实际配置。
 回调测试隔离地图/Fisher/GPU/绘图模块，不验证 Fisher 目标函数或渲染效果。
 
 以下命令只读现场状态、保存 inventory，并记录对齐数据：
@@ -156,9 +161,15 @@ rosbag record -O kinematic_chain.bag /omnimap/spherical_cmd_raw /omnimap/spheric
   /servo_server/status /joint_states /tf /tf_static
 ```
 
+采集脚本的 `--servo-ns` 同样控制状态、关节和 Servo 输出话题的配置读取与相对名称解析；
+camera 输入可用 `--input-topic` 指定。若 master 在线但 Servo 参数缺失，记录 `CONFIG_UNVERIFIED` 并返回 2，
+不会用猜测的 `/servo_server/status` 替代实际配置。
+
 本机默认 master 的只读 inventory 位于 `/home/sumi/omnimap_kinematic_inventory_20261024_174813.txt`；
 仓库配置 `http://172.19.93.154:11311` 的复核位于 `/home/sumi/omnimap_kinematic_inventory_20261024_175526.txt`。
 两次 `rosnode list` 均返回 `Unable to communicate with master`，inventory 以退出码 2 标记运行时未验证。
+18:03 的再次复核保存于 `/home/sumi/omnimap_kinematic_inventory_20261024_180336.txt`，结果相同。
+虽仍有 Servo 进程存活，但其进程环境指向的也是上述不可访问 master，不能以进程存在替代运行链路证据。
 隔离测试不构成真实机器人验收。实际 topic 连通性、模型/标定对齐、开始减速时 raw condition 与 sigma_min 的关系、
 `m_min` 标定、硬件断链停车仍待现场数据。完成诊断门槛后才进入方案第 5 步的二维半空间控制修正。
 

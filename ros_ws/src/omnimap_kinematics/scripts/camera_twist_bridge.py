@@ -65,15 +65,29 @@ class CameraTwistBridge:
         self.diag = rospy.Publisher(rospy.get_param("~bridge_status_topic", "/omnimap/bridge_status"),
                                     BridgeStatus, queue_size=10)
         self.sub = rospy.Subscriber(input_topic, TwistStamped, self.input_cb, queue_size=1)
-        self.status_sub = rospy.Subscriber(rospy.get_param("~status_topic", "/servo_server/status"),
-                                           Int8, self.status_cb, queue_size=1)
+        self.status_topic = self.effective_status_topic()
+        self.status_sub = rospy.Subscriber(self.status_topic, Int8, self.status_cb, queue_size=1)
         self.closed = threading.Event()
         rospy.on_shutdown(self.shutdown)
         # rospy.Timer stops under paused /clock. The watchdog must not.
         self.worker = threading.Thread(target=self.run, daemon=True)
         self.worker.start()
-        rospy.loginfo("bridge: %s -> %s B=%s C=%s T=%s filter=%s",
-                      input_topic, output_topic, self.base, self.camera, self.tool, self.filter_mode)
+        rospy.loginfo("bridge: %s -> %s B=%s C=%s T=%s filter=%s status_topic=%s",
+                      input_topic, output_topic, self.base, self.camera, self.tool, self.filter_mode,
+                      self.status_topic)
+
+    @staticmethod
+    def effective_status_topic():
+        explicit = rospy.get_param("~status_topic", "")
+        if explicit:
+            return rospy.resolve_name(explicit)
+        namespace = rospy.resolve_name(rospy.get_param("~servo_ns", "/servo_server")).rstrip("/")
+        topic = rospy.get_param(namespace + "/status_topic", namespace + "/status")
+        if not isinstance(topic, str) or not topic or topic.startswith("~"):
+            raise ValueError("Servo status_topic must be a nonempty global or relative ROS name")
+        # Match roscpp's private NodeHandle(servo_ns).resolveName(). Relative
+        # names in Servo's config belong under Servo, not the bridge node.
+        return rospy.resolve_name(topic if topic.startswith("/") else namespace + "/" + topic)
 
     @staticmethod
     def positive_param(name, default):

@@ -9,7 +9,7 @@
     robot_link_command_frame: base_link
     ee_frame_name: tool0
     joint_topic: /test/joints
-    status_topic: /test/status
+    status_topic: feedback
     cartesian_command_in_topic: /test/tool_twist
   </rosparam>
   <node pkg="omnimap_kinematics" type="omnimap_kinematic_monitor" name="test_monitor" output="screen">
@@ -24,7 +24,7 @@
   <node pkg="omnimap_kinematics" type="camera_twist_bridge.py" name="test_bridge" output="screen">
     <param name="input_topic" value="/test/camera_twist"/>
     <param name="output_topic" value="/test/tool_twist"/>
-    <param name="status_topic" value="/test/status"/>
+    <param name="servo_ns" value="/test/servo"/>
     <param name="bridge_status_topic" value="/test/bridge"/>
     <param name="stale_timeout" value="0.4"/>
     <param name="status_timeout" value="0.4"/>
