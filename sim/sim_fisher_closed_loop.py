@@ -10,6 +10,11 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+
+repo_root = Path(__file__).resolve().parent.parent
+if str(repo_root) not in sys.path:
+    sys.path.insert(0, str(repo_root))
+
 from omnimap.util.utils import (
     configure_logging,
     get_section_logger,
@@ -19,11 +24,6 @@ from omnimap.util.utils import (
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
-
-repo_root = Path(__file__).resolve().parent.parent
-if str(repo_root) not in sys.path:
-    sys.path.insert(0, str(repo_root))
-
 
 from omnimap.util.lookat import look_at_c2w
 
@@ -356,6 +356,10 @@ python3 sim/sim_fisher_closed_loop.py \
         help="Override one nbv_policy entry, e.g. --nbv_set feasibility.enabled=true (repeatable).",
     )
     parser.add_argument(
+        "--planner_snapshot_every", type=int, default=0,
+        help="Use serialized frozen Planning snapshots, refreshed every N tracking frames (0 = live backend).",
+    )
+    parser.add_argument(
         "--quality_every",
         type=int,
         default=0,
@@ -605,6 +609,9 @@ def run_closed_loop(args: argparse.Namespace) -> None:
         fisher_display_radius_scale=args.fisher_display_radius_scale,
         fisher_arrow_radius_scale=args.fisher_arrow_radius_scale,
     )
+    # Tracking must see the same semantic query/mode as the policy, including
+    # CLI overrides; otherwise it would never produce the requested weights.
+    fisher_config_overrides["nbv_policy"] = nbv_policy
     base_radius = (
         float(args.hemi_radius)
         if args.hemi_radius is not None
@@ -695,6 +702,7 @@ def run_closed_loop(args: argparse.Namespace) -> None:
     path_length_m = 0.0
     stop_reason_final = "num_steps"
     steps_run = 0
+    planning_snapshot = None
     logger.info("[闭环] 阶段 3/4：FisherMotionPolicy 已就绪")
 
     log_path = save_dir / "loop_log.jsonl"
@@ -813,9 +821,23 @@ def run_closed_loop(args: argparse.Namespace) -> None:
             t_track = time.perf_counter() - t_track0
 
             # 5. Query Fisher and derive the next pose for the following step.
+            planning_backend = runner.omni.gs
+            if int(args.planner_snapshot_every) > 0:
+                from info_flow.planner_snapshot import (
+                    build_planner_snapshot, save_planner_snapshot_file, load_planner_snapshot_file,
+                )
+                if planning_snapshot is None or idx % int(args.planner_snapshot_every) == 0:
+                    snapshot = build_planner_snapshot(
+                        live_backend=runner.omni.gs, model_version=idx + 1, keyframe_idx=idx,
+                    )
+                    snapshot_path = save_dir / "planner_snapshot.pt"
+                    save_planner_snapshot_file(snapshot, snapshot_path)
+                    planning_snapshot = load_planner_snapshot_file(snapshot_path)
+                    del snapshot
+                planning_backend = planning_snapshot.backend
             t_policy0 = time.perf_counter()
             motion_result = policy.next_pose_from_c2w(
-                gs_backend=runner.omni.gs,
+                gs_backend=planning_backend,
                 current_c2w=current_c2w,
                 intrinsics_vec=intrinsics,
                 image_size=(args.height, args.width),
@@ -921,6 +943,9 @@ def run_closed_loop(args: argparse.Namespace) -> None:
             log_entry["gradient_space"] = str(policy.gradient_space)
             for key, value in (motion_result.nbv_diag or {}).items():
                 log_entry[f"nbv_{key}"] = value
+            log_entry["planning_snapshot_frame"] = (
+                planning_snapshot.keyframe_idx if planning_snapshot is not None else None
+            )
             log_file.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
             csv_row = {
                     "idx": idx,
@@ -1040,6 +1065,11 @@ def run_closed_loop(args: argparse.Namespace) -> None:
                     f"高斯数={step_result.num_gaussians}"
                 )
             )
+            if "semantic_status" in motion_result.nbv_diag:
+                step_message += (
+                    f" 语义={motion_result.nbv_diag['semantic_status']}"
+                    f" 目标高斯占比={motion_result.nbv_diag['mask_kept_ratio']:.3f}"
+                )
             if (
                 should_log_step(idx, int(args.log_every))
                 or motion_result.should_stop
@@ -1061,7 +1091,8 @@ def run_closed_loop(args: argparse.Namespace) -> None:
                 quality_rows.append(q)
                 logger.info("[质量] step=%d %s", idx, json.dumps(q))
 
-            if motion_result.should_stop:
+            if (motion_result.should_stop
+                    and motion_result.stop_reason != "semantic_target_unavailable"):
                 stop_reason_final = str(motion_result.stop_reason)
                 logger.info(
                     f"[闭环] 在 step={idx} 提前停止：reason={motion_result.stop_reason} "

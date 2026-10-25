@@ -1043,25 +1043,11 @@ class TSDFBackEnd():
         
         
     def get_instance_ids(self, points):
-        voxels, _, ins_colors, voxels_id, _, _, _ = self.get_all_voxels()
-        
-        if voxels.shape[0] == 0:
-            instance_ids = torch.full((len(points),), -1, device=self.device, dtype=torch.long)
-            # Return black color (or any default color)
-            colors = torch.zeros((len(points), 3), device=self.device, dtype=torch.float32)
-            return instance_ids, colors
+        from gaussian.renderer.nbv.semantic_mask import associate_instance_ids
 
-        kdtree = KDTree(voxels.cpu().numpy())
-        instance_ids = torch.zeros((len(points))).to(self.device).long()
-        for i in range(len(points)):
-            # Query KDTree for the nearest valid point
-            nearest_idx = kdtree.query(points[i].cpu().numpy(), k=1)[1]
-            nearest_instance_id = voxels_id[nearest_idx]
-            nearest_point = voxels[nearest_idx]
-            distance = torch.norm(points[i] - nearest_point, p=2)
-            if distance < self.fill_dis: 
-                instance_ids[i] = nearest_instance_id
-        colors = torch.index_select(self.instance_colors, 0, instance_ids)/255.0
+        voxels, _, _, voxels_id, _, _, _ = self.get_all_voxels()
+        instance_ids = associate_instance_ids(points, voxels, voxels_id, self.fill_dis)
+        colors = torch.index_select(self.instance_colors, 0, instance_ids.to(self.device))/255.0
         return instance_ids, colors
     
     

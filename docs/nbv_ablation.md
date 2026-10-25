@@ -25,16 +25,20 @@ cartesian / spherical_rate / angular 三条路径都继承。
 规则，真正有原则的做法是用机械臂实际工作空间定边界。
 
 **2. 可见性掩码 `fisher_mask`**：贡献向量 `cur/(history+λ)` 按 `[xyz(N·3), opacity(N)]` 布局逐元素乘权重：
+2026-10-25 新增 `roi_query_mode: semantic`，按逐高斯的实例 embedding 相似度筛选。
+当前仿真/真机配置启用此模式；Tracking 在线关联高斯后随快照传给 Planning，失配时暂时停车，详见
+[`semantic_fisher.md`](semantic_fisher.md)。以下说明保留的包围盒对照模式；10/17 消融结果仍对应这些旧模式。
+
 ROI 盒外、支撑面以下的高斯权重为 0；相机低于支撑面时整幅打分乘以 sigmoid 门（被桌面挡住）。
 这是用支撑面近似 TSDF 遮挡，不是逐高斯的 TSDF 光线投射。
 
 **ROI 盒有两种来源。** 一是静态 `roi_bounds`：仿真 `object` / `object_min_z` = **真值物体点云的包围盒**（特权信息，
 现实中拿不到）；真机 `tsdf` / `tsdf_min_z` = 手设的 `tsdf.spatial_bounds`。
 
-二是 **2026-10-19 新增** 的 `roi_query`（默认 `"cup"`，`fisher_mask.enabled=true` 时才生效），`roi_query_mode`
+二是 **2026-10-21 新增** 的 `roi_query`（默认 `"cup"`，`fisher_mask.enabled=true` 时才生效），包围盒 `roi_query_mode`
 选两种解法之一：
 
-- **`sbert`（默认）**：在建图本就在维护的 `tsdfs.instance_feature`（YOLO-World 检测 + TAP 分割 + SBERT 文本特征，
+- **`sbert`（代码默认；项目配置使用 semantic）**：在建图本就在维护的 `tsdfs.instance_feature`（YOLO-World 检测 + TAP 分割 + SBERT 文本特征，
   按 `instance.instance_skip` 帧持续累积的每实例语义向量表）里，选与查询文本余弦相似度最高的实例，取**该实例
   当前点云的包围盒**（+`roi_padding_m`）替换 `roi_bounds`；低于 `roi_query_min_similarity`（默认 0.2）则放弃匹配、
   退回 `roi_bounds`。开销小（只加一次文本编码+一次余弦比较），但**受限于已经检测并建过档的东西**：如果查询词描述
@@ -84,21 +88,23 @@ m/s，`linear_vel_max` 退回安全兜底。
 
 ## 配置与回退
 
-`nbv_policy` 全部关闭（或整节缺省）= 原版实现。回归验证：默认配置与改动前 HEAD 的 `motion_policy`
+`nbv_policy` 全部关闭（或整节缺省）= 原版实现；当前两个项目配置已显式打开 semantic 掩码。
+历史回归验证：代码默认配置与改动前 HEAD 的 `motion_policy`
 在 angle/tangent × cartesian/spherical_rate/angular 共 447 步上**逐位一致**。
 
 ```yaml
 nbv_policy:
   gradient_space: tangent          # angle = 原版
   feasibility:      {enabled: true, phi_min_deg: 15, phi_max_deg: 80}
-  fisher_mask:      {enabled: true, roi_bounds: tsdf, support_plane_z: tsdf_min_z, roi_query: cup}
+  fisher_mask:      {enabled: true, roi_query_mode: semantic, roi_query: cup, roi_query_min_similarity: 0.35}
   velocity_mapping: {mode: normalized, v_nominal_mps: 0.03}
   stop:             {enabled: true}
 ```
 
 - `roi_bounds: tsdf` / `support_plane_z: tsdf_min_z` 取 `tsdf.spatial_bounds`；仿真里可用 `object` / `object_min_z`（物体 AABB）。
-- `roi_query`（默认 `cup`）命中时优先于 `roi_bounds`；设为 `null` 或空串关闭，固定用 `roi_bounds`。
-  `roi_query_mode: sbert`（默认）比对已跟踪实例；`roi_query_mode: yolo_live` 对最近一帧单独重跑一次 YOLO-World，
+- semantic 模式必须提供非空 `roi_query`，不使用 `roi_bounds`，失配也不回退静态盒。
+- 在包围盒模式中，`roi_query`（默认 `cup`）命中时优先于 `roi_bounds`；设为 `null` 或空串则固定用 `roi_bounds`。
+  `roi_query_mode: sbert` 比对已跟踪实例；`roi_query_mode: yolo_live` 对最近一帧单独重跑一次 YOLO-World，
   是真正的开放词汇检测，见上文"可见性掩码"小节。
 - 仿真命令行覆盖：`--nbv_config file.yaml`、`--nbv_set fisher_mask.enabled=true`（可重复）；`--gradient_space` 仍有效且优先。
 - 真机两个规划入口（`info_flow_planning_node.py`、`info_flow_node.py`）读取同一节。**真机侧只同步了代码，未上机验证**；
