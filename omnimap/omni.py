@@ -14,6 +14,7 @@ warnings.filterwarnings("ignore")
 import torch.nn.functional as F
 from torchvision import transforms
 from visual_module import timeit
+from gaussian.renderer.nbv.semantic_mask import update_gaussian_semantics
 
 
 class OMNI:
@@ -201,6 +202,9 @@ class OMNI:
             data["spatial_keep_mask"] = spatial_keep_mask
 
         self.gs.process_track_data(data, self.hz)
+        # Geometry and semantics must use the same final Gaussian order. This
+        # runs after optimization/densification/pruning and before snapshots.
+        update_gaussian_semantics(self.gs, frame_idx=tstamp)
 
         if pose_44 is not None:
             pose_44_np = (

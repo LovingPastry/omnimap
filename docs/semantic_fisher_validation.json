@@ -1,0 +1,29 @@
+{
+  "run_dir": "sim/sim_outputs/semantic_cup_snapshot_final",
+  "steps": 30,
+  "target_ready_steps": 27,
+  "first_target_step": 3,
+  "target_ratio_range": [
+    0.11628956347703934,
+    0.11803339421749115
+  ],
+  "initial_gaussians": 36610,
+  "final_gaussians": 38150,
+  "snapshot_frame": 29,
+  "semantic_frame": 29,
+  "selected_gaussians": 4467,
+  "excluded_gaussians": 33683,
+  "final_target_instance_ids": [
+    3,
+    4,
+    6
+  ],
+  "masked_score": 1385.2904052734375,
+  "unmasked_score": 11426.71484375,
+  "background_amplification": 1000,
+  "masked_gradient_unchanged": true,
+  "excluded_contributions_all_zero": true,
+  "no_live_tsdf_in_planning": true,
+  "path_length_m": 0.013921050151300478,
+  "limitations": "One short single-view RGB-D-derived simulation; does not establish segmentation accuracy, reconstruction improvement, or robot performance."
+}

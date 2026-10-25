@@ -104,7 +104,7 @@ motion_control:
   spherical_cmd_timeout_sec: 1.25   # 命令超时阈值 (s)
 
 # ── 主动视角策略：可切换修复（消融 / 回退开关）────────────────────────
-# 每一项默认关闭；整节缺省或全部关闭时，与原版实现逐位一致。
+# 本配置启用目标语义筛选；代码默认仍全部关闭，整节缺省或全部关闭时回退原版。
 # 实现见 omnimap/gaussian/renderer/nbv/policy_improvements.py，消融见 docs/nbv_ablation.md。
 nbv_policy:
   # angle = 原版 (theta,phi) 探测+控制；tangent = 大圆等弧长探测 + 单位切基（消除极点 cos²φ 退化）
@@ -118,21 +118,21 @@ nbv_policy:
     workspace_bounds: null      # 相机位置可达盒 [x_min,x_max,y_min,y_max,z_min,z_max]（世界系）
     workspace_margin_m: 0.03
     hard_clamp: true
-  # 修复2 可见性掩码：只统计 ROI 内、支撑面以上的高斯；相机低于支撑面时打分为 0
+  # 目标语义掩码：Tracking 把高斯关联到 TSDF 实例，用实例 SBERT embedding 与 cup 比较。
+  # semantic 模式按逐高斯归属筛选，不使用 ROI 包围盒；未匹配/未知高斯权重为 0，暂时等待观测。
+  # 关闭 enabled 可回退原版；sbert / yolo_live 仍保留为包围盒对照模式。
   fisher_mask:
-    enabled: false
-    roi_bounds: tsdf            # tsdf = 用 tsdf.spatial_bounds；或显式 6 元组；null = 不限
+    enabled: true
+    roi_query: cup
+    roi_query_mode: semantic
+    roi_query_min_similarity: 0.35  # 对融合后的实例 embedding 重新归一化，再计算余弦相似度
+    semantic_max_distance_m: null  # null = instance.fill_dis，高斯中心离语义体素过远则归为未知
+    roi_bounds: tsdf              # 仅 sbert / yolo_live 包围盒模式使用
     roi_padding_m: 0.0
-    support_plane_z: null       # 桌面高度；tsdf_min_z = 用 spatial_bounds 的 z_min
+    support_plane_z: null         # 可另填桌面高度；不自动检测桌面
     plane_softness_m: 0.01
-    # 开放词汇 ROI：从 tsdfs.instance_feature（YOLO-World+TAP+SBERT 持续维护的实例语义表）里，
-    # 选与下面文本余弦最相似的实例，用它的点包围盒替换 roi_bounds；null/空串 = 关闭，退回 roi_bounds。
-    roi_query: cup              # 默认 "cup"；只有 fisher_mask.enabled=true 时才生效；null/"" 关闭，退回 roi_bounds
-    roi_query_mode: sbert       # sbert = 比对 tsdfs.instance_feature 里已跟踪实例的语义特征（受限于已检测到的东西）；
-                                # yolo_live = 用这段文本重新单独跑一次 YOLO-World（真正的开放词汇检测，见下方注释）
-    roi_query_score_thresh: 0.05  # yolo_live 专用：检测置信度阈值
-    roi_query_refresh_every: 30 # 每隔多少 tick 重新匹配一次（文本只编码一次，重新扫 TSDF 实例表的开销约等于一次 get_pointcloud_center）
-    roi_query_min_similarity: 0.2  # 低于这个余弦相似度就认为没找到，退回 roi_bounds
+    roi_query_score_thresh: 0.05   # 仅 yolo_live 使用
+    roi_query_refresh_every: 30   # 仅包围盒模式缓存；semantic 每个 Tracking 帧重新关联高斯
   # 修复3 速度尺度：normalized = 梯度只给方向，速率 = v_nominal·|g|/(|g|+κ)，κ=|g| 滑动中位数
   velocity_mapping:
     mode: legacy                # legacy | normalized

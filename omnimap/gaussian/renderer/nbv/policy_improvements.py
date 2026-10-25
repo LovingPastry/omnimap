@@ -96,7 +96,10 @@ class FisherMaskConfig:
     # (not every tick, see roi_query_refresh_every), and needs at least one
     # integrate() call to have cached a frame.
     roi_query: Optional[str] = "cup"
-    roi_query_mode: str = "sbert"  # "sbert" | "yolo_live"
+    # "semantic": per-Gaussian instance/embedding association computed by
+    # Tracking. No bounding box and no fallback to background on a query miss.
+    roi_query_mode: str = "sbert"  # "sbert" | "yolo_live" | "semantic"
+    semantic_max_distance_m: Optional[float] = None  # None = instance.fill_dis
     roi_query_score_thresh: float = 0.05  # yolo_live only
     # Re-resolve the match every N ticks (re-encoding text is cheap; re-scanning
     # the TSDF instance table is the same cost as one get_pointcloud_center()
@@ -207,11 +210,21 @@ class NBVPolicyConfig:
             raise ValueError(
                 f"velocity_mapping.mode must be legacy|normalized, got {cfg.velocity_mapping.mode!r}"
             )
-        if cfg.fisher_mask.roi_query_mode not in {"sbert", "yolo_live"}:
+        if cfg.fisher_mask.roi_query_mode not in {"sbert", "yolo_live", "semantic"}:
             raise ValueError(
-                "fisher_mask.roi_query_mode must be sbert|yolo_live, "
+                "fisher_mask.roi_query_mode must be sbert|yolo_live|semantic, "
                 f"got {cfg.fisher_mask.roi_query_mode!r}"
             )
+        if cfg.fisher_mask.roi_query_mode == "semantic":
+            query = cfg.fisher_mask.roi_query
+            if not isinstance(query, str) or not query.strip():
+                raise ValueError("semantic Fisher masking requires a nonempty roi_query")
+            distance = cfg.fisher_mask.semantic_max_distance_m
+            if distance is not None and (not math.isfinite(float(distance)) or float(distance) <= 0):
+                raise ValueError("semantic_max_distance_m must be finite and positive")
+            threshold = float(cfg.fisher_mask.roi_query_min_similarity)
+            if not math.isfinite(threshold) or not -1 <= threshold <= 1:
+                raise ValueError("roi_query_min_similarity must be in [-1, 1]")
         return cfg
 
     def to_dict(self) -> dict:
@@ -502,9 +515,12 @@ class FisherContributionMask:
         return lo, hi
 
     def gaussian_weights(
-        self, xyz: torch.Tensor, *, tsdfs: Any = None, idx: Optional[int] = None
+        self, xyz: torch.Tensor, *, tsdfs: Any = None, idx: Optional[int] = None,
+        semantic_state: Optional[dict] = None,
     ) -> torch.Tensor:
         xyz = xyz.detach().reshape(-1, 3)
+        if self.cfg.roi_query_mode == "semantic":
+            return self._semantic_weights(xyz, semantic_state)
         keep = torch.ones(xyz.shape[0], dtype=torch.bool, device=xyz.device)
         roi = self.roi
         query_roi = self._resolve_query_roi(tsdfs, idx) if self.cfg.roi_query else None
@@ -514,6 +530,35 @@ class FisherContributionMask:
             lo = torch.as_tensor(roi[0], dtype=xyz.dtype, device=xyz.device)
             hi = torch.as_tensor(roi[1], dtype=xyz.dtype, device=xyz.device)
             keep &= ((xyz >= lo) & (xyz <= hi)).all(dim=1)
+        if self.plane_z is not None:
+            keep &= xyz[:, 2] >= self.plane_z
+        return keep.to(xyz.dtype)
+
+    def _semantic_weights(self, xyz: torch.Tensor, state: Optional[dict]) -> torch.Tensor:
+        keep = torch.zeros(len(xyz), dtype=torch.bool, device=xyz.device)
+        self.last_query_diag = {
+            "semantic_status": "missing", "semantic_frame_idx": -1,
+            "semantic_known_ratio": 0.0, "semantic_target_ids": [],
+            "roi_query_match": None,
+        }
+        if state is not None:
+            if state["query"] != self.cfg.roi_query:
+                raise ValueError("semantic query differs from the tracking snapshot query")
+            ids, similarities = state["instance_ids"], state["similarities"]
+            if ids.shape != (len(xyz),) or similarities.shape != (len(xyz),):
+                raise ValueError("semantic weights and Gaussian map have different lengths")
+            ids = ids.to(xyz.device)
+            similarities = similarities.to(xyz)
+            known = (ids > 0) & torch.isfinite(similarities)
+            keep = known & (similarities >= float(self.cfg.roi_query_min_similarity))
+            targets = torch.unique(ids[keep]).cpu().tolist()
+            self.last_query_diag.update(
+                semantic_status="ready" if keep.any() else "no_match",
+                semantic_frame_idx=int(state["frame_idx"]),
+                semantic_known_ratio=float(known.float().mean().item()) if len(xyz) else 0.0,
+                semantic_target_ids=targets,
+                roi_query_match=targets or None,
+            )
         if self.plane_z is not None:
             keep &= xyz[:, 2] >= self.plane_z
         return keep.to(xyz.dtype)
@@ -773,7 +818,9 @@ def resolve_nbv_policy_dict(
         return [float(v) for v in bounds]
 
     roi = mask.get("roi_bounds")
-    if isinstance(roi, str):
+    if mask.get("roi_query_mode") == "semantic":
+        mask["roi_bounds"] = None  # per-Gaussian membership needs no static box
+    elif isinstance(roi, str):
         mask["roi_bounds"] = _source(roi)
     plane = mask.get("support_plane_z")
     if isinstance(plane, str):

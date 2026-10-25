@@ -11,6 +11,7 @@ import numpy as np
 import torch
 from munch import munchify
 from omnimap.util.utils import get_section_logger
+from omnimap.gaussian.renderer.nbv.semantic_mask import clone_gaussian_semantics
 
 try:
     from omnimap.gaussian.scene.gaussian_model import GaussianModel
@@ -44,6 +45,7 @@ class FrozenPlannerBackend:
         tsdf_geometry: Optional[Dict[str, Any]],
         config: dict,
         runtime_device: str,
+        gaussian_semantics: Optional[dict] = None,
     ) -> None:
         self.gaussians = gaussians
         self.fisher_eval = fisher_eval
@@ -52,6 +54,9 @@ class FrozenPlannerBackend:
         self.sence_center = scene_center
         self.tsdf_geometry = _normalize_tsdf_geometry(tsdf_geometry)
         self.config = config
+        self.gaussian_semantics = clone_gaussian_semantics(
+            gaussian_semantics, num_gaussians=len(gaussians.get_xyz)
+        )
         self._runtime_device = str(runtime_device)
         if hasattr(self.fisher_eval, "keyviewpoints"):
             self.fisher_eval.keyviewpoints = self.keyviewpoints
@@ -90,7 +95,7 @@ class FrozenPlannerBackend:
         return self._runtime_device
 
 
-SNAPSHOT_BUNDLE_VERSION = 3
+SNAPSHOT_BUNDLE_VERSION = 4
 
 
 def _tensor_vec3_or_none(value: Any) -> Optional[torch.Tensor]:
@@ -231,6 +236,9 @@ def build_planner_snapshot(
     else:
         frozen_scene_center = torch.as_tensor(np.asarray(scene_center), dtype=torch.float32)
     tsdf_geometry = _extract_live_tsdf_geometry(live_backend)
+    semantic_state = getattr(live_backend, "gaussian_semantics", None)
+    if semantic_state is not None and int(semantic_state["frame_idx"]) != int(keyframe_idx):
+        raise ValueError("Gaussian semantics and snapshot geometry have different frame indices")
 
     frozen_backend = FrozenPlannerBackend(
         gaussians=frozen_gaussians,
@@ -241,6 +249,7 @@ def build_planner_snapshot(
         tsdf_geometry=tsdf_geometry,
         config=live_config,
         runtime_device=str(runtime_device),
+        gaussian_semantics=semantic_state,
     )
 
     snapshot = PlannerSnapshot(
@@ -309,14 +318,18 @@ def serialize_planner_snapshot(snapshot: PlannerSnapshot) -> Dict[str, Any]:
         "gaussians": backend.gaussians,
         "keyviewpoints": list(getattr(backend, "keyviewpoints", [])),
         "history_stat": getattr(backend, "history_stat", None),
+        "gaussian_semantics": clone_gaussian_semantics(
+            getattr(backend, "gaussian_semantics", None),
+            num_gaussians=len(backend.gaussians.get_xyz), frame_idx=snapshot.keyframe_idx,
+        ),
     }
 
 
 def deserialize_planner_snapshot(bundle: Dict[str, Any]) -> PlannerSnapshot:
     bundle_version = int(bundle.get("bundle_version", -1))
-    if bundle_version not in {1, 2, SNAPSHOT_BUNDLE_VERSION}:
+    if bundle_version not in {1, 2, 3, SNAPSHOT_BUNDLE_VERSION}:
         raise ValueError(
-            f"unsupported planner snapshot bundle version={bundle_version}, expected 1, 2, or {SNAPSHOT_BUNDLE_VERSION}"
+            f"unsupported planner snapshot bundle version={bundle_version}, expected 1, 2, 3, or {SNAPSHOT_BUNDLE_VERSION}"
         )
 
     config = copy.deepcopy(dict(bundle.get("config", {})))
@@ -338,6 +351,9 @@ def deserialize_planner_snapshot(bundle: Dict[str, Any]) -> PlannerSnapshot:
             dtype=torch.float32,
         ).reshape(3)
     tsdf_geometry = _normalize_tsdf_geometry(bundle.get("tsdf_geometry", None))
+    semantic_state = bundle.get("gaussian_semantics") if bundle_version >= 4 else None
+    if semantic_state is not None and int(semantic_state["frame_idx"]) != int(bundle["keyframe_idx"]):
+        raise ValueError("semantic snapshot frame differs from the geometry frame")
 
     backend = FrozenPlannerBackend(
         gaussians=gaussians,
@@ -348,6 +364,7 @@ def deserialize_planner_snapshot(bundle: Dict[str, Any]) -> PlannerSnapshot:
         tsdf_geometry=tsdf_geometry,
         config=config,
         runtime_device=str(bundle.get("runtime_device_hint", "cpu")),
+        gaussian_semantics=semantic_state,
     )
     return PlannerSnapshot(
         model_version=int(bundle["model_version"]),

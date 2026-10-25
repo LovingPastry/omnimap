@@ -1351,7 +1351,8 @@ class FisherMotionPolicy:
             )
         xyz = gs_backend.gaussians.get_xyz
         weights = self.fisher_mask.gaussian_weights(
-            xyz, tsdfs=getattr(gs_backend, "tsdfs", None), idx=int(idx)
+            xyz, tsdfs=getattr(gs_backend, "tsdfs", None), idx=int(idx),
+            semantic_state=getattr(gs_backend, "gaussian_semantics", None),
         )
         fisher_eval.set_score_mask(
             FisherContributionMask.expand_to_contribution(weights),
@@ -1470,6 +1471,29 @@ class FisherMotionPolicy:
                 intrinsics_vec=intrinsics_vec,
                 image_size=image_size,
             )
+            if (self.fisher_mask is not None
+                    and self.fisher_mask.cfg.roi_query_mode == "semantic"
+                    and self._tick_diag.get("mask_kept_ratio", 0.0) == 0.0):
+                # Temporary observation warm-up/target loss. Keep integrating
+                # frames and allow recovery, without latching the stop monitor
+                # or letting radial/orientation/min-speed commands move the arm.
+                result.next_c2w = result.current_c2w.copy()
+                result.desired_c2w = result.current_c2w.copy()
+                result.next_position = result.current_c2w[:3, 3].tolist()
+                result.next_theta, result.next_phi = result.current_theta, result.current_phi
+                for name in ("velocity_raw_world", "vt_world", "vn_world", "velocity_world",
+                             "rotvec_error", "angular_velocity_world"):
+                    setattr(result, name, np.zeros(3, dtype=np.float64))
+                for name in ("theta_rate_applied", "phi_rate_applied", "spherical_speed_applied",
+                             "linear_speed_applied", "angular_speed_applied"):
+                    setattr(result, name, 0.0)
+                # Servo has its own radial/orientation controllers: zero angle
+                # rates alone do not hold the robot. Publish a transient stop.
+                result.should_stop = True
+                result.stop_reason = "semantic_target_unavailable"
+                self._tick_diag["semantic_waiting"] = True
+                result.nbv_diag = dict(self._tick_diag)
+                return result
             # Inside the try so the global saturation probe sees the same mask.
             result = self._apply_stop_monitor(
                 result,
