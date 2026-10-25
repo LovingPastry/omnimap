@@ -66,7 +66,7 @@ public:
   KinematicMonitor() : pnh_("~"), tf_listener_(tf_)
   {
     pnh_.param<std::string>("servo_ns", servo_ns_, "/servo_server");
-    pnh_.param<std::string>("robot_description", description_, "robot_description");
+    pnh_.param<std::string>("robot_description_param", description_, "/robot_description");
     ros::NodeHandle servo(servo_ns_);
     std::string group, joint_topic, status_topic, command_frame;
     // Fail at startup instead of silently monitoring a different group/frame.
@@ -341,6 +341,26 @@ private:
 int main(int argc, char** argv)
 {
   ros::init(argc, argv, "omnimap_kinematic_monitor");
+  // Keep ROS alive through constructor exceptions so ROS_FATAL is not lost
+  // when the partially constructed monitor's last NodeHandle is destroyed.
+  ros::NodeHandle keep_alive;
+  ros::NodeHandle private_nh("~");
+  std::string servo_namespace;
+  private_nh.param<std::string>("servo_ns", servo_namespace, "/servo_server");
+  ros::NodeHandle servo(servo_namespace);
+  while (ros::ok())
+  {
+    std::ostringstream missing;
+    for (const auto* key : {"move_group_name", "planning_frame", "ee_frame_name", "joint_topic",
+                            "status_topic", "robot_link_command_frame", "cartesian_command_in_topic"})
+      if (!servo.hasParam(key)) missing << ' ' << key;
+    if (missing.str().empty()) break;
+    ROS_WARN_STREAM_THROTTLE(5.0, "Waiting for Servo parameters under " << servo_namespace << ':' << missing.str()
+                             << ". Start robot bringup with start_servo:=true, or diagnostics.launch with start_servo:=true.");
+    ros::spinOnce();
+    ros::WallDuration(0.1).sleep();
+  }
+  if (!ros::ok()) return 0;
   try { KinematicMonitor monitor; ros::spin(); }
   catch (const std::exception& exc) { ROS_FATAL_STREAM(exc.what()); return 1; }
   return 0;

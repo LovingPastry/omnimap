@@ -2,6 +2,37 @@
 
 更新：2026-10-24。对应 [上位机方案](ur5_nbv_kinematics_upgrade_sumi.md)。
 
+## 2026-10-25 实机 ROS 启动修复
+
+本次现场 master 和机器人驱动已运行，整机使用的是默认 `launch_robot.launch`，未启用 Servo。
+修复了两处启动问题：
+
+1. 缺少 `/servo_server` 参数时，monitor 现在等待参数就绪，不再以 required process 失败结束整个 launch。
+2. 原 launch 创建了私有 `robot_description="robot_description"`，MoveIt 的参数搜索误把这个字符串当作 URDF。
+   改用独立的 `robot_description_param` 指向全局 `/robot_description`，避免遮蔽真实模型。
+
+整机没有启动 Servo 时，诊断终端使用：
+
+```bash
+roslaunch omnimap_kinematics diagnostics.launch start_bridge:=true start_servo:=true
+```
+
+若整机已使用 `start_servo:=true` 启动，则诊断终端仍使用 `start_bridge:=true` 即可，不重复启动 Servo。
+`start_servo` 选项复用 `ur5_moveit_config/launch/ur5_servo.launch`，启动标准 `/servo_server`；
+该选项需要 source 机器人 catkin workspace，仅适用于默认 Servo 命名空间。
+只启动诊断时不启动机器人驱动，也不切换控制器。
+
+本次实际启动后 `/servo_server`、桥接、monitor 均存活，完整启动日志无 ERROR/FATAL/异常退出。
+读取了当前 UR5 模型和真实 joint_states，纯零速输入探测收到 60 条反馈，其中 10 条链有效；
+有效样本示例为 `sigma_min=2.37855`、归一化 condition `16.917`、MoveIt status `0`。
+仍存在 joint_states 比 TF 更新更快导致的采样时刻外插等待，不能把这轮称为连续诊断已稳定。
+没有发送非零命令、切换控制器或执行机械臂运动，也没有据此标定 `m_min`。
+测试结束后，本次启动的 Servo、桥接、monitor 和零速探测节点均已退出，原整机节点保留。
+现场日志：`/tmp/omnimap_diagnostics_live_test.log`。
+
+新增 `rostest omnimap_kinematics diagnostics_launch.test`，直接覆盖正式 launch 的模型参数接线，
+并验证 Servo 参数延迟到达及 `/clock` 未启动时 monitor 仍能存活和恢复。6 项测试通过。
+
 ## 已落地的代码
 
 实现放在仓库的 `ros_ws/src/omnimap_kinematics`，供 sumi 的现有工作区复用：
@@ -11,7 +42,7 @@
 | `scripts/camera_twist_bridge.py` | base 表达下的 camera → tool0 参考点变换、普通/KF 两种模式、墙钟 watchdog |
 | `src/omnimap_kinematic_monitor.cpp` | MoveIt RobotModel/RobotState、按名称装配关节状态、归一化 Jacobian 的 SVD；只发布诊断 |
 | `config/kinematics.yaml` | 任务速度尺度、样本超时、时间对齐容差和发布频率 |
-| `launch/diagnostics.launch` | 独立 monitor；`start_bridge:=true` 时同时启动升级桥接，不启动驱动或 Servo |
+| `launch/diagnostics.launch` | 独立 monitor；`start_bridge:=true` 启动升级桥接，`start_servo:=true` 可选启动标准 UR5 Servo；不启动驱动 |
 | `omnimap_msgs/msg/BridgeStatus.msg` | 每次桥接输出的完整输入/输出 Twist、topic、参考点、TF 年龄、status 和失效原因 |
 | `omnimap_msgs/msg/ServoTwistTrace.msg` | 实际 Twist 的序号/采样时间、Planning tick、模型版本及命令时间 |
 

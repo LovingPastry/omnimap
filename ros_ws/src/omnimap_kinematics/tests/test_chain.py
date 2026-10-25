@@ -18,6 +18,7 @@ from omnimap_msgs.msg import BridgeStatus, KinematicStatus, ServoTwistTrace
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Int8
 from rosgraph_msgs.msg import Clock
+from roscpp.srv import GetLoggers
 from tf.transformations import euler_matrix, rotation_matrix, quaternion_from_matrix
 
 
@@ -30,6 +31,18 @@ class ChainTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         rospy.init_node("test_kinematic_chain")
+        if rospy.get_param("/test/configure_servo_late", False):
+            service = "/omnimap_kinematic_monitor/get_loggers"
+            rospy.wait_for_service(service, timeout=5)
+            probe = rospy.ServiceProxy(service, GetLoggers)
+            probe()
+            time.sleep(0.3)  # wall time: simulated /clock is not started yet
+            probe()  # monitor must survive missing Servo config and paused time
+            rospy.set_param("/test/servo", {
+                "move_group_name": "manipulator", "planning_frame": "base_link",
+                "robot_link_command_frame": "base_link", "ee_frame_name": "tool0",
+                "joint_topic": "/test/joints", "status_topic": "feedback",
+                "cartesian_command_in_topic": "/test/tool_twist"})
         cls.lock = threading.RLock()
         cls.kinematic, cls.bridge, cls.output = None, None, None
         cls.subs = [rospy.Subscriber(topic, kind, lambda msg, key=key: setattr(cls, key, msg))

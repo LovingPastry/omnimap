@@ -1,0 +1,24 @@
+<launch>
+  <!-- Exercise the shipped launch, including its robot-description parameter
+       wiring. Servo config arrives after monitor startup, like separate bringup. -->
+  <param name="use_sim_time" value="true"/>
+  <param name="test/configure_servo_late" value="true"/>
+  <param name="robot_description" textfile="$(find omnimap_kinematics)/tests/chain.urdf"/>
+  <param name="robot_description_semantic" value="&lt;robot name='kinematics_test_chain'&gt;&lt;group name='manipulator'&gt;&lt;chain base_link='chain_root' tip_link='tool0'/&gt;&lt;/group&gt;&lt;/robot&gt;"/>
+  <include file="$(find omnimap_kinematics)/launch/diagnostics.launch">
+    <arg name="servo_ns" value="/test/servo"/>
+    <arg name="start_bridge" value="true"/>
+    <arg name="input_topic" value="/test/camera_twist"/>
+    <arg name="output_topic" value="/test/tool_twist"/>
+    <arg name="status_topic" value="/test/servo/feedback"/>
+    <arg name="bridge_status_topic" value="/test/bridge"/>
+  </include>
+  <param name="omnimap_kinematic_monitor/kinematic_status_topic" value="/test/kinematic"/>
+  <param name="omnimap_kinematic_monitor/twist_trace_topic" value="/test/trace"/>
+  <param name="omnimap_kinematic_monitor/sample_timeout" value="0.4"/>
+  <param name="omnimap_kinematic_monitor/max_sample_skew" value="0.15"/>
+  <rosparam param="omnimap_kinematic_monitor/task_velocity_scales">[0.1, 0.2, 0.3, 0.4, 0.5, 0.6]</rosparam>
+  <param name="omnimap_camera_twist_bridge/stale_timeout" value="0.4"/>
+  <param name="omnimap_camera_twist_bridge/status_timeout" value="0.4"/>
+  <test test-name="production_kinematic_chain" pkg="omnimap_kinematics" type="test_chain.py" time-limit="60"/>
+</launch>

@@ -1,14 +1,17 @@
 <launch>
-  <!-- Requires the existing robot_description + SRDF and running Servo.
-       This launch never starts a robot driver or MoveIt Servo. -->
+  <!-- Requires the existing robot_description + SRDF. A robot driver is never
+       started here. Servo can optionally be started when bringup omitted it. -->
   <arg name="servo_ns" default="/servo_server"/>
-  <arg name="robot_description" default="robot_description"/>
+  <arg name="robot_description" default="/robot_description"/>
   <arg name="start_bridge" default="false"/>
+  <arg name="start_servo" default="false"/>
   <arg name="filter_mode" default="none"/>
   <arg name="input_topic" default="/servo_server/delta_twist_camera"/>
   <arg name="output_topic" default="/servo_server/delta_twist_cmds"/>
   <arg name="bridge_status_topic" default="/omnimap/bridge_status"/>
   <arg name="status_topic" default=""/>
+  <!-- This UR5 helper starts /servo_server, matching ur5_servo.launch. -->
+  <include if="$(arg start_servo)" file="$(find ur5_moveit_config)/launch/ur5_servo.launch"/>
   <node if="$(arg start_bridge)" pkg="omnimap_kinematics" type="camera_twist_bridge.py"
         name="omnimap_camera_twist_bridge" output="screen" required="true">
     <param name="input_topic" value="$(arg input_topic)"/>
@@ -22,7 +25,9 @@
         name="omnimap_kinematic_monitor" output="screen" required="true">
     <rosparam command="load" file="$(find omnimap_kinematics)/config/kinematics.yaml"/>
     <param name="servo_ns" value="$(arg servo_ns)"/>
-    <param name="robot_description" value="$(arg robot_description)"/>
+    <!-- Do not create a private parameter named robot_description: MoveIt's
+         searchParam would mistake that string pointer for the URDF itself. -->
+    <param name="robot_description_param" value="$(arg robot_description)"/>
     <param name="bridge_status_topic" value="$(arg bridge_status_topic)"/>
   </node>
 </launch>
