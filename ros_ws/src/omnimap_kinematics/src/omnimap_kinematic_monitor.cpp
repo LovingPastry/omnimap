@@ -168,19 +168,46 @@ private:
       }
       for (const auto& name : required_names_)
         if (!seen.count(name)) joints_error_ = "joint_missing:" + name;
-      if (joints_error_.empty())
-      {
-        // Assign by name, never by the incoming /joint_states array order.
-        for (size_t i = 0; i < msg->name.size(); ++i)
-          if (std::find(model_->getVariableNames().begin(), model_->getVariableNames().end(), msg->name[i]) !=
-              model_->getVariableNames().end())
-          {
-            state_->setVariablePosition(msg->name[i], msg->position[i]);
-            state_->setVariableVelocity(msg->name[i], msg->velocity[i]);
-          }
-        state_->update();
-      }
     }
+    // Never hide malformed or out-of-order new input behind an older good sample.
+    if (!joint_history_.empty() && msg->header.stamp <= joint_history_.back().msg->header.stamp)
+      joint_history_.clear();
+    if (!joints_error_.empty()) joint_history_.clear();
+    else joint_history_.push_back({msg, joints_received_});
+    while (joint_history_.size() > 200 ||
+           (!joint_history_.empty() &&
+            (joints_received_-joint_history_.front().received).toSec() > timeout_))
+      joint_history_.pop_front();
+  }
+
+  void selectJointSample()
+  {
+    // Latest input must itself be healthy. Buffering only compensates TF delivery
+    // latency; it must not mask stopped, corrupt, or future-dated joint streams.
+    if (!joints_) throw std::runtime_error("joint_states_missing");
+    fresh(joints_->header.stamp, joints_received_, "joint_states");
+    if (!joints_error_.empty()) throw std::runtime_error(joints_error_);
+    for (auto it = joint_history_.rbegin(); it != joint_history_.rend(); ++it)
+    {
+      const auto& msg = it->msg;
+      const double age = (ros::Time::now()-msg->header.stamp).toSec();
+      if (msg->header.stamp.isZero() || age < -0.05 || age > timeout_ ||
+          (ros::SteadyTime::now()-it->received).toSec() > timeout_) continue;
+      if (bridge_ && std::abs((msg->header.stamp-bridge_->input.header.stamp).toSec()) > skew_) continue;
+      if (!tf_.canTransform(base_, tool_, msg->header.stamp, ros::Duration(0)) ||
+          !tf_.canTransform(base_, camera_, msg->header.stamp, ros::Duration(0))) continue;
+      selected_joints_ = msg;
+      for (size_t i = 0; i < msg->name.size(); ++i)
+        if (std::find(model_->getVariableNames().begin(), model_->getVariableNames().end(), msg->name[i]) !=
+            model_->getVariableNames().end())
+        {
+          state_->setVariablePosition(msg->name[i], msg->position[i]);
+          state_->setVariableVelocity(msg->name[i], msg->velocity[i]);
+        }
+      state_->update();
+      return;
+    }
+    throw std::runtime_error("joint_tf_aligned_sample_unavailable");
   }
 
   void status(const std_msgs::Int8ConstPtr& msg)
@@ -207,7 +234,7 @@ private:
 
   void checkTF(const std::string& link)
   {
-    const auto transform = tf_.lookupTransform(base_, link, joints_->header.stamp, ros::Duration(0));
+    const auto transform = tf_.lookupTransform(base_, link, selected_joints_->header.stamp, ros::Duration(0));
     const auto actual = pose(transform.transform);
     // The RealSense optical frame can be supplied by the calibrated hand-eye
     // TF chain rather than embedded in robot_description. Only tool0 is the
@@ -231,9 +258,8 @@ private:
     ros::Time command_stamp;
     try
     {
-      if (!joints_) throw std::runtime_error("joint_states_missing");
-      fresh(joints_->header.stamp, joints_received_, "joint_states");
-      if (!joints_error_.empty()) throw std::runtime_error(joints_error_);
+      selected_joints_.reset();
+      selectJointSample();
       fresh(status_stamp_, status_received_, "moveit_status");
       // MoveIt getJacobian expresses columns in the group-root parent frame.
       // Rotate BOTH blocks to Servo planning_frame; reference point is tool0's
@@ -274,7 +300,7 @@ private:
       if (frame(bridge_->camera_frame) != camera_ || frame(bridge_->task_frame) != tool_ ||
           bridge_->output_topic != output_topic_)
         throw std::runtime_error("bridge_reference_or_topic_mismatch");
-      if (std::abs((joints_->header.stamp-bridge_->input.header.stamp).toSec()) > skew_)
+      if (std::abs((selected_joints_->header.stamp-bridge_->input.header.stamp).toSec()) > skew_)
         throw std::runtime_error("joint_command_sample_skew");
       if (bridge_->moveit_status != status_ || bridge_->status_received_stamp.isZero() ||
           std::abs((status_stamp_-bridge_->status_received_stamp).toSec()) > skew_)
@@ -302,7 +328,8 @@ private:
     pub_.publish(out);
     ROS_INFO_STREAM("kinematic_sample: stamp=" << out.header.stamp << " tick=" << out.planner_tick
                     << " command_stamp=" << command_stamp
-                    << " joint_stamp=" << (joints_ ? joints_->header.stamp : ros::Time())
+                    << " latest_joint_stamp=" << (joints_ ? joints_->header.stamp : ros::Time())
+                    << " joint_stamp=" << (selected_joints_ ? selected_joints_->header.stamp : ros::Time())
                     << " input_stamp=" << (bridge_ ? bridge_->input.header.stamp : ros::Time())
                     << " input_seq=" << (bridge_ ? bridge_->input.header.seq : 0)
                     << " output_stamp=" << (bridge_ ? bridge_->output.header.stamp : ros::Time())
@@ -328,7 +355,9 @@ private:
   std::string servo_ns_, description_, base_, tool_, camera_, joints_error_, output_topic_;
   double timeout_, skew_, position_tolerance_, angle_tolerance_;
   int status_ = -1;
-  sensor_msgs::JointStateConstPtr joints_;
+  struct JointSample { sensor_msgs::JointStateConstPtr msg; ros::SteadyTime received; };
+  std::deque<JointSample> joint_history_;
+  sensor_msgs::JointStateConstPtr joints_, selected_joints_;
   omnimap_msgs::BridgeStatusConstPtr bridge_;
   std::deque<omnimap_msgs::ServoTwistTraceConstPtr> traces_;
   ros::SteadyTime joints_received_, status_received_, bridge_received_;

@@ -73,6 +73,8 @@ class ChainTest(unittest.TestCase):
             self.__class__.send_input = self.__class__.send_status = self.__class__.send_joints = True
             self.__class__.send_tf = True
             self.__class__.input_age = 0.06
+            self.__class__.joint_age = None
+            self.__class__.tf_age = 0.0
             self.__class__.input_frame = "base_link"
             self.__class__.malformed = False
             self.__class__.tf_error = 0.0
@@ -117,7 +119,7 @@ class ChainTest(unittest.TestCase):
                     transforms = []
                     for frame in ("tool0", "cam_1_color_optical_frame"):
                         tr = TransformStamped()
-                        tr.header.stamp, tr.header.frame_id, tr.child_frame_id = now, "base_link", frame
+                        tr.header.stamp, tr.header.frame_id, tr.child_frame_id = now-rospy.Duration(cls.tf_age), "base_link", frame
                         xyz = poses[frame][:3, 3].copy()
                         xyz[0] += cls.tf_error
                         tr.transform.translation.x, tr.transform.translation.y, tr.transform.translation.z = xyz
@@ -128,7 +130,7 @@ class ChainTest(unittest.TestCase):
                 stamp = now-rospy.Duration(cls.input_age)
                 if cls.send_joints:
                     js = JointState()
-                    js.header.stamp = stamp
+                    js.header.stamp = stamp if cls.joint_age is None else now-rospy.Duration(cls.joint_age)
                     # Deliberately reverse input order relative to RobotModel.
                     js.name = ["j%d" % i for i in range(6, 0, -1)]
                     js.position, js.velocity = cls.q[::-1].tolist(), cls.dq[::-1].tolist()
@@ -184,6 +186,25 @@ class ChainTest(unittest.TestCase):
         expected = np.r_[incoming[:3]-np.cross(incoming[3:], offset), incoming[3:]]
         np.testing.assert_allclose(values(self.bridge.output), expected, atol=1e-9)
         self.assertAlmostEqual(msg.command_speed_norm, np.linalg.norm(expected/dx), places=7)
+
+    def test_delayed_tf_uses_bounded_joint_history(self):
+        # TF consistently trails joints by 80 ms. Latest-only lookup cannot
+        # succeed; a fresh historical joint sample must drive RobotState and TF.
+        with self.lock:
+            self.__class__.joint_age = 0.0
+            self.__class__.tf_age = 0.08
+            self.__class__.input_age = 0.12
+        time.sleep(0.5)
+        for _ in range(15):
+            self.assertTrue(self.kinematic.transform_chain_valid, self.kinematic.reason)
+            time.sleep(0.05)
+        with self.lock:
+            self.__class__.send_joints = False
+        time.sleep(0.5)
+        self.assertFalse(self.kinematic.transform_chain_valid)
+        with self.lock:
+            self.__class__.send_joints = True
+        self.wait(lambda: self.kinematic.transform_chain_valid, "delayed TF recovery")
 
     def test_status_stop_and_recovery(self):
         for code in (1, 2, 3, 4, 5, 99, 0):

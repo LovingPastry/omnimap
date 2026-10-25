@@ -1,6 +1,6 @@
 # sumi 运动学诊断：实现、部署与验收
 
-更新：2026-10-24。对应 [上位机方案](ur5_nbv_kinematics_upgrade_sumi.md)。
+更新：2026-10-25。对应 [上位机方案](ur5_nbv_kinematics_upgrade_sumi.md)。
 
 ## 2026-10-25 实机 ROS 启动修复
 
@@ -66,7 +66,7 @@ v_T^B = v_C^B − ω^B × (p_C^B − p_T^B)
 
 monitor 从实际 Servo 参数命名空间读取 `move_group_name`、`planning_frame`、
 `robot_link_command_frame`、`ee_frame_name`、joint/status/Cartesian input topics。
-缺失参数、command/planning frame 不一致、非六自由度串联链、group 末 link 与 EE 不一致时启动失败。
+缺失 Servo 参数时等待；command/planning frame 不一致、非六自由度串联链、group 末 link 与 EE 不一致时启动失败。
 机器人描述默认使用相同的 `robot_description`，含 SRDF 和 planning joint-limit overrides。
 不会加载另一份 UR5 DH 参数，也不会从 status 码推导 sigma。
 
@@ -198,7 +198,7 @@ camera 输入可用 `--input-topic` 指定。若 master 在线但 Servo 参数�
 
 本机默认 master 的只读 inventory 位于 `/home/sumi/omnimap_kinematic_inventory_20261024_174813.txt`；
 仓库配置 `http://172.19.93.154:11311` 的复核位于 `/home/sumi/omnimap_kinematic_inventory_20261024_175526.txt`。
-两次 `rosnode list` 均返回 `Unable to communicate with master`，inventory 以退出码 2 标记运行时未验证。
+以下为 2026-10-24 历史记录，master 已于次日恢复。两次 `rosnode list` 均返回 `Unable to communicate with master`，inventory 以退出码 2 标记运行时未验证。
 18:03 的再次复核保存于 `/home/sumi/omnimap_kinematic_inventory_20261024_180336.txt`，结果相同。
 虽仍有 Servo 进程存活，但其进程环境指向的也是上述不可访问 master，不能以进程存在替代运行链路证据。
 隔离测试不构成真实机器人验收。实际 topic 连通性、模型/标定对齐、开始减速时 raw condition 与 sigma_min 的关系、
@@ -208,7 +208,18 @@ camera 输入可用 `--input-topic` 指定。若 master 在线但 Servo 参数�
 |---|---|
 | 1. status/frame/速度记录 | BridgeStatus、ServoTwistTrace 和 monitor 日志已实现；有效命令数值由参考点公式测试校验 |
 | 2. TF 时间和参考点平移项 | 同采样时间查询及有限差分/刚体速度测试通过；真实 TF 年龄与标定仍待现场记录 |
-| 3. MoveIt 诊断节点 | C++ 节点、构建、部署和真实 RobotState 隔离测试完成；真实模型及 joint_states 运行验收待完成 |
+| 3. MoveIt 诊断节点 | C++ 节点、构建、部署和真实 RobotState 隔离测试完成；已有真实模型/joint_states 零速样本，持续运行验收待完成 |
 | 4. 标定 m_min / 比较减速时机 | raw/normalized condition、sigma_min、status 的对齐接口已就绪；需要真实减速日志 |
 | 5. 二维最小半空间控制修正 | 尚未启用，等待步骤 4 的诊断与标定门槛；现有纯数值投影函数不等于控制链已接入 |
 | 6. stale/TF/status 零速策略 | 普通/KF 桥接 watchdog、状态停车和失效恢复测试通过；硬件断链验收待完成 |
+
+## 2026-10-25 关节与 TF 延迟对齐修复
+
+monitor 不再只查询最新 joint_states 时刻：缓存最多 200 个且未超过 sample_timeout 的接收样本，
+选择两条 TF 均已覆盖、源时间/接收时间新鲜且符合 max_sample_skew 的最新样本。
+该样本同时驱动 RobotState、实测速度和 TF 模型一致性检查；日志区分 latest_joint_stamp 与 joint_stamp。
+最新关节消息仍必须有效，畸形或时间倒退/重复输入清空历史；关节断流、TF 缺失或历史过期仍反馈无效。
+此改动不修改桥接 Twist，不放宽 TF/模型误差容差，也不证明现场持续对齐已验收。
+
+本轮验证：`./scripts/build_ros_ws.sh --with-kinematics` 成功；隔离 ROS 集成测试 7 项全部通过，
+新增 TF 持续落后 80 ms 的有效反馈与关节断流失效/恢复检查。日志在 `/tmp/omnimap_alignment_test.log`。

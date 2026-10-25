@@ -73,8 +73,8 @@ rosbag play fisher_raw.bag /omnimap/spherical_cmd_raw:=/omnimap/replay/spherical
 
 本机消息包生成了计划列出的 14 个字段。`std_msgs` 依赖覆盖 build/export/runtime。
 Planning 不加载机器人模型、不计算 Jacobian、不从 MoveIt code 推导 `a`。
-执行侧仍需使用与实际 Servo 相同的 RobotModel、planning group、关节顺序、`base_link` 表达和 `tool0` 参考点，
-并在 TF、joint_states、status 或桥接链失效时将反馈标为无效。
+执行侧 monitor 使用与实际 Servo 相同的 RobotModel、planning group、关节顺序、`base_link` 表达和 `tool0` 参考点，
+并在 TF、joint_states、status 或桥接链失效时将反馈标为无效；实机模型一致性仍需验收。
 `KinematicStatus` 没有单独的 joint/status/TF 时间戳字段；这些样本的关联证据来自现场 rosbag 和 monitor 日志，
 不能仅凭 `transform_chain_valid=true` 声明已经验证关节顺序。
 
@@ -108,11 +108,10 @@ Planning/Servo 回调测试 9 项全部通过；`git diff --check` 通过。
 
 ## 现场验收仍待完成
 
-2026-10-24 在沙箱内和沙箱外执行 `rostopic info /omnimap/kinematic_status`，均返回
-`ERROR: Unable to communicate with master!`。随后在沙箱外加载仓库 `scripts/source_env.sh`，
-使用其中的 `ROS_MASTER_URI=http://172.19.93.154:11311` 重试，结果相同。
-尚未收到真实诊断消息；不能标记整个计划验收完成。
-本机升级不包含对 sumi 的写入或启动机器人。现场恢复后，按计划执行：
+2026-10-24 的 master 不可访问是历史记录。2026-10-25 已恢复 master，
+执行端已完成启动修复并取得真实关节状态下的零速诊断，详见 sumi 验收记录。
+这不证明连续诊断稳定或非零控制有效；当前工作允许部署到本机机器人 ROS 工作区。
+后续现场记录命令：
 
 ```bash
 source scripts/source_env.sh

@@ -1,163 +1,78 @@
-# UR5 上位机（sumi）升级方案：桥接节点与 MoveIt Servo 诊断
+# UR5 执行端升级：桥接与 MoveIt 运动学反馈
 
-更新时间：2026-10-24
+更新：2026-10-25。当前主机就是 sumi，允许修改 `~/ros/catkin_ws/src`。
+Git 管理的实现来源是仓库 `ros_ws/src/omnimap_kinematics`，部署脚本复用到机器人工作区。
+旧的“仅 SSH 只读检查”限制不再适用。详细参数和证据见 [sumi 验收](ur5_nbv_kinematics_validation_sumi.md)。
 
-实现与部署记录见 [sumi 运动学诊断验收](ur5_nbv_kinematics_validation_sumi.md)。
-普通/KF 桥接入口已升级，MoveIt C++ monitor 已构建；以下清单保留 2026-10-22 的方案基线。
-2026-10-25 现场 ROS master 已恢复，已完成启动修复及真实关节状态下的零速诊断探测；
-连续时间对齐、`m_min` 标定和二维半空间控制修正仍待后续验证。
+## 实现状态
 
-## 现场核查状态
-
-SSH 已恢复，以下文件和行号已经在 `sumi` 的 `~/ros/catkin_ws/src` 中只读核对。源码中没有找到 `cam_1_baselink`；实际相机 frame 是 `cam_1_color_optical_frame`。当前桥接输入和输出都标记为 `base_link`，桥接通过 TF 读取 camera/tool0 的位置差，修正同一 `base_link` 表达下的参考点速度。
-
-方案基线核查时 ROS master 不可访问，节点运行情况尚未核实；当时没有写入远端工作区。
-2026-10-24 的实际代码和本机工作区部署变化以链接的验收记录为准。
-
-## 1. 已核实的桥接和启动链路
-
-已核实的文件：
-
-| 文件与行 | 已确认行为 |
+| 交付项 | 当前状态 |
 |---|---|
-| `robot_else_nodes/scripts/camera_twist_bridge.py:33–37` | 输入 `/servo_server/delta_twist_camera`，输出 `/servo_server/delta_twist_cmds`，相机为 `cam_1_color_optical_frame`，末端为 `tool0` |
-| `camera_twist_bridge.py:64–66` | 订阅输入并发布输出；`74–80` 只接受 `header.frame_id == base_link` |
-| `camera_twist_bridge.py:84–90` | 查询 `base_link→camera` 和 `base_link→tool0` 的平移，构造 `r_tc=p_C−p_T` |
-| `camera_twist_bridge.py:111–138` | 使用 `v_T=v_C−ω×r_tc`、`ω_T=ω_C`，输出 frame 仍为 `base_link` |
-| `robot_else_nodes/scripts/camera_twist_bridge_kf.py:47–52, 169–208` | KF 版本使用相同 frame、TF 和参考点公式，只是在输出前对 six components 做滤波 |
-| `robot_else_nodes/launch/launch_robot.launch:12–15` | `start_servo` 默认 `false` |
-| `launch_robot.launch:78–85` | Servo 可启动，但 `camera_twist_bridge.py` 节点目前被注释，没有自动启动 |
-| `universal_robot/ur5_moveit_config/config/ur5_servo.yaml:29–43` | MoveIt 使用 `base_link` planning/command frame、`tool0` EE、输入 `/servo_server/delta_twist_cmds`、status `/servo_server/status`，奇异阈值为 17/30 |
+| 普通/KF 桥接 | 已实现参考点变换、BridgeStatus、状态停车、墙钟 watchdog |
+| MoveIt C++ monitor | 已实现实际模型/group/限速、SVD、原始及归一化 condition、实测速度诊断 |
+| 命令关联 | ServoTwistTrace 按序号、时间、frame、数值关联 tick；无匹配标记 tick_unavailable |
+| 部署 | 包链接、旧桥接入口备份/替换、运行依赖补齐，整机默认启动不变 |
+| 启动恢复 | 等待 Servo 参数；robot_description_param 指向全局 URDF，避免私有参数遮蔽 |
+| 采样对齐 | 有界关节历史，选择 TF 已覆盖且与当前命令相近的新鲜样本；不修改 Twist |
+| m_min 和二维修正 | 尚未标定或接入，不能宣称全计划完成 |
 
-若需要重复生成清单，使用：
-
-```bash
-cd ~/ros/catkin_ws/src
-printf '%s\n' '=== bridge candidates ==='
-rg -n --hidden -g '*.cpp' -g '*.h' -g '*.py' -g '*.launch' -g '*.yaml' \
-  'cam_1_baselink|cam_1_color_optical_frame|tool0|delta_twist_camera|TwistStamped|lookupTransform|lookup_transform|tf2' .
-
-printf '%s\n' '=== MoveIt Servo source/config ==='
-find . -path '*moveit_servo*' -type f | sort
-rg -n 'condition|singular|lower_singularity_threshold|hard_stop_singularity_threshold|status_topic|planning_frame|robot_link_command_frame|ee_frame_name' \
-  . -g '*.cpp' -g '*.h' -g '*.yaml'
-
-printf '%s\n' '=== runtime graph ==='
-rosnode list | sort
-rostopic list | rg 'servo|twist|joint|status|cam_1|tool0'
-rosnode list | while read n; do rosnode info "$n" 2>/dev/null | rg -q 'cam_1_baselink|cam_1_color_optical_frame|tool0|delta_twist_camera' && { echo "--- $n"; rosnode info "$n"; }; done
-```
-
-把输出保存为 `~/omnimap_kinematic_inventory_$(date +%Y%m%d_%H%M%S).txt`。运行时还要先 `source /opt/ros/noetic/setup.bash` 和 `source ~/ros/catkin_ws/devel/setup.bash`；本次检查发现 ROS master 不可访问，所以没有把空的 `rosnode list` 当作运行链路证据。
-
-## 2. MoveIt Servo 需要记录的指标
-
-官方 Noetic `moveit_ros/moveit_servo/src/servo_calcs.cpp` 的关键位置如下：
-
-| 官方源文件位置 | 计算 | 对项目的作用 |
-|---|---|---|
-| `servo_calcs.cpp:434–510` | 将 incoming Twist frame 旋转到 planning frame | 检查桥接是否已经做过一次 frame 变换 |
-| `servo_calcs.cpp:512–534` | `getJacobian()`、SVD、伪逆、关节增量 | MoveIt 实际使用的 Jacobian 入口 |
-| `servo_calcs.cpp:536–540` | 速度限幅后应用奇异性缩放 | `sigma_min` 低并不会自动发布给上游 |
-| `servo_calcs.cpp:693–756` | `condition = σmax/σmin`、奇异方向、线性减速/急停 | MoveIt 的内部奇异性指标和触发逻辑 |
-| `servo_calcs.cpp:759–800` | 逐关节 velocity bound | 不能只看整体 condition number |
-| `servo_calcs.cpp:268–273` | 发布 `std_msgs/Int8` status | 订阅该 topic 作为实际执行反馈 |
-| `status_codes.h:46–64` | status code 定义 | 1=decelerate singularity，2=halt singularity，3/4=collision，5=joint bound |
-
-在 sumi 上查询实际 status topic 和阈值：
-
-```bash
-rosparam get /servo_server/status_topic
-rosparam get /servo_server/lower_singularity_threshold
-rosparam get /servo_server/hard_stop_singularity_threshold
-rostopic echo -n 1 /servo_server/status
-```
-
-实际命名空间可能不是 `/servo_server`，以 `rosnode info /servo_server` 和参数服务器输出为准。MoveIt 状态码只说明它采取了什么动作，不包含 condition 数值；要得到 `sigma_min` 或 condition，需要在拥有 MoveIt `RobotState` 的节点中调用同一 Jacobian 计算。
-
-## 3. 桥接节点的推荐改法
-
-### 3.1 已确认输入和输出
-
-当前真实链路是：
+## frame、模型与时间契约
 
 ```text
-OmniMap Servo Runtime
-  /servo_server/delta_twist_camera  (TwistStamped, frame_id=base_link)
-    → camera_twist_bridge.py 或 camera_twist_bridge_kf.py
-  /servo_server/delta_twist_cmds   (TwistStamped, frame_id=base_link)
-    → MoveIt Servo (ur5_servo.yaml:34)
+OmniMap Servo → /servo_server/delta_twist_camera
+  → camera_twist_bridge.py（none 或 kalman）
+  → /servo_server/delta_twist_cmds → MoveIt Servo
 ```
 
-桥接不是把消息改成 `tool0` frame，也不是把相机轴旋转到基座轴；输入和输出都用 `base_link` 表达。它利用 `base_link→cam_1_color_optical_frame` 与 `base_link→tool0` 的平移，改变 Twist 的参考点。`launch_robot.launch:82–85` 当前把普通桥接节点注释掉，所以必须确认实际启动命令是否另行运行了 bridge/KF 节点。
+输入输出均在 base_link 表达，相机参考点为 cam_1_color_optical_frame，末端为 tool0。
+桥接仅做 `v_T = v_C - omega × (p_C-p_T)`，不改成 tool0 frame，不重复变换。
+两处 TF 使用输入 Twist 采样时间，KF 只滤波变换后速度，零输入/失效清除滤波残留。
+不要同时启动普通、KF 和 launch 内的多个桥接 publisher。
 
-### 3.2 检查 Twist 变换是否包含平移项
+monitor 从实际 Servo 参数读取模型相关配置与 topics，使用 RobotModel、SRDF、joint-limit overrides。
+缺失 Servo 参数时等待；模型/配置不兼容时失败。关节按名称装配，tool0 原点 Jacobian 转至 base_link。
+`Jbar = inverse(Dx) J_B Dq`：Dq 来自模型速度上限，Dx 默认为
+`[0.10,0.10,0.10,0.15,0.15,0.15]`，前三项 m/s、后三项 rad/s。
+归一化 condition 不共用原始条件数阈值，实际 Servo 阈值以运行参数为准。
 
-这里的代码已经实现了平移项。它定义 `r_tc=p_C−p_T`，并在 `camera_twist_bridge.py:122–130` 使用：
+monitor 最多缓存 200 个关节样本，并限制接收年龄；选取 TF 覆盖、新鲜度和命令时间差均合格的最新样本。
+RobotState 与 TF 验证使用同一选中时间，日志同时记录 latest_joint_stamp 和 joint_stamp。
+最新关节流仍必须有效；畸形或重复/倒退时间样本清空历史，断流仍按墙钟超时。
+无法选取时反馈无效，不拿最新 TF 冒充同时间 TF，不放宽模型一致性检查。
 
-```text
-v_T^B = v_C^B − ω^B × (p_C^B − p_T^B)
-ω_T^B = ω_C^B
-```
-
-这与完整刚体速度关系一致，因为所有向量已经在 `base_link` 中表达；不应再给 MoveIt 发送一次 `cam→tool0` 变换。Planning 侧的 `J̄(q)` 应使用与 Servo 一致的 `base_link` 表达和 `tool0` 参考点。KF 版本只对变换后的 six components 做滤波，不能把滤波器当作奇异性诊断。
-
-### 3.3 在桥接节点增加诊断输出
-
-在真实桥接源文件中新增：
-
-- `std_msgs/Float64` 或项目自定义 `KinematicStatus` 发布 `sigma_min`、condition、速度范数；
-- `std_msgs/Int8` 订阅或转发 MoveIt `/servo_server/status`；
-- `TwistStamped` 的输入/输出 frame、时间戳和变换年龄日志；
-- 输入速度、桥接后速度、MoveIt status 的同一序号或时间戳关联。
-
-诊断输出建议放在桥接节点或独立 monitor；当前桥接能看到输入命令、变换后的 tool-reference 速度和最终输出 topic，但它不拥有 MoveIt `RobotState`，不能自行计算可靠的 Jacobian。MoveIt 内部 condition number 仍由 Servo 自己计算；桥接只负责收集，不应从 status code 伪造数值。
-
-## 4. 运动学指标的落地位置
-
-有两种实现方式，优先使用第 A 种：
-
-### A. 在 sumi 新增一个 MoveIt 诊断节点
-
-新增文件建议：`~/ros/catkin_ws/src/<现有_robot_pkg>/src/omnimap_kinematic_monitor.cpp`。
-
-节点订阅 `/joint_states`，读取 `robot_description` 和 MoveIt planning group，构造 `moveit::core::RobotState`，用与 Servo 相同的 group 和参考 link 调用 `getJacobian()`，计算：
-
-```text
-J̄ = Dx⁻¹ J Dq
-m(q) = σmin(J̄)
-κ(q) = σmax(J̄) / σmin(J̄)
-```
-
-它同时订阅桥接输入和 MoveIt status，发布 `KinematicStatus`。这样每个 Planning tick 可通过 ROS 反馈得到真实 q、真实末端参考点和真实 Servo 状态。
-
-### B. 直接修改桥接节点
-
-只有在桥接已经链接 MoveIt C++ API、能拿到 `RobotState` 时才采用。否则不要在普通 TF bridge 中复制 RobotModel 和 Jacobian 逻辑，避免产生第二套关节顺序、末端 link 或 URDF 参数。
-
-## 5. 建议的上位机改动顺序
-
-1. 只增加 status、frame 和速度日志，不改变 Twist 数值。
-2. 确认 `base_link -> cam_1_color_optical_frame`、`base_link -> tool0` 的 TF 时间戳和 `p×ω` 项；不要再寻找不存在的 `cam_1_baselink`。
-3. 新增 `omnimap_kinematic_monitor.cpp`，发布 `sigma_min`/condition，不参与控制。
-4. 用日志标定 Planning 的 `m_min`，并比较 MoveIt 开始减速时的 condition 与本机 `sigma_min`。
-5. 仅在诊断稳定后，让 Planning 的二维球面命令使用最小半空间修正。
-6. 在 bridge 或 Servo 侧增加明确的 stale、TF failure、status failure 零速策略。
-
-## 6. 上位机验收命令
+## 构建、部署与验收
 
 ```bash
-cd ~/ros/catkin_ws
-catkin_make --pkg <现有_robot_pkg>
-source devel/setup.bash
-rosrun tf tf_echo base_link cam_1_color_optical_frame
-rosrun tf tf_echo base_link tool0
-rostopic info /servo_server/delta_twist_camera
-rostopic info /servo_server/delta_twist_cmds
-rostopic hz /joint_states
-rostopic echo -n 5 /servo_server/status
-rostopic echo -n 5 <bridge_input_topic>
-rostopic echo -n 5 <bridge_output_topic>
+./scripts/build_ros_ws.sh --with-kinematics
+python3 scripts/deploy_sumi_kinematics.py
+source /opt/ros/noetic/setup.bash
+source ~/ros/catkin_ws/devel/setup.bash
+source ros_ws/devel/setup.bash --extend
+roslaunch omnimap_kinematics diagnostics.launch start_bridge:=true
 ```
 
-验收记录至少包含：输入/输出 frame、TF 年龄、输入输出 linear/angular 速度、joint state 时间戳、MoveIt status、`sigma_min`、condition、是否发生减速或急停。没有这些对齐数据时，不应把停机归因于奇异点。
+已有驱动但没有 Servo 时，最后命令增加 start_servo:=true，复用标准 ur5_servo.launch。
+此选项适用于默认 Servo 命名空间，不启动驱动或切换控制器；只运行 monitor 则省略 start_bridge。
+自定义命名空间用 servo_ns，状态 topic 解析实际 Servo 配置，可用 status_topic 显式覆盖。
+
+```bash
+python3 scripts/collect_sumi_kinematics.py
+rostest omnimap_kinematics kinematics.test use_sim_time:=true
+rostest omnimap_kinematics diagnostics_launch.test
+```
+
+集成测试使用隔离 master、合成模型和 /test/* topics。
+现场须另录 SphericalCommand/raw、ServoTwistTrace、BridgeStatus、KinematicStatus、
+桥接输入/输出、MoveIt status、joint_states 和 TF；完整命令见验收文档。
+Int8 status 只有接收时间，不能证明同一内部计算周期。
+
+## 剩余门槛
+
+1. 连续诊断对齐与真实模型/标定/关节顺序验证。2026-10-25 零速探测 60 条反馈中 10 条有效，尚不稳定。
+2. 记录真实减速时 raw condition、sigma_min 和 status 的关系，标定 m_min；零速日志不足以标定。
+3. 执行侧生成/验证二维 a/c，接入最小半空间修正，保留原始命令和失效零速。
+4. 硬件断链、恢复和非零闭环验收；离线测试不能代替这些证据。
+
+桥接 code 0/1 允许有效输入，2–5 及未知码停车。
+joint_states 失效由 monitor 标记，Planning enforce 与 MoveIt 承担相应停车；桥接不拥有 RobotState。
+Planning 默认仍为 observe，尚未按未标定指标启用连续修正。
