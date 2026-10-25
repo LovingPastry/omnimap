@@ -71,7 +71,7 @@ rosbag play fisher_raw.bag /omnimap/spherical_cmd_raw:=/omnimap/replay/spherical
 
 ## 运动学计算边界
 
-本机消息包生成了计划列出的 14 个字段。`std_msgs` 依赖覆盖 build/export/runtime。
+KinematicStatus 保持计划列出的 14 个字段；另新增 KinematicConstraint 及扩展 ServoTwistTrace 的局部速度模型。`std_msgs` 依赖覆盖 build/export/runtime。
 Planning 不加载机器人模型、不计算 Jacobian、不从 MoveIt code 推导 `a`。
 执行侧 monitor 使用与实际 Servo 相同的 RobotModel、planning group、关节顺序、`base_link` 表达和 `tool0` 参考点，
 并在 TF、joint_states、status 或桥接链失效时将反馈标为无效；实机模型一致性仍需验收。
@@ -79,7 +79,7 @@ Planning 不加载机器人模型、不计算 Jacobian、不从 MoveIt code 推�
 不能仅凭 `transform_chain_valid=true` 声明已经验证关节顺序。
 
 `kinematic_projection.py` 保留二维最小半空间投影定义，要求 `u_info/a` 为两个有限速率、`c` 为有限标量。
-需要修正而方向范数不可用时抛出 `ValueError`。当前消息未提供 `a/c`，连续投影没有接入控制路径；
+需要修正而方向范数不可用时抛出 `ValueError`。新的 KinematicConstraint 提供执行侧 `a/drift` 及显式阈值下的 `c`，连续投影仍未接入控制路径；
 将来接入时，调用方必须把该异常转成零速或重新规划，禁止复用上一次修正方向。
 当前 enforce 只使用真实反馈进行状态停车和持续奇异减速。
 
@@ -122,7 +122,7 @@ rosnode info <实际运行的桥接节点名>
 rosrun tf tf_echo base_link cam_1_color_optical_frame
 rosrun tf tf_echo base_link tool0
 rosbag record -O kinematic_chain.bag /omnimap/spherical_cmd_raw /omnimap/spherical_cmd \
-  /omnimap/kinematic_status /servo_server/delta_twist_camera /servo_server/delta_twist_cmds \
+  /omnimap/kinematic_constraint /omnimap/kinematic_status /servo_server/delta_twist_camera /servo_server/delta_twist_cmds \
   /servo_server/status /joint_states /tf /tf_static
 ```
 
@@ -136,4 +136,4 @@ rosbag record -O kinematic_chain.bag /omnimap/spherical_cmd_raw /omnimap/spheric
 | 原始 Fisher 命令可单独回放 | 独立原始命令 topic，测试验证反馈急停时仍保留其数值；已提供录制/回放命令 | 现场录制文件的独立回放记录 |
 | 无效方向、TF 过期或桥接中断时降级 | 投影拒绝无效输入；enforce 对失效反馈停车；Servo 失效输出零速 | 现场 monitor 的失效检测以及断链/超时的零速验证 |
 
-确认以上数据对齐后再使用 enforce；连续投影还需执行侧提供经验证的 `a/c` 接口。
+确认以上数据对齐后再使用 enforce；连续投影需完成 [构型约束诊断](ur5_nbv_kinematic_constraint.md) 所列的现场标定和控制接入门槛。

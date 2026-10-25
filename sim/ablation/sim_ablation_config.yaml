@@ -119,6 +119,8 @@ nbv_policy:
   # 修复2 可见性掩码：只统计 ROI 内、支撑面以上的高斯；相机低于支撑面时打分为 0
   fisher_mask:
     enabled: false
+    roi_query_mode: sbert       # Historical privileged-box ablation, explicitly opt out of semantic default.
+    roi_query: null
     roi_bounds: tsdf            # tsdf = 用 tsdf.spatial_bounds；或显式 6 元组；null = 不限
     roi_padding_m: 0.0
     support_plane_z: null       # 桌面高度；tsdf_min_z = 用 spatial_bounds 的 z_min

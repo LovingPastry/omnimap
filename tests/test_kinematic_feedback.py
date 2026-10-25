@@ -120,5 +120,36 @@ class ProjectionTests(unittest.TestCase):
                 project_spherical_command(u, a, c)
 
 
+class RateModelTests(unittest.TestCase):
+    def model(self, **overrides):
+        from kinematic_projection import camera_rate_model
+        fields = dict(radius=0.5, e_theta=[1, 0, 0], e_phi=[0, 1, 0],
+                      rates=[0.04, -0.02], radial_velocity=[0, 0, 0.003],
+                      linear_command=[0.02, -0.01, 0.003], angular_command=[0.1, -0.2, 0.3],
+                      previous_linear=[0.019, -0.01, 0.003], linear_speed_limit=0.1,
+                      linear_step_limit=0.02, linear_deadband=0.001)
+        fields.update(overrides)
+        return camera_rate_model(**fields)
+
+    def test_affine_map_includes_radial_and_actual_angular_bias(self):
+        valid, reason, matrix, bias = self.model()
+        self.assertTrue(valid, reason)
+        np.testing.assert_allclose(matrix @ [0.04, -0.02] + bias,
+                                   [0.02, -0.01, 0.003, 0.1, -0.2, 0.3])
+        # A different rate perturbation changes translation only at frozen pose.
+        np.testing.assert_allclose(matrix @ [0.002, -0.004], [0.001, -0.002, 0, 0, 0, 0])
+
+    def test_limit_branches_and_boundaries_are_not_affine_models(self):
+        for fields in (dict(linear_speed_limit=0.01), dict(linear_step_limit=0.0001),
+                       dict(linear_deadband=0.03), dict(linear_command=[0, 0, 0]),
+                       dict(linear_speed_limit=np.linalg.norm([0.02, -0.01, 0.003])),
+                       dict(radius=0), dict(rates=[float('nan'), 0])):
+            with self.subTest(fields=fields):
+                self.assertFalse(self.model(**fields)[0])
+
+    def test_disabled_limits_follow_runtime_semantics(self):
+        self.assertTrue(self.model(linear_speed_limit=0, linear_step_limit=0, linear_deadband=0)[0])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

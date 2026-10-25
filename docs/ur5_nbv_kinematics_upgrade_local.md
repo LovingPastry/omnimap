@@ -12,9 +12,9 @@
 | `ros_ws/src/omnimap_msgs/msg/KinematicStatus.msg` | 独立 14 字段反馈，消息已生成 |
 | `info_flow/info_flow_planning_node.py` | 接收反馈，发布原始 Fisher 命令和最终命令 |
 | `info_flow/kinematic_feedback.py` | 双时钟超时、frame/指标/状态校验、持续奇异减速及停车 |
-| `info_flow/kinematic_projection.py` | 二维最小半空间投影；尚未接入控制 |
+| `info_flow/kinematic_projection.py` | 二维最小半空间投影和实际 Servo 局部速度模型；投影尚未接入控制 |
 | `info_flow/info_flow_servo_runtime.py` | 生成相机参考点 Twist，发布实际命令追踪，失效零速 |
-| `ros_ws/src/omnimap_kinematics` | 执行侧桥接与 MoveIt RobotState monitor |
+| `ros_ws/src/omnimap_kinematics` | 执行侧桥接、MoveIt RobotState monitor 与二维构型导数诊断 |
 
 Planning 不加载 RobotModel，不从 status 码推导 Jacobian 或修正方向。
 默认 observe 记录反馈、保留 Fisher 输出；enforce 才启用状态干预：code 1 持续 0.1 秒后默认缩放至 0.5，
@@ -40,8 +40,11 @@ monitor 使用实际 Servo 模型、group、关节顺序及 tool0 Jacobian，计
 ## 连续修正仍需完成
 
 目标仍为两个球面速率上的 `min 0.5 ||u-u_info||², subject to a.T u >= c`。
-投影函数已拒绝非有限输入和不可用修正方向，但当前消息没有 a/c。
-尚需执行侧按同一模型、参考点和速度映射生成并验证 a/c、现场标定 m_min，再接入控制。
+投影函数已拒绝非有限输入和不可用修正方向。新增独立 KinematicConstraint 消息，
+执行侧按实际 Servo 映射和同一 MoveIt 模型生成 a、drift；显式配置 m_min 后才生成有限 c。
+接口、尺度、失效条件见 [二维构型约束诊断](ur5_nbv_kinematic_constraint.md)。
+Planning 尚未订阅/使用该接口。仍需现场标定、消费者新鲜度与线性化范围验证、
+速度/加速度约束联合处理和停车后的模型恢复，再接入控制。
 状态减速不能替代这一目标，status code 不能推导 a。
 无效/不可行方向必须零速或重新规划，不复用旧方向；加入速度等额外约束后需联合求解，
 投影后任意裁剪可能破坏半空间约束。

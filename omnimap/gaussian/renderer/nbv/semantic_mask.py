@@ -86,7 +86,8 @@ def update_gaussian_semantics(backend: Any, *, frame_idx: int) -> None:
     Only query embeddings are cached. Gaussian labels are recomputed every
     tracking frame, even when the number of Gaussians has not changed.
     """
-    cfg = (backend.config.get("nbv_policy") or {}).get("fisher_mask") or {}
+    from .policy_improvements import NBVPolicyConfig
+    cfg = vars(NBVPolicyConfig.from_dict(backend.config.get("nbv_policy")).fisher_mask)
     query = cfg.get("roi_query", "cup")
     if not (cfg.get("enabled", False) and cfg.get("roi_query_mode") == "semantic"):
         backend.gaussian_semantics = None
@@ -95,7 +96,7 @@ def update_gaussian_semantics(backend: Any, *, frame_idx: int) -> None:
         raise ValueError("semantic Fisher masking requires a nonempty roi_query")
     xyz = backend.gaussians.get_xyz.detach()
     tsdfs = backend.tsdfs
-    points, _, _, voxel_ids, _, _, _ = tsdfs.get_all_voxels(if_confidence=False)
+    points, _, _, voxel_ids, _, _, _ = tsdfs.get_all_voxels(if_confidence=False, include_unreliable=True)
     distance = cfg.get("semantic_max_distance_m")
     distance = float(tsdfs.fill_dis if distance is None else distance)
     ids = associate_instance_ids(xyz, points, voxel_ids, distance)

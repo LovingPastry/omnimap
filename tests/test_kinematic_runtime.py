@@ -244,6 +244,13 @@ class ServoTests(unittest.TestCase):
         self.assertEqual(companion.planner_tick, 42)
         self.assertEqual(companion.model_version, 7)
         self.assertEqual(companion.command, msg)
+        self.assertTrue(companion.rate_model_valid, companion.rate_model_reason)
+        matrix = np.array(companion.camera_rate_matrix).reshape(6, 2)
+        np.testing.assert_allclose(matrix @ companion.spherical_rates + companion.camera_bias,
+                                   [msg.twist.linear.x, msg.twist.linear.y, msg.twist.linear.z,
+                                    msg.twist.angular.x, msg.twist.angular.y, msg.twist.angular.z])
+        self.assertEqual(companion.reference_radius, self.cmd.reference_radius)
+        np.testing.assert_array_equal(companion.reference_scene_center, self.cmd.reference_scene_center)
         buffer = io.BytesIO()
         companion.serialize(buffer)
         self.assertEqual(type(companion)().deserialize(buffer.getvalue()), companion)

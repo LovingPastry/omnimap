@@ -5,6 +5,7 @@
 #include <std_msgs/Int8.h>
 #include <omnimap_msgs/BridgeStatus.h>
 #include <omnimap_msgs/KinematicStatus.h>
+#include <omnimap_msgs/KinematicConstraint.h>
 #include <omnimap_msgs/ServoTwistTrace.h>
 #include <moveit/robot_model_loader/robot_model_loader.h>
 #include <moveit/robot_state/robot_state.h>
@@ -135,6 +136,16 @@ public:
     std::string topic;
     pnh_.param<std::string>("kinematic_status_topic", topic, "/omnimap/kinematic_status");
     pub_ = nh_.advertise<omnimap_msgs::KinematicStatus>(topic, 10);
+    pnh_.param<std::string>("kinematic_constraint_topic", topic, "/omnimap/kinematic_constraint");
+    constraint_pub_ = nh_.advertise<omnimap_msgs::KinematicConstraint>(topic, 10);
+    std::vector<double> rates;
+    if (!pnh_.getParam("spherical_rate_scales", rates)) rates = {0.1, 0.1};
+    if (rates.size() != 2 || !std::isfinite(rates[0]) || !std::isfinite(rates[1]) ||
+        rates[0] <= 0 || rates[1] <= 0) throw std::runtime_error("invalid spherical_rate_scales");
+    rate_scales_ << rates[0], rates[1];
+    alpha_ = positive("constraint_alpha", 1.0);
+    if (pnh_.hasParam("constraint_m_min")) m_min_ = positive("constraint_m_min", 0.0);
+
     joints_sub_ = nh_.subscribe(joint_topic, 1, &KinematicMonitor::joints, this);
     status_sub_ = nh_.subscribe(status_topic, 1, &KinematicMonitor::status, this);
     pnh_.param<std::string>("bridge_status_topic", topic, "/omnimap/bridge_status");
@@ -246,6 +257,119 @@ private:
       throw std::runtime_error("tf_robot_model_mismatch:" + link);
   }
 
+  Eigen::MatrixXd taskJacobian(moveit::core::RobotState& state) const
+  {
+    state.update();
+    Eigen::MatrixXd jacobian;
+    if (!state.getJacobian(group_, model_->getLinkModel(tool_), Eigen::Vector3d::Zero(), jacobian))
+      throw std::runtime_error("getJacobian_failed");
+    const auto* parent = group_->getJointModels().front()->getParentLinkModel();
+    Eigen::Matrix3d parent_rotation = Eigen::Matrix3d::Identity();
+    if (parent) parent_rotation = state.getGlobalLinkTransform(parent).linear();
+    const Eigen::Matrix3d rotation = state.getGlobalLinkTransform(base_).linear().transpose()*parent_rotation;
+    jacobian.topRows(3) = (rotation*jacobian.topRows(3)).eval();
+    jacobian.bottomRows(3) = (rotation*jacobian.bottomRows(3)).eval();
+    if (!jacobian.allFinite()) throw std::runtime_error("jacobian_nonfinite");
+    return jacobian;
+  }
+
+  double metric(moveit::core::RobotState& state) const
+  {
+    const Eigen::MatrixXd normalized = dx_.cwiseInverse().asDiagonal()*taskJacobian(state)*dq_.asDiagonal();
+    return Eigen::JacobiSVD<Eigen::MatrixXd>(normalized).singularValues().tail(1)[0];
+  }
+
+  double directionalDerivative(const Eigen::VectorXd& direction, double& error) const
+  {
+    const double norm = direction.norm();
+    if (!std::isfinite(norm)) throw std::runtime_error("direction_nonfinite");
+    if (norm <= 1e-12) return 0.0;
+    auto difference = [&](double step) {
+      moveit::core::RobotState plus(*state_), minus(*state_);
+      for (size_t i = 0; i < names_.size(); ++i)
+      {
+        const double delta = step*direction[i];
+        plus.setVariablePosition(names_[i], state_->getVariablePosition(names_[i])+delta);
+        minus.setVariablePosition(names_[i], state_->getVariablePosition(names_[i])-delta);
+      }
+      return (metric(plus)-metric(minus))/(2*step);
+    };
+    const double step = 1e-4/norm; // fixed perturbation norm in joint radians
+    const double coarse = difference(step), fine = difference(step/2);
+    const double disagreement = std::abs(coarse-fine);
+    error = std::max(error, disagreement);
+    if (!std::isfinite(fine) || disagreement > 1e-5 + 0.01*std::abs(fine))
+      throw std::runtime_error("directional_derivative_unstable");
+    return fine;
+  }
+
+  void computeConstraint(const omnimap_msgs::ServoTwistTrace& trace,
+                         const Eigen::MatrixXd& jacobian,
+                         const Eigen::VectorXd& singular_values,
+                         omnimap_msgs::KinematicConstraint& out)
+  {
+    out.joint_stamp = selected_joints_->header.stamp;
+    out.twist_stamp = trace.command.header.stamp; out.twist_seq = trace.command.header.seq;
+    out.command_stamp = trace.command_stamp; out.planner_tick = trace.planner_tick;
+    out.reference_radius = trace.reference_radius; out.reference_scene_center = trace.reference_scene_center;
+    out.model_version = trace.model_version; out.sigma_min = singular_values.tail(1)[0];
+    for (int i = 0; i < 2; ++i) out.linearization_rates[i] = trace.spherical_rates[i];
+    if (trace.command_stamp.isZero() || !std::isfinite(trace.reference_radius) || trace.reference_radius <= 0 ||
+        !std::all_of(trace.reference_scene_center.begin(), trace.reference_scene_center.end(),
+                     [](double value) { return std::isfinite(value); }))
+      throw std::runtime_error("servo_rate_model_reference_invalid");
+    if (!trace.rate_model_valid || trace.reason != "motion")
+      throw std::runtime_error("servo_rate_model_invalid:" + trace.rate_model_reason);
+    if (status_ != 0 && status_ != 1) throw std::runtime_error("moveit_not_executable");
+    // Reject a multiple/near-zero weakest singular value: its central difference
+    // can be zero even when there is no unique differentiable escape direction.
+    const double gap = singular_values[4]-singular_values[5];
+    if (singular_values[5] <= 1e-6 || gap <= 1e-5*std::max(1.0, singular_values[0]))
+      throw std::runtime_error("metric_nondifferentiable_or_singular");
+    Eigen::Matrix<double, 6, 2> camera;
+    Eigen::Matrix<double, 6, 1> bias;
+    Eigen::Vector2d rates;
+    for (int row = 0; row < 6; ++row)
+    {
+      bias[row] = trace.camera_bias[row];
+      for (int col = 0; col < 2; ++col) camera(row,col) = trace.camera_rate_matrix[row*2+col];
+    }
+    rates << trace.spherical_rates[0], trace.spherical_rates[1];
+    if (!camera.allFinite() || !bias.allFinite() || !rates.allFinite() ||
+        (camera*rates+bias-twist(trace.command)).norm() > 1e-9)
+      throw std::runtime_error("servo_rate_model_mismatch");
+    const auto cam = pose(tf_.lookupTransform(base_, camera_, trace.command.header.stamp, ros::Duration(0)).transform);
+    const auto tool = pose(tf_.lookupTransform(base_, tool_, trace.command.header.stamp, ros::Duration(0)).transform);
+    const Eigen::Vector3d offset = cam.translation()-tool.translation();
+    Eigen::Matrix<double, 6, 2> task = camera;
+    for (int col = 0; col < 2; ++col)
+      task.col(col).head<3>() -= Eigen::Vector3d(camera.col(col).tail<3>()).cross(offset);
+    bias.head<3>() -= Eigen::Vector3d(bias.tail<3>()).cross(offset);
+    // KF filtering or downstream bridge stops are not part of this affine map.
+    if ((task*rates+bias-twist(bridge_->output)).norm() > 1e-9)
+      throw std::runtime_error("bridge_rate_model_mismatch");
+    task = task*rate_scales_.asDiagonal(); // dimensionless u -> task velocity
+    Eigen::JacobiSVD<Eigen::MatrixXd> solver(jacobian, Eigen::ComputeThinU | Eigen::ComputeThinV);
+    solver.setThreshold(1e-8);
+    if (solver.rank() != 6) throw std::runtime_error("task_inverse_rank_deficient");
+    Eigen::Matrix<double, 6, 3> requested;
+    requested.leftCols<2>() = task; requested.col(2) = bias;
+    const Eigen::MatrixXd directions = solver.solve(requested);
+    out.inverse_residual = (dx_.cwiseInverse().asDiagonal()*(jacobian*directions-requested)).norm();
+    if (!std::isfinite(out.inverse_residual) || out.inverse_residual > 1e-6)
+      throw std::runtime_error("task_inverse_residual");
+    out.derivative_error = 0;
+    for (int col = 0; col < 2; ++col)
+      out.a[col] = directionalDerivative(directions.col(col), out.derivative_error);
+    out.drift = directionalDerivative(directions.col(2), out.derivative_error);
+    out.threshold_configured = std::isfinite(m_min_);
+    out.c = out.threshold_configured ? -alpha_*(out.sigma_min-m_min_)-out.drift :
+                            std::numeric_limits<double>::quiet_NaN();
+    if (out.threshold_configured && !std::isfinite(out.c)) throw std::runtime_error("constraint_nonfinite");
+    out.valid = true;
+    out.reason = out.threshold_configured ? "ok:advisory_only" : "ok:threshold_unset_advisory_only";
+  }
+
   void publish(const ros::WallTimerEvent&)
   {
     omnimap_msgs::KinematicStatus out;
@@ -254,6 +378,13 @@ private:
     out.moveit_status = status_; out.moveit_status_text = statusName(status_);
     out.sigma_min = out.sigma_max = out.condition_number = out.manipulability =
         out.command_speed_norm = out.actual_speed_norm = std::numeric_limits<double>::quiet_NaN();
+    omnimap_msgs::KinematicConstraint constraint;
+    constraint.header = out.header; constraint.source_frame = base_; constraint.task_frame = tool_;
+    constraint.m_min = m_min_; constraint.alpha = alpha_;
+    constraint.c = constraint.sigma_min = constraint.drift = constraint.a[0] = constraint.a[1] =
+        constraint.inverse_residual = constraint.derivative_error = std::numeric_limits<double>::quiet_NaN();
+    for (int i = 0; i < 2; ++i) constraint.rate_scales[i] = rate_scales_[i];
+    constraint.reason = "trace_unavailable";
     double raw_condition = std::numeric_limits<double>::quiet_NaN();
     ros::Time command_stamp;
     try
@@ -261,19 +392,7 @@ private:
       selected_joints_.reset();
       selectJointSample();
       fresh(status_stamp_, status_received_, "moveit_status");
-      // MoveIt getJacobian expresses columns in the group-root parent frame.
-      // Rotate BOTH blocks to Servo planning_frame; reference point is tool0's
-      // origin already, so there is no extra reference-point translation here.
-      Eigen::MatrixXd jacobian;
-      if (!state_->getJacobian(group_, model_->getLinkModel(tool_), Eigen::Vector3d::Zero(), jacobian))
-        throw std::runtime_error("getJacobian_failed");
-      const auto* parent = group_->getJointModels().front()->getParentLinkModel();
-      Eigen::Matrix3d parent_rotation = Eigen::Matrix3d::Identity();
-      if (parent) parent_rotation = state_->getGlobalLinkTransform(parent).linear();
-      const Eigen::Matrix3d rotation = state_->getGlobalLinkTransform(base_).linear().transpose()*parent_rotation;
-      jacobian.topRows(3) = (rotation*jacobian.topRows(3)).eval();
-      jacobian.bottomRows(3) = (rotation*jacobian.bottomRows(3)).eval();
-      if (!jacobian.allFinite()) throw std::runtime_error("jacobian_nonfinite");
+      const Eigen::MatrixXd jacobian = taskJacobian(*state_);
       const Eigen::MatrixXd normalized = dx_.cwiseInverse().asDiagonal()*jacobian*dq_.asDiagonal();
       if (!normalized.allFinite()) throw std::runtime_error("normalized_jacobian_nonfinite");
       const Eigen::VectorXd values = Eigen::JacobiSVD<Eigen::MatrixXd>(normalized).singularValues();
@@ -318,13 +437,16 @@ private:
             (twist(t.command)-twist(bridge_->input)).squaredNorm() == 0)
         {
           out.planner_tick = t.planner_tick; command_stamp = t.command_stamp;
+          try { computeConstraint(t, jacobian, values, constraint); }
+          catch (const std::exception& exc) { constraint.reason = exc.what(); }
           break;
         }
       }
       out.transform_chain_valid = true;
       out.reason = command_stamp.isZero() ? "ok:tick_unavailable" : "ok";
     }
-    catch (const std::exception& exc) { out.reason = exc.what(); }
+    catch (const std::exception& exc) { out.reason = exc.what(); constraint.reason = "chain_invalid:" + out.reason; }
+    constraint_pub_.publish(constraint);
     pub_.publish(out);
     ROS_INFO_STREAM("kinematic_sample: stamp=" << out.header.stamp << " tick=" << out.planner_tick
                     << " command_stamp=" << command_stamp
@@ -363,7 +485,9 @@ private:
   ros::SteadyTime joints_received_, status_received_, bridge_received_;
   ros::Time status_stamp_;
   ros::Subscriber joints_sub_, status_sub_, bridge_sub_, trace_sub_;
-  ros::Publisher pub_;
+  Eigen::Vector2d rate_scales_;
+  double alpha_, m_min_ = std::numeric_limits<double>::quiet_NaN();
+  ros::Publisher pub_, constraint_pub_;
   ros::WallTimer timer_;
 };
 

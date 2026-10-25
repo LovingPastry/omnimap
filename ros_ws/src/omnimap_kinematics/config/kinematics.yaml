@@ -5,3 +5,9 @@ task_velocity_scales: [0.10, 0.10, 0.10, 0.15, 0.15, 0.15]
 sample_timeout: 0.3
 max_sample_skew: 0.1
 publish_hz: 20.0
+
+# Advisory half-space coordinates: physical rates = scales * dimensionless u.
+spherical_rate_scales: [0.1, 0.1]
+constraint_alpha: 1.0
+# constraint_m_min is deliberately unset until measured for this model and Dx/Dq.
+# Merely setting it configures a threshold; it does not prove calibration.

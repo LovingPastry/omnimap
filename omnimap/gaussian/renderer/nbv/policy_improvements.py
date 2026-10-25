@@ -19,8 +19,8 @@ mandatory on a real arm, and each is one section here:
 * ``stop`` -- explicit termination: information saturation, view-sphere
   coverage, budgets, and stall.
 
-Every section defaults to *disabled*, so an empty / missing ``nbv_policy``
-config reproduces the original behaviour bit for bit.
+Semantic Fisher selection defaults to enabled. Other sections remain disabled.
+The original all-Gaussian objective requires an explicit fisher_mask.enabled=false.
 """
 
 from __future__ import annotations
@@ -58,7 +58,7 @@ class FeasibilityConfig:
 
 @dataclass
 class FisherMaskConfig:
-    enabled: bool = False
+    enabled: bool = True
     # Region of interest for gaussians that may contribute to the score,
     # [x_min, x_max, y_min, y_max, z_min, z_max]. "tsdf" = use tsdf.spatial_bounds
     # (resolved by the wrapper), None = no ROI mask. Ignored once roi_query
@@ -76,7 +76,7 @@ class FisherMaskConfig:
     # point bounding box (+ roi_padding_m) as the ROI instead of roi_bounds.
     # None/"" = off, keep roi_bounds as-is. Two ways to resolve it:
     #
-    # "sbert" (default): pick the tracked instance whose running SBERT caption
+    # "sbert" (explicit legacy mode): pick the tracked instance whose running SBERT caption
     # embedding (tsdfs.instance_feature) is closest in cosine similarity to
     # this text. The mapper already runs YOLO-World -> TAP -> SBERT every
     # `instance.instance_skip` frames and keeps one running caption embedding
@@ -98,17 +98,17 @@ class FisherMaskConfig:
     roi_query: Optional[str] = "cup"
     # "semantic": per-Gaussian instance/embedding association computed by
     # Tracking. No bounding box and no fallback to background on a query miss.
-    roi_query_mode: str = "sbert"  # "sbert" | "yolo_live" | "semantic"
+    roi_query_mode: str = "semantic"  # "sbert" | "yolo_live" | "semantic"
     semantic_max_distance_m: Optional[float] = None  # None = instance.fill_dis
     roi_query_score_thresh: float = 0.05  # yolo_live only
     # Re-resolve the match every N ticks (re-encoding text is cheap; re-scanning
     # the TSDF instance table is the same cost as one get_pointcloud_center()
     # call, already made once per tick elsewhere, so this does not need to be 1).
     roi_query_refresh_every: int = 30
-    # Minimum cosine similarity to accept a match; below this, fall back to
-    # roi_bounds (or no ROI if that is also unset) rather than lock onto a wrong
-    # instance. 1.0 = identical normalized embeddings, 0.0 = orthogonal.
-    roi_query_min_similarity: float = 0.2
+    # Minimum cosine similarity. Semantic mode excludes nonmatches and never
+    # falls back to ROI/all Gaussians; legacy bbox modes retain their fallback.
+    # 1.0 = identical normalized embeddings, 0.0 = orthogonal.
+    roi_query_min_similarity: float = 0.35
 
 
 @dataclass
@@ -215,7 +215,7 @@ class NBVPolicyConfig:
                 "fisher_mask.roi_query_mode must be sbert|yolo_live|semantic, "
                 f"got {cfg.fisher_mask.roi_query_mode!r}"
             )
-        if cfg.fisher_mask.roi_query_mode == "semantic":
+        if cfg.fisher_mask.enabled and cfg.fisher_mask.roi_query_mode == "semantic":
             query = cfg.fisher_mask.roi_query
             if not isinstance(query, str) or not query.strip():
                 raise ValueError("semantic Fisher masking requires a nonempty roi_query")
@@ -803,7 +803,7 @@ def resolve_nbv_policy_dict(
         return data
     sources = {"tsdf": tsdf_bounds, "object": object_bounds}
 
-    enabled = bool(mask.get("enabled", False))
+    enabled = bool(mask.get("enabled", FisherMaskConfig.enabled))
 
     def _source(name: str):
         bounds = sources.get(name)
@@ -818,7 +818,7 @@ def resolve_nbv_policy_dict(
         return [float(v) for v in bounds]
 
     roi = mask.get("roi_bounds")
-    if mask.get("roi_query_mode") == "semantic":
+    if mask.get("roi_query_mode", FisherMaskConfig.roi_query_mode) == "semantic":
         mask["roi_bounds"] = None  # per-Gaussian membership needs no static box
     elif isinstance(roi, str):
         mask["roi_bounds"] = _source(roi)

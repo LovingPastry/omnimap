@@ -182,9 +182,13 @@ POLICY_KW = dict(
 # ---------------------------------------------------------------------------
 
 
-def test_config_defaults_are_legacy():
-    assert NBVPolicyConfig.from_dict(None).is_legacy
-    assert NBVPolicyConfig.from_dict({}).is_legacy
+def test_config_defaults_are_semantic():
+    for raw in (None, {}):
+        cfg = NBVPolicyConfig.from_dict(raw)
+        assert cfg.fisher_mask.enabled and cfg.fisher_mask.roi_query_mode == "semantic"
+        assert cfg.fisher_mask.roi_query_min_similarity == 0.35
+        assert not cfg.is_legacy
+    assert NBVPolicyConfig.from_dict({"fisher_mask": {"enabled": False}}).is_legacy
     cfg = NBVPolicyConfig.from_dict({"feasibility": {"enabled": True}})
     assert not cfg.is_legacy
     try:
@@ -195,12 +199,12 @@ def test_config_defaults_are_legacy():
         raise AssertionError("typo in key must be rejected")
 
 
-def test_default_config_reproduces_legacy_chain():
-    """nbv_config=None, {} and an explicit all-default dict give identical rollouts."""
+def test_explicit_disabled_config_reproduces_legacy_chain():
+    """Explicit disable and a serialized legacy config give identical rollouts."""
     target = [1.0, 0.3, 0.2]
-    a = rollout(FisherMotionPolicy(**POLICY_KW), make_backend(target), 0.2, 0.6, 15)
+    a = rollout(FisherMotionPolicy(**POLICY_KW, nbv_config={"fisher_mask": {"enabled": False}}), make_backend(target), 0.2, 0.6, 15)
     b = rollout(
-        FisherMotionPolicy(**POLICY_KW, nbv_config=NBVPolicyConfig().to_dict()),
+        FisherMotionPolicy(**POLICY_KW, nbv_config=NBVPolicyConfig.from_dict({"fisher_mask": {"enabled": False}}).to_dict()),
         make_backend(target),
         0.2,
         0.6,
@@ -250,7 +254,7 @@ def test_feasibility_workspace_box():
 
 
 def test_mask_layout_and_gate():
-    m = FisherContributionMask(FisherMaskConfig(enabled=True, roi_bounds=[-1, 1, -1, 1, 0, 1], support_plane_z=0.0))
+    m = FisherContributionMask(FisherMaskConfig(enabled=True, roi_query_mode="sbert", roi_bounds=[-1, 1, -1, 1, 0, 1], support_plane_z=0.0))
     xyz = torch.tensor([[0.0, 0.0, 0.5], [2.0, 0.0, 0.5], [0.0, 0.0, -0.5]])
     w = m.gaussian_weights(xyz)
     assert w.tolist() == [1.0, 0.0, 0.0]
@@ -330,9 +334,9 @@ def test_stop_monitor_criteria():
 def test_feasibility_keeps_policy_off_the_rim():
     """Field pulls toward the equator; with feasibility the camera holds >= phi_min."""
     target = [1.0, 0.0, -0.8]  # below the horizon
-    base = rollout(FisherMotionPolicy(**POLICY_KW), make_backend(target, 1e5), 0.0, 0.6, 80)
+    base = rollout(FisherMotionPolicy(**POLICY_KW, nbv_config={"fisher_mask": {"enabled": False}}), make_backend(target, 1e5), 0.0, 0.6, 80)
     fixed = rollout(
-        FisherMotionPolicy(**POLICY_KW, nbv_config={"feasibility": {"enabled": True, "phi_min_deg": 15}}),
+        FisherMotionPolicy(**POLICY_KW, nbv_config={"fisher_mask": {"enabled": False}, "feasibility": {"enabled": True, "phi_min_deg": 15}}),
         make_backend(target),
         0.0,
         0.6,
@@ -349,7 +353,7 @@ def test_stop_zeroes_commands_and_mask_is_cleared():
     pol = FisherMotionPolicy(
         **POLICY_KW,
         nbv_config={
-            "fisher_mask": {"enabled": True, "roi_bounds": [-1, 1, -1, 1, -1, 1]},
+            "fisher_mask": {"enabled": True, "roi_query_mode": "sbert", "roi_bounds": [-1, 1, -1, 1, -1, 1]},
             "stop": {"enabled": True, "max_steps": 5},
         },
     )
@@ -371,7 +375,7 @@ def test_roi_query_picks_matching_instance_by_caption():
             [[-9.0, -9.0, -9.0], [-9.1, -9.0, -9.0]],  # instance 3 = "table"
         ],
     )
-    mask = FisherContributionMask(FisherMaskConfig(enabled=True, roi_query="cup", roi_padding_m=0.0))
+    mask = FisherContributionMask(FisherMaskConfig(enabled=True, roi_query_mode="sbert", roi_query="cup", roi_padding_m=0.0))
     xyz = torch.tensor([[0.15, 0.1, 0.1], [5.05, 5.0, 5.0], [-9.05, -9.0, -9.0]])
     w = mask.gaussian_weights(xyz, tsdfs=tsdfs, idx=0)
     assert w.tolist() == [1.0, 0.0, 0.0]  # only the "cup" instance's points kept
@@ -386,7 +390,7 @@ def test_roi_query_below_threshold_falls_back_to_roi_bounds():
     )
     mask = FisherContributionMask(
         FisherMaskConfig(
-            enabled=True, roi_query="cup", roi_query_min_similarity=0.2,
+            enabled=True, roi_query_mode="sbert", roi_query="cup", roi_query_min_similarity=0.2,
             roi_bounds=[-1, 1, -1, 1, -1, 1],
         )
     )
@@ -398,13 +402,13 @@ def test_roi_query_below_threshold_falls_back_to_roi_bounds():
 
 
 def test_roi_query_disabled_or_missing_tsdfs_is_a_noop():
-    mask = FisherContributionMask(FisherMaskConfig(enabled=True, roi_query=None,
+    mask = FisherContributionMask(FisherMaskConfig(enabled=True, roi_query_mode="sbert", roi_query=None,
                                                      roi_bounds=[-1, 1, -1, 1, -1, 1]))
     xyz = torch.tensor([[0.0, 0.0, 0.0], [5.0, 5.0, 5.0]])
     assert mask.gaussian_weights(xyz, tsdfs=None, idx=0).tolist() == [1.0, 0.0]
 
     tsdfs = make_fake_tsdfs(["cup"], [[[5.0, 5.0, 5.0]]])
-    mask2 = FisherContributionMask(FisherMaskConfig(enabled=True, roi_query="cup"))
+    mask2 = FisherContributionMask(FisherMaskConfig(enabled=True, roi_query_mode="sbert", roi_query="cup"))
     # tsdfs=None even though roi_query is set: must not raise, must not filter.
     assert mask2.gaussian_weights(xyz, tsdfs=None, idx=0).tolist() == [1.0, 1.0]
 
@@ -419,7 +423,7 @@ def test_roi_query_caches_between_refreshes():
         return real_get_all_voxels(if_confidence)
 
     tsdfs.get_all_voxels = counting_get_all_voxels
-    mask = FisherContributionMask(FisherMaskConfig(enabled=True, roi_query="cup", roi_query_refresh_every=5))
+    mask = FisherContributionMask(FisherMaskConfig(enabled=True, roi_query_mode="sbert", roi_query="cup", roi_query_refresh_every=5))
     xyz = torch.tensor([[0.0, 0.0, 0.0]])
     for idx in range(12):
         mask.gaussian_weights(xyz, tsdfs=tsdfs, idx=idx)
@@ -437,7 +441,7 @@ def test_roi_query_end_to_end_through_motion_policy():
     backend = make_backend([1.0, 0.0, 0.3], tsdfs=tsdfs)
     pol = FisherMotionPolicy(
         **POLICY_KW,
-        nbv_config={"fisher_mask": {"enabled": True, "roi_query": "cup", "roi_padding_m": 0.5}},
+        nbv_config={"fisher_mask": {"enabled": True, "roi_query_mode": "sbert", "roi_query": "cup", "roi_padding_m": 0.5}},
     )
     res = rollout(pol, backend, 0.0, 0.6, 3)
     assert res[0].nbv_diag.get("roi_query_match") == 1
@@ -508,7 +512,7 @@ def test_normalized_speed_matches_nominal_scale():
     pol = FisherMotionPolicy(
         **POLICY_KW,
         gradient_space="tangent",
-        nbv_config={"velocity_mapping": {"mode": "normalized", "v_nominal_mps": 0.04}},
+        nbv_config={"fisher_mask": {"enabled": False}, "velocity_mapping": {"mode": "normalized", "v_nominal_mps": 0.04}},
     )
     res = rollout(pol, make_backend([0.2, 1.0, 0.4], amplitude=1e6), 0.0, 0.5, 10)
     speeds = [r.nbv_diag["tangent_speed_mps"] for r in res]

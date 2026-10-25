@@ -2,13 +2,16 @@
 
 `config/sim_rtabmap_config.yaml` 和 `config/rtabmap_config.yaml` 现已启用
 `nbv_policy.fisher_mask.roi_query_mode: semantic`，查询文本默认 `cup`。
+代码级空配置也默认开启 semantic、query=cup、余弦阈值 0.35；不再依赖 YAML 恰好写全这一节。
 本次同步的是仓库中的真机配置和公共代码，没有启动真机运动。
 
 ## 数据与控制链
 
 1. `OMNI.track()` 原有 YOLO-World → TAP → SBERT 流程按 `instance_skip` 更新语义体素和实例 embedding 表。
 2. 3DGS 本帧优化、增密、剪枝完成后，`update_gaussian_semantics()` 对**当前全部高斯中心**做批量近邻查询，
-   获得实例 ID。距离超过 `semantic_max_distance_m` 的高斯归为未知；默认使用 `instance.fill_dis`。
+   获得实例 ID。关联查询保留已观测 TSDF 几何中的未知体素、低观测次数/小实例等不可靠体素，
+   将这些体素的标签置为 0，避免先删除它们后被附近目标标签占用。几何近邻仅用于传递实例归属，
+   不用硬编码或首次检索的空间包围盒决定参与信息量计算的高斯。距离超过 `semantic_max_distance_m` 的高斯归为未知；默认使用 `instance.fill_dis`。
 3. 查询文本只编码一次。对融合后的实例向量重新归一化后计算余弦相似度，再按高斯实例 ID 查表。
    无需为每个高斯存一份 384 维 embedding，也不额外运行检测器。零向量、未关联或不可靠实例不参与评分。
 4. 生成 `gaussian_semantics`，包含查询文本、Tracking 帧号、逐高斯实例 ID 和相似度。
@@ -43,7 +46,7 @@ nbv_policy:
 `roi_bounds`、`roi_padding_m`、`roi_query_refresh_every` 不控制 semantic 模式；高斯与实例的关联每个 Tracking 帧更新。
 `support_plane_z` 仍可叠加筛选，但没有增加自动桌面检测。
 
-- 回退原版贡献范围：`fisher_mask.enabled: false`。代码的空配置仍默认关闭全部修复。
+- 回退原版贡献范围：`fisher_mask.enabled: false`。空配置已默认开启 semantic；回退必须显式设置该开关。
 - 原来的语义包围盒对照：`roi_query_mode: sbert`。
 - 临时文本重新检测出框的对照：`roi_query_mode: yolo_live`。
 - 静态包围盒对照：`roi_query_mode: sbert, roi_query: null`，另设 `roi_bounds`。
@@ -107,3 +110,21 @@ python tests/test_nbv_policy_improvements.py
 这些验证证明数据链和目标函数筛选已接通，不证明检测/分割本身的准确率，也不证明重建优于基线或真机效果。
 最近邻标签传播仍可能在边界误关联；阈值 0.35 和距离 0.05 m 需要结合实际场景评估。
 旧彩色条纹资产的额外 12 步检查曾在匹配后发生语义漂移并正确等待，说明原有语义前端的稳定性仍是实际限制。
+
+## 本工作空间同步与回归（2026-10-25）
+
+远端功能提交为 `bc2ef38`，已合入当前工作空间。进一步统一了代码/真机 YAML/仿真 YAML 的默认值；
+两份主 YAML 的 roi_bounds 均为 null。历史特权包围盒消融配置显式保留 sbert + roi_query=null，
+避免默认切换改变旧实验的定义。
+
+本地补充修复：关联路径使用 `get_all_voxels(include_unreliable=True)` 保留未知近邻，
+其他调用仍使用原有可信实例点云。新增测试直接执行真实体素导出方法（以 CPU 适配器替代 Open3D 存储），
+验证“未知/低可靠邻居比杯子更近”时不再误分配杯子标签。
+保留更多已观测体素会增大近邻索引，并可能降低边缘高斯的选中比例；须在算力端重新测量关联耗时与选中率。
+上面的 30 步 CUDA 数值属于远端修改前的已记录结果，不是本轮保留未知近邻后的复跑结果。
+
+InfoFlow 仅用于语法及执行侧测试。本机语义数值测试使用已有 roboseg Python 的 PyTorch，
+通过 `CUDA_VISIBLE_DEVICES=''` 检查 CPU 路径，未安装或更改模型依赖。
+Planning 的 Camera 几何按后端显式传入的 device 分配，其他 Tracking 调用保留 CUDA 默认；CPU 相机不初始化 CUDA rasterizer，实际高斯渲染仍要求 CUDA 扩展。
+11 项语义/同步/恢复测试通过，真实 CUDA Gaussian 快照测试 1 项跳过；19 项策略回归通过。
+这不构成 YOLO/TAP/SBERT 实际推理、CUDA 建图或真机效果验证。

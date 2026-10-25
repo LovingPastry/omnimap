@@ -618,3 +618,11 @@ omnimap/
 [HI-SLAM2](https://github.com/Willyzw/HI-SLAM2)、[3D Gaussian Splatting](https://github.com/graphdeco-inria/gaussian-splatting)、
 [YOLO-World](https://github.com/AILab-CVC/YOLO-World)、[TAP](https://github.com/baaivision/tokenize-anything) 等开源项目。
 
+
+### 默认 Fisher 语义筛选
+
+真机、仿真及缺省代码配置均默认 `fisher_mask.enabled=true`、`roi_query_mode=semantic`、
+`roi_query=cup`、`roi_query_min_similarity=0.35`。参与信息量计算的高斯由当前 YOLO-World → TAP → SBERT
+实例语义及 embedding 相似度决定，每个 Tracking 帧重新关联，不使用硬编码或首次检索的 ROI。
+未命中/未知高斯权重为零；无目标时暂时停车等待观测，不回退全图。完整场景仍参与渲染和遮挡。
+详细数据链、参数及验证边界见 [语义 Fisher](docs/semantic_fisher.md)。

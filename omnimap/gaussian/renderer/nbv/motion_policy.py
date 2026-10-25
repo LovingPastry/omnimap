@@ -1248,6 +1248,7 @@ class FisherMotionPolicy:
             projection_matrix=projection_matrix,
             K=[fx, fy, cx, cy, width, height],
             tstamp=int(idx),
+            device=device,
         )
 
     def _to_hemisphere_camera(
@@ -1358,7 +1359,7 @@ class FisherMotionPolicy:
             FisherContributionMask.expand_to_contribution(weights),
             lambda cam: self.fisher_mask.view_gate(cam.camera_center),
         )
-        self._tick_diag["mask_kept_ratio"] = float(weights.mean().item()) if weights.numel() else 1.0
+        self._tick_diag["mask_kept_ratio"] = float(weights.mean().item()) if weights.numel() else 0.0
         if self.fisher_mask.cfg.roi_query:
             for key, value in self.fisher_mask.last_query_diag.items():
                 if key != "roi_query_box":  # box is logged via mask_kept_ratio's effect, not raw

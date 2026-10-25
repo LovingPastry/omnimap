@@ -947,7 +947,13 @@ class TSDFBackEnd():
             self.instance_count_vol = torch.cat([self.instance_count_vol, torch.zeros(delta, self.block_resolution, self.block_resolution, self.block_resolution).long().to(self.device)], dim=0)
 
 
-    def get_all_voxels(self, if_confidence = False):
+    def get_all_voxels(self, if_confidence = False, include_unreliable=False):
+        """Return semantic voxels, optionally retaining observed unknown geometry.
+
+        Association must search unknown/unreliable voxels too; otherwise a nearby
+        trusted instance can claim Gaussians whose nearest voxel was discarded.
+        Other callers retain the original trusted-instance-only view.
+        """
         buf_indices = self.world.hashmap().active_buf_indices()
         voxel_coords, voxel_indices = self.world.voxel_coordinates_and_flattened_indices(buf_indices)
         o3c.cuda.synchronize()
@@ -959,6 +965,11 @@ class TSDFBackEnd():
         
         buf_instance_count_vol = self.instance_count_vol[buf_indices]
         count_mask = buf_instance_count_vol>self.vox_min_count
+        if include_unreliable:
+            weights = torch.utils.dlpack.from_dlpack(self.world.attribute('weight').to_dlpack())[buf_indices].squeeze(-1)
+            # Observed TSDF voxels act as unknown guards even without a semantic
+            # detection. Retain low-confidence labelled voxels as guards too.
+            count_mask = (weights > 0) | (buf_instance_count_vol > 0)
         points = voxel_coords_ok[count_mask]
         colors = torch.utils.dlpack.from_dlpack(self.world.attribute('color').to_dlpack())[buf_indices]
         pc_colors = colors[count_mask]
@@ -970,21 +981,25 @@ class TSDFBackEnd():
         norm_confidence, confidence_colors = None, None
         if if_confidence:
             confidence  =  torch.max(buf_instance_pro_vol[...,:3], dim=-1).values[count_mask]
-            norm_confidence = confidence.float()/self.instance_count_vol[buf_indices][count_mask].float()
+            norm_confidence = confidence.float()/self.instance_count_vol[buf_indices][count_mask].float().clamp_min(1)
             cmap = plt.cm.rainbow
             confidence_colors = cmap(norm_confidence.cpu().numpy())[:, :3] # RGB channels only
         # remove the small label
-        unique_labels, counts = torch.unique(max_pro_instance_id, return_counts=True)
+        reliable_count = buf_instance_count_vol[count_mask] > self.vox_min_count
+        unique_labels, counts = torch.unique(max_pro_instance_id[reliable_count], return_counts=True)
         labels_to_remove_min_voxel = unique_labels[counts < self.ins_min_voxel]
         unique_labels_count = self.instance_fea_count[unique_labels][:,0]
         labels_to_remove_min_count = unique_labels[unique_labels_count < self.ins_min_count]
         labels_to_remove = torch.unique(torch.cat((labels_to_remove_min_voxel, labels_to_remove_min_count)))
-        mask = torch.isin(max_pro_instance_id, labels_to_remove)
-        points = points[~mask]
-        pc_colors = pc_colors[~mask]
-        max_pro_instance_id = max_pro_instance_id[~mask]
-        if if_confidence:
-            confidence_colors = confidence_colors[~mask.cpu().numpy()]
+        mask = torch.isin(max_pro_instance_id, labels_to_remove) | ~reliable_count
+        if include_unreliable:
+            max_pro_instance_id = max_pro_instance_id.masked_fill(mask, 0)
+        else:
+            points = points[~mask]
+            pc_colors = pc_colors[~mask]
+            max_pro_instance_id = max_pro_instance_id[~mask]
+            if if_confidence:
+                confidence_colors = confidence_colors[~mask.cpu().numpy()]
         ins_colors = torch.index_select(self.instance_colors, 0, max_pro_instance_id)/255.0
         return points, pc_colors, ins_colors, max_pro_instance_id, confidence_colors, unique_labels, labels_to_remove
 

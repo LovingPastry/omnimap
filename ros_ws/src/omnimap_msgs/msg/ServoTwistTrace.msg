@@ -8,3 +8,13 @@ uint32 model_version
 time command_stamp
 geometry_msgs/TwistStamped command
 string reason
+# Frozen-state camera-reference affine rate model, same frame as command.
+# Row-major 6x2 matrix: [linear; angular] = B * physical_rates + bias.
+# Invalid when linear clipping/slew/deadband modifies the affine command.
+bool rate_model_valid
+string rate_model_reason
+float64 reference_radius
+float64[3] reference_scene_center
+float64[2] spherical_rates
+float64[12] camera_rate_matrix
+float64[6] camera_bias

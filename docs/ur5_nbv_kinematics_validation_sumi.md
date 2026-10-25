@@ -187,7 +187,7 @@ rostopic echo -n 5 /servo_server/status
 rostopic echo -n 5 /omnimap/bridge_status
 rostopic echo -n 5 /omnimap/kinematic_status
 rosbag record -O kinematic_chain.bag /omnimap/spherical_cmd_raw /omnimap/spherical_cmd \
-  /omnimap/servo_twist_trace /omnimap/bridge_status /omnimap/kinematic_status \
+  /omnimap/servo_twist_trace /omnimap/bridge_status /omnimap/kinematic_status /omnimap/kinematic_constraint \
   /servo_server/delta_twist_camera /servo_server/delta_twist_cmds \
   /servo_server/status /joint_states /tf /tf_static
 ```
@@ -210,7 +210,7 @@ camera 输入可用 `--input-topic` 指定。若 master 在线但 Servo 参数�
 | 2. TF 时间和参考点平移项 | 同采样时间查询及有限差分/刚体速度测试通过；真实 TF 年龄与标定仍待现场记录 |
 | 3. MoveIt 诊断节点 | C++ 节点、构建、部署和真实 RobotState 隔离测试完成；已有真实模型/joint_states 零速样本，持续运行验收待完成 |
 | 4. 标定 m_min / 比较减速时机 | raw/normalized condition、sigma_min、status 的对齐接口已就绪；需要真实减速日志 |
-| 5. 二维最小半空间控制修正 | 尚未启用，等待步骤 4 的诊断与标定门槛；现有纯数值投影函数不等于控制链已接入 |
+| 5. 二维最小半空间控制修正 | 执行侧局部映射和 a/drift/c 诊断已实现，控制尚未接入；仍需步骤 4 标定及速度/时效约束 |
 | 6. stale/TF/status 零速策略 | 普通/KF 桥接 watchdog、状态停车和失效恢复测试通过；硬件断链验收待完成 |
 
 ## 2026-10-25 关节与 TF 延迟对齐修复
@@ -223,3 +223,14 @@ monitor 不再只查询最新 joint_states 时刻：缓存最多 200 个且未�
 
 本轮验证：`./scripts/build_ros_ws.sh --with-kinematics` 成功；隔离 ROS 集成测试 7 项全部通过，
 新增 TF 持续落后 80 ms 的有效反馈与关节断流失效/恢复检查。日志在 `/tmp/omnimap_alignment_test.log`。
+
+## 二维导数接口（2026-10-25）
+
+新增 `/omnimap/kinematic_constraint`，详细数值定义见 [构型约束诊断](ur5_nbv_kinematic_constraint.md)。
+ServoTwistTrace 的消息 MD5 已改变，两端须重建消息并重启相关节点。
+当前不发布修正控制命令；阈值默认未配置，c=NaN，不以测试阈值代替实机标定。
+
+本轮验证：消息/C++ 构建通过；InfoFlow 数值与模型测试 11 项、Planning/Servo 回调 9 项、
+inventory 1 项通过；直接节点和正式 diagnostics.launch 两套隔离 ROS 测试各 9 项通过。
+独立 NumPy FK 有限差分核对 a/drift；显式测试阈值只在隔离合成模型中设置，正式 launch 验证未配置时 c 为 NaN。
+日志：`/tmp/omnimap_constraint_test.log`、`/tmp/omnimap_constraint_launch_test.log`。

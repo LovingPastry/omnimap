@@ -9,10 +9,6 @@ from gaussian.utils.graphics_utils import (
     focal2fov,
 )
 import math
-from diff_gaussian_rasterization import (
-    GaussianRasterizationSettings,
-    GaussianRasterizer,
-)
 
 
 class Camera(nn.Module):
@@ -95,6 +91,12 @@ class Camera(nn.Module):
             self.normal = self.depth_to_normal()
 
     def set_GSRasterization(self, scaling_modifier=1.0):
+        # CPU cameras support pose/geometry and analytic policy evaluation only.
+        # Actual Gaussian rendering still requires the CUDA extension.
+        if torch.device(self.device).type != "cuda":
+            self.rasterizer = None
+            return
+        from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
         # Set up rasterization configuration
         tanfovx = math.tan(self.FoVx * 0.5)
         tanfovy = math.tan(self.FoVy * 0.5)
@@ -121,11 +123,11 @@ class Camera(nn.Module):
         intrins = (
             torch.tensor([[fx, 0.0, W / 2.0], [0.0, fy, H / 2.0], [0.0, 0.0, 1.0]])
             .float()
-            .cuda()
+            .to(self.depth.device if depth is None else depth.device)
         )
         grid_x, grid_y = torch.meshgrid(
-            torch.arange(W, device="cuda").float() + 0.5,
-            torch.arange(H, device="cuda").float() + 0.5,
+            torch.arange(W, device=intrins.device).float() + 0.5,
+            torch.arange(H, device=intrins.device).float() + 0.5,
             indexing="xy",
         )
         points = torch.stack([grid_x, grid_y, torch.ones_like(grid_x)], dim=-1).reshape(
@@ -177,6 +179,7 @@ class Camera(nn.Module):
         tstamp=None,
         normal=None,
         bg=[0, 0, 0],
+        device="cuda:0",
     ):
         cam = Camera(
             idx,
@@ -192,6 +195,7 @@ class Camera(nn.Module):
             focal2fov(K[1], K[-1]),
             K[-1],
             K[-2],
+            device=device,
             normal=normal,
             bg=bg,
         )

@@ -99,7 +99,7 @@ fisher_display_radius_scale: 0.92
 fisher_arrow_radius_scale: 0.90
 
 # ── 主动视角策略：可切换修复（消融 / 回退开关）────────────────────────
-# 本配置启用目标语义筛选；代码默认仍全部关闭，整节缺省或全部关闭时回退原版。
+# 本配置启用目标语义筛选；代码缺省同样启用语义筛选；显式 enabled: false 才回退全图信息量。
 # 实现见 omnimap/gaussian/renderer/nbv/policy_improvements.py，消融见 docs/nbv_ablation.md。
 nbv_policy:
   # angle = 原版 (theta,phi) 探测+控制；tangent = 大圆等弧长探测 + 单位切基（消除极点 cos²φ 退化）
@@ -122,7 +122,7 @@ nbv_policy:
     roi_query_mode: semantic
     roi_query_min_similarity: 0.35  # 对融合后的实例 embedding 重新归一化，再计算余弦相似度
     semantic_max_distance_m: null  # null = instance.fill_dis，高斯中心离语义体素过远则归为未知
-    roi_bounds: tsdf              # 仅 sbert / yolo_live 包围盒模式使用
+    roi_bounds: null              # semantic 不使用硬编码/首次检索的空间包围盒
     roi_padding_m: 0.0
     support_plane_z: null         # 可另填桌面高度；不自动检测桌面
     plane_softness_m: 0.01

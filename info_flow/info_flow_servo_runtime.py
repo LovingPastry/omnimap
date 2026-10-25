@@ -12,6 +12,7 @@ import tf2_ros
 from geometry_msgs.msg import TwistStamped
 from omnimap_msgs.msg import ServoTwistTrace
 from scipy.spatial.transform import Rotation as R
+from kinematic_projection import camera_rate_model
 
 from servo_runtime_common import (
     configure_servo_logging,
@@ -247,7 +248,7 @@ class InfoFlowServoRuntime:
         return max(timeout_sec, adaptive_timeout)
 
     def _publish_twist(self, *, cmd=None, stamp=None, linear_cmd=None,
-                       angular_cmd=None, reason):
+                       angular_cmd=None, reason, rate_model=None):
         """Log the exact camera-reference Twist sent to the bridge, including zeros."""
         if linear_cmd is None:
             msg = publish_zero_twist(self.cmd_pub, cmd_frame=self.cmd_frame, stamp=stamp)
@@ -265,6 +266,16 @@ class InfoFlowServoRuntime:
         trace.command_stamp = cmd.header.stamp if cmd is not None else rospy.Time()
         trace.command = msg
         trace.reason = reason
+        trace.rate_model_reason = "no_motion_model"
+        if rate_model is not None and cmd is not None:
+            valid, model_reason, matrix, bias = rate_model
+            trace.rate_model_valid = bool(valid)
+            trace.rate_model_reason = model_reason
+            trace.reference_radius = float(cmd.reference_radius)
+            trace.reference_scene_center = list(cmd.reference_scene_center)
+            trace.spherical_rates = [float(cmd.theta_rate), float(cmd.phi_rate)]
+            trace.camera_rate_matrix = matrix.reshape(-1).tolist()
+            trace.camera_bias = bias.tolist()
         self.twist_trace_pub.publish(trace)
         self.profile_logger.info(
             "servo_twist: tick=%d model_v=%d command_stamp=%.9f twist_stamp=%.9f "
@@ -510,6 +521,15 @@ class InfoFlowServoRuntime:
                 self._last_angular_cmd,
                 self.angular_accel_max * servo_dt_sec,
             )
+            rate_model = camera_rate_model(
+                radius=radius, e_theta=e_theta, e_phi=e_phi,
+                rates=[theta_rate, phi_rate], radial_velocity=v_r,
+                linear_command=linear_cmd, angular_command=angular_cmd,
+                previous_linear=self._last_linear_cmd,
+                linear_speed_limit=self.linear_vel_max,
+                linear_step_limit=self.linear_accel_max * servo_dt_sec,
+                linear_deadband=self.linear_deadband,
+            )
             self._last_linear_cmd = linear_cmd.copy()
             self._last_angular_cmd = angular_cmd.copy()
 
@@ -519,6 +539,7 @@ class InfoFlowServoRuntime:
                 angular_cmd=angular_cmd,
                 stamp=pose_stamp,
                 reason="motion",
+                rate_model=rate_model,
             )
             self._planner_log_throttle(
                 "reference_sphere_servo",

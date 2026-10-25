@@ -103,7 +103,7 @@ class InfoFlowPlanningNode:
             spherical_speed_min=args.spherical_speed_min,
             planner_output_mode="spherical_rate",
             # nbv_policy 节：四项可切换修复（可行性/掩码/速率映射/停止判据）。
-            # 缺省或全部 disabled 时与原版逐位一致；gradient_space 也从这里读。
+            # 缺省启用逐高斯语义筛选；仅显式关闭全部开关时回退原版。
             nbv_config=nbv_policy_from_config(config),
             verbose=True,
         )

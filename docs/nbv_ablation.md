@@ -38,9 +38,9 @@ ROI 盒外、支撑面以下的高斯权重为 0；相机低于支撑面时整�
 二是 **2026-10-21 新增** 的 `roi_query`（默认 `"cup"`，`fisher_mask.enabled=true` 时才生效），包围盒 `roi_query_mode`
 选两种解法之一：
 
-- **`sbert`（代码默认；项目配置使用 semantic）**：在建图本就在维护的 `tsdfs.instance_feature`（YOLO-World 检测 + TAP 分割 + SBERT 文本特征，
+- **`sbert`（显式保留的包围盒对照模式）**：在建图本就在维护的 `tsdfs.instance_feature`（YOLO-World 检测 + TAP 分割 + SBERT 文本特征，
   按 `instance.instance_skip` 帧持续累积的每实例语义向量表）里，选与查询文本余弦相似度最高的实例，取**该实例
-  当前点云的包围盒**（+`roi_padding_m`）替换 `roi_bounds`；低于 `roi_query_min_similarity`（默认 0.2）则放弃匹配、
+  当前点云的包围盒**（+`roi_padding_m`）替换 `roi_bounds`；低于 `roi_query_min_similarity`（当前缺省 0.35；历史模式可显式设 0.2）则放弃匹配、
   退回 `roi_bounds`。开销小（只加一次文本编码+一次余弦比较），但**受限于已经检测并建过档的东西**：如果查询词描述
   的物体从未被主检测流程（固定 98 类词表 `pretrained_models/yolo_labels.txt`）检出过、或生成的 caption 语义上不够
   接近，就匹配不到。
@@ -88,8 +88,9 @@ m/s，`linear_vel_max` 退回安全兜底。
 
 ## 配置与回退
 
-`nbv_policy` 全部关闭（或整节缺省）= 原版实现；当前两个项目配置已显式打开 semantic 掩码。
-历史回归验证：代码默认配置与改动前 HEAD 的 `motion_policy`
+`nbv_policy` 整节缺省也默认启用 semantic。显式 `fisher_mask.enabled: false` 且其他修复关闭才回退原版。
+历史包围盒消融的独立配置显式使用 sbert + roi_query=null，以保持旧实验语义。
+历史回归验证（当时的默认值，与当前 semantic 默认不同）：当时默认配置与改动前 HEAD 的 `motion_policy`
 在 angle/tangent × cartesian/spherical_rate/angular 共 447 步上**逐位一致**。
 
 ```yaml

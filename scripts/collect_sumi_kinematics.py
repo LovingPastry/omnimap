@@ -70,7 +70,7 @@ def main():
             run(["rosparam", "get", args.servo_ns])
             run(["rosnode", "info", args.servo_ns])
             run(["rostopic", "list"])
-            topics = ["/omnimap/kinematic_status", "/omnimap/bridge_status", "/omnimap/servo_twist_trace",
+            topics = ["/omnimap/kinematic_constraint", "/omnimap/kinematic_status", "/omnimap/bridge_status", "/omnimap/servo_twist_trace",
                       args.input_topic]
             try:
                 config = servo_config(args.servo_ns)

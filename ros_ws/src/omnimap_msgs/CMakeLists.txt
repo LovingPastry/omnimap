@@ -12,6 +12,7 @@ add_message_files(
   PlannerSnapshotRef.msg
   SphericalCommand.msg
   KinematicStatus.msg
+  KinematicConstraint.msg
   BridgeStatus.msg
   ServoTwistTrace.msg
 )

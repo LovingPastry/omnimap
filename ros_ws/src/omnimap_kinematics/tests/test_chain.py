@@ -14,7 +14,7 @@ import rospy
 import rostest
 import tf2_ros
 from geometry_msgs.msg import TransformStamped, TwistStamped
-from omnimap_msgs.msg import BridgeStatus, KinematicStatus, ServoTwistTrace
+from omnimap_msgs.msg import BridgeStatus, KinematicStatus, ServoTwistTrace, KinematicConstraint
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Int8
 from rosgraph_msgs.msg import Clock
@@ -44,9 +44,10 @@ class ChainTest(unittest.TestCase):
                 "joint_topic": "/test/joints", "status_topic": "feedback",
                 "cartesian_command_in_topic": "/test/tool_twist"})
         cls.lock = threading.RLock()
-        cls.kinematic, cls.bridge, cls.output = None, None, None
+        cls.kinematic, cls.bridge, cls.output, cls.constraint = None, None, None, None
         cls.subs = [rospy.Subscriber(topic, kind, lambda msg, key=key: setattr(cls, key, msg))
                     for topic, kind, key in [("/test/kinematic", KinematicStatus, "kinematic"),
+                                      ("/test/constraint", KinematicConstraint, "constraint"),
                         ("/test/bridge", BridgeStatus, "bridge"), ("/test/tool_twist", TwistStamped, "output")]]
         cls.joint_pub = rospy.Publisher("/test/joints", JointState, queue_size=1)
         cls.status_pub = rospy.Publisher("/test/servo/feedback", Int8, queue_size=1)
@@ -78,6 +79,8 @@ class ChainTest(unittest.TestCase):
             self.__class__.input_frame = "base_link"
             self.__class__.malformed = False
             self.__class__.tf_error = 0.0
+            self.__class__.rate_model_valid = True
+            self.__class__.rate_model_error = 0.0
         self.wait(lambda: self.kinematic is not None and self.kinematic.transform_chain_valid,
                   "healthy chain", timeout=6)
 
@@ -107,11 +110,12 @@ class ChainTest(unittest.TestCase):
             with cls.lock:
                 if getattr(cls, "pause_clock", False):
                     continue
-                cls.clock_pub.publish(Clock(rospy.Time.from_sec(time.time())))
+                # Stamp this frame from the clock value just published, not
+                # rospy.Time.now(): its asynchronous /clock callback may still
+                # hold the previous tick and create duplicate joint stamps.
+                now = rospy.Time.from_sec(time.time())
+                cls.clock_pub.publish(Clock(now))
                 if not hasattr(cls, "q"):
-                    continue
-                now = rospy.Time.now()
-                if now.is_zero():
                     continue
                 # Publish TF ahead of the input, simulating sensor/compute delay.
                 poses = cls.fk(cls.q)
@@ -146,6 +150,15 @@ class ChainTest(unittest.TestCase):
                     msg.twist.angular.x, msg.twist.angular.y, msg.twist.angular.z = 0.1, -0.2, 0.3
                     trace = ServoTwistTrace(planner_tick=42, model_version=7, command_stamp=stamp, command=msg)
                     trace.header.stamp = stamp
+                    trace.reason = "motion"
+                    trace.rate_model_valid = cls.rate_model_valid
+                    trace.rate_model_reason = "test_affine" if cls.rate_model_valid else "linear_slew_limit_active"
+                    trace.reference_radius = 0.5
+                    trace.spherical_rates = [0.1, -0.05]
+                    matrix = np.zeros((6, 2))
+                    matrix[0, 0] = matrix[1, 1] = 0.2
+                    trace.camera_rate_matrix = matrix.reshape(-1).tolist()
+                    trace.camera_bias = [cls.rate_model_error, 0, 0.03, 0.1, -0.2, 0.3]
                     cls.input_pub.publish(msg)
                     # rospy has now assigned msg.header.seq. Nested headers in
                     # the trace preserve that actual wire sequence.
@@ -205,6 +218,64 @@ class ChainTest(unittest.TestCase):
         with self.lock:
             self.__class__.send_joints = True
         self.wait(lambda: self.kinematic.transform_chain_valid, "delayed TF recovery")
+
+    def independent_jacobian(self, q):
+        jac = np.empty((6, 6))
+        rotation = self.fk(q)["tool0"][:3, :3]
+        for i in range(6):
+            delta = np.zeros(6)
+            delta[i] = 1e-6
+            plus, minus = self.fk(q+delta)["tool0"], self.fk(q-delta)["tool0"]
+            jac[:3, i] = (plus[:3, 3]-minus[:3, 3])/2e-6
+            rdot = ((plus[:3, :3]-minus[:3, :3])/2e-6) @ rotation.T
+            jac[3:, i] = [rdot[2, 1], rdot[0, 2], rdot[1, 0]]
+        return jac
+
+    def test_directional_model_matches_independent_fk_and_bridge(self):
+        self.wait(lambda: self.constraint is not None and self.constraint.valid, "constraint derivatives")
+        result = self.constraint
+        q = self.q.copy()
+        jac = self.independent_jacobian(q)
+        poses = self.fk(q)
+        offset = poses["cam_1_color_optical_frame"][:3, 3]-poses["tool0"][:3, 3]
+        task = np.zeros((6, 3))
+        task[0, 0], task[1, 1] = 0.2 * result.rate_scales[0], 0.2 * result.rate_scales[1]
+        task[:, 2] = np.r_[np.array([0, 0, 0.03])-np.cross([0.1, -0.2, 0.3], offset), [0.1, -0.2, 0.3]]
+        directions = np.linalg.solve(jac, task)
+        def metric(q):
+            scaled = self.independent_jacobian(q)/((np.arange(1, 7)*0.1)[:, None]) * np.arange(1, 7)[None, :]
+            return np.linalg.svd(scaled, compute_uv=False)[-1]
+        expected = []
+        for direction in directions.T:
+            step = 2e-4/np.linalg.norm(direction)
+            expected.append((metric(q+step*direction)-metric(q-step*direction))/(2*step))
+        np.testing.assert_allclose([*result.a, result.drift], expected, atol=2e-5, rtol=2e-3)
+        self.assertLess(result.inverse_residual, 1e-6)
+        self.assertEqual(result.planner_tick, 42)
+        self.assertEqual(result.model_version, 7)
+        self.assertFalse(result.joint_stamp.is_zero())
+        if rospy.get_param("/test/configure_servo_late", False):
+            self.assertFalse(result.threshold_configured)
+            self.assertTrue(np.isnan(result.c))
+        else:
+            self.assertTrue(result.threshold_configured)
+            self.assertAlmostEqual(result.c, -result.alpha*(result.sigma_min-result.m_min)-result.drift)
+
+    def test_constraint_rejects_limits_mismatch_and_singular_state(self):
+        self.wait(lambda: self.constraint is not None and self.constraint.valid, "initial derivatives")
+        for field, value, reason in (("rate_model_valid", False, "servo_rate_model_invalid"),
+                                      ("rate_model_error", 0.1, "servo_rate_model_mismatch")):
+            with self.lock:
+                old = getattr(self.__class__, field)
+                setattr(self.__class__, field, value)
+            self.wait(lambda: not self.constraint.valid and reason in self.constraint.reason, reason)
+            with self.lock:
+                setattr(self.__class__, field, old)
+            self.wait(lambda: self.constraint.valid, "derivative recovery")
+        with self.lock:
+            self.__class__.q = np.zeros(6)
+        self.wait(lambda: not self.constraint.valid and "singular" in self.constraint.reason,
+                  "singular derivative rejection")
 
     def test_status_stop_and_recovery(self):
         for code in (1, 2, 3, 4, 5, 99, 0):

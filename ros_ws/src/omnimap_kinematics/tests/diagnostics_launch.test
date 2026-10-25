@@ -13,6 +13,7 @@
     <arg name="status_topic" value="/test/servo/feedback"/>
     <arg name="bridge_status_topic" value="/test/bridge"/>
   </include>
+  <param name="omnimap_kinematic_monitor/kinematic_constraint_topic" value="/test/constraint"/>
   <param name="omnimap_kinematic_monitor/kinematic_status_topic" value="/test/kinematic"/>
   <param name="omnimap_kinematic_monitor/twist_trace_topic" value="/test/trace"/>
   <param name="omnimap_kinematic_monitor/sample_timeout" value="0.4"/>

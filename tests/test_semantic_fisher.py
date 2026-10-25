@@ -62,6 +62,59 @@ def mask_for(backend):
 
 
 class SemanticTests(unittest.TestCase):
+    def test_empty_config_defaults_to_dynamic_semantics(self):
+        from omnimap.gaussian.renderer.nbv.policy_improvements import nbv_policy_from_config
+        backend = backend_fixture()
+        backend.config = {}
+        update_gaussian_semantics(backend, frame_idx=11)
+        cfg = NBVPolicyConfig.from_dict(nbv_policy_from_config({}))
+        self.assertTrue(cfg.fisher_mask.enabled)
+        self.assertEqual(cfg.fisher_mask.roi_query_mode, "semantic")
+        mask = FisherContributionMask(cfg.fisher_mask)
+        self.assertEqual(mask.gaussian_weights(backend.gaussians.get_xyz).sum(), 0)
+        self.assertEqual(mask.gaussian_weights(backend.gaussians.get_xyz,
+                         semantic_state=backend.gaussian_semantics).tolist(), [1, 1, 0, 1, 0])
+        backend.config = {"nbv_policy": {"fisher_mask": {"enabled": False}}}
+        update_gaussian_semantics(backend, frame_idx=12)
+        self.assertIsNone(backend.gaussian_semantics)
+
+    def test_real_voxel_export_preserves_unknown_and_unreliable_neighbors(self):
+        # Execute the actual exporter method with a CPU-backed Open3D storage
+        # adapter; no detector/GPU initialization or replacement filter logic.
+        import ast
+        tree = ast.parse((ROOT / "omnimap/tsdf_backend.py").read_text())
+        cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "TSDFBackEnd")
+        method = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == "get_all_voxels")
+        namespace = {"torch": torch, "o3c": NS(cuda=NS(synchronize=lambda: None))}
+        exec(compile(ast.Module(body=[method], type_ignores=[]), "tsdf_backend.py", "exec"), namespace)
+        class TensorAdapter:
+            def __init__(self, tensor): self.tensor = tensor
+            def to_dlpack(self): return torch.utils.dlpack.to_dlpack(self.tensor)
+        points = torch.zeros(8, 3)
+        points[:, 0] = torch.arange(8) * .01
+        indices = TensorAdapter(torch.tensor([0]))
+        attributes = {"weight": torch.ones(1, 2, 2, 2, 1), "color": torch.zeros(1, 2, 2, 2, 3)}
+        world = NS(hashmap=lambda: NS(active_buf_indices=lambda: indices),
+                   voxel_coordinates_and_flattened_indices=lambda _: (TensorAdapter(points), None),
+                   attribute=lambda name: TensorAdapter(attributes[name]))
+        ids = torch.zeros(1, 2, 2, 2, 3, dtype=torch.long)
+        ids.reshape(8, 3)[[0, 7], 0] = 1
+        ids.reshape(8, 3)[1, 0] = 2  # instance observed too few times
+        counts = torch.zeros(8)
+        counts[[0, 1, 7]] = 5
+        backend = NS(world=world, block_resolution=2, vox_min_count=3, ins_min_count=3,
+                     ins_min_voxel=1, instance_count_vol=counts.reshape(1, 2, 2, 2),
+                     instance_id_vol=ids, instance_pro_vol=torch.ones(1, 2, 2, 2, 4),
+                     instance_fea_count=torch.tensor([[1], [5], [1]]), instance_colors=torch.zeros(3, 3))
+        export = namespace["get_all_voxels"]
+        old = export(backend)
+        guarded = export(backend, include_unreliable=True)
+        self.assertEqual(old[3].tolist(), [1, 1])
+        self.assertEqual(guarded[3].tolist(), [1, 0, 0, 0, 0, 0, 0, 1])
+        query = points[1:3]
+        self.assertEqual(associate_instance_ids(query, old[0], old[3], .05).tolist(), [1, 1])
+        self.assertEqual(associate_instance_ids(query, guarded[0], guarded[3], .05).tolist(), [0, 0])
+
     def test_batched_nearest_distance_unknown_and_nonfinite(self):
         points = torch.tensor([[0., 0, 0], [.1, 0, 0], [2., 0, 0], [float("nan"), 0, 0]])
         voxels = torch.tensor([[0., 0, 0], [.1, 0, 0], [float("nan"), 0, 0]])
