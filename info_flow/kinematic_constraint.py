@@ -43,10 +43,17 @@ class KinematicConstraintGate:
         self.latest, self.received_wall = copy.deepcopy(msg), float(wall_now)
 
     def remember_command(self, msg):
-        # Store only final execution commands, not the raw Fisher diagnostic.
-        # A later stop/replan invalidates an earlier command's model immediately.
+        self._remember_command(msg, "execution")
+
+    def remember_preview_command(self, msg):
+        """Associate an explicitly non-actuating preview, never an execution model."""
+        self._remember_command(msg, "preview")
+
+    def _remember_command(self, msg, kind):
+        # Keep source roles distinct: raw previews never authorize execution.
+
         self.command = dict(
-            key=(int(msg.planner_tick), int(msg.model_version), float(msg.header.stamp.to_sec())),
+            kind=kind, key=(int(msg.planner_tick), int(msg.model_version), float(msg.header.stamp.to_sec())),
             frame=msg.header.frame_id.lstrip("/"), stop=bool(msg.should_stop),
             rates=(float(msg.theta_rate), float(msg.phi_rate)),
             radius=float(msg.reference_radius), center=tuple(msg.reference_scene_center),
@@ -142,6 +149,9 @@ class KinematicConstraintGate:
             return "constraint_frame_mismatch"
         if not msg.valid:
             return "constraint_upstream_invalid:" + msg.reason
+        if (self.command is not None and
+                msg.reason.startswith("advisory_preview:") != (self.command["kind"] == "preview")):
+            return "constraint_command_role_mismatch"
         if not msg.threshold_configured:
             return "constraint_threshold_unset"
         if (len(msg.joint_names) != 6 or len(set(msg.joint_names)) != 6

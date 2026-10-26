@@ -16,6 +16,7 @@ from omnimap_msgs.msg import ServoTwistTrace
 from omnimap_msgs.srv import EvaluateKinematicModel
 from scipy.spatial.transform import Rotation as R
 from kinematic_projection import camera_rate_model
+from kinematic_constraint import KinematicConstraintGate
 from bounded_query import SingleFlightQuery
 from preview_joint_state import PreviewJointState
 from sensor_msgs.msg import JointState
@@ -45,6 +46,15 @@ class ServoCandidate:
     details: dict
 
 
+@dataclass(frozen=True)
+class PreviewEvaluation:
+    constraint: object
+    command: object
+    trace: object
+    pose: np.ndarray
+    received_wall: float
+
+
 @dataclass
 class CachedSphericalCommand:
     msg: object
@@ -70,6 +80,10 @@ class InfoFlowServoRuntime:
         self._control_lock = threading.RLock()
         self._control_generation = 0
         self._preview_queries = SingleFlightQuery()
+        self._cycle_projection_queries = SingleFlightQuery()
+        self.cycle_projection_budget_sec = float(args.kinematic_cycle_projection_budget_sec)
+        if not np.isfinite(self.cycle_projection_budget_sec) or self.cycle_projection_budget_sec <= 0:
+            raise ValueError("kinematic_cycle_projection_budget_sec must be finite and positive")
         self._preview_joints = PreviewJointState()
         self.preview_mode = args.kinematic_preview_mode
         if self.preview_mode not in ("off", "observe"):
@@ -79,6 +93,8 @@ class InfoFlowServoRuntime:
             raise ValueError("kinematic_preview_hz must be finite and positive")
         self.latest_raw_cmd = None
         self.latest_preview_constraint = None
+        self.latest_preview_evaluation = None
+        self.latest_cycle_proposal = None
         self.preview_query = None
         self.preview_timer = None
         self.raw_cmd_sub = None
@@ -346,6 +362,7 @@ class InfoFlowServoRuntime:
         if self.preview_mode != "observe":
             return
         self.latest_preview_constraint = None
+        self.latest_preview_evaluation = None
         try:
             raw, final = self._preview_command_pair()
             pose, stamp = lookup_latest_pose_from_tf(
@@ -353,11 +370,14 @@ class InfoFlowServoRuntime:
             # A proposed interval only: this callback must not advance the
             # actual Servo clock or claim a future measured execution dt.
             proposed_dt = 1./self.servo_hz
-            response = self.evaluate_preview(raw.msg, pose, stamp, proposed_dt, self.preview_query)
+            evaluation = self.evaluate_preview(raw.msg, pose, stamp, proposed_dt, self.preview_query,
+                                               return_evaluation=True)
+            response = evaluation.constraint
             new_raw, new_final = self._preview_command_pair()
             if new_raw.msg != raw.msg or new_final.msg != final.msg:
                 raise ValueError("preview command changed during query")
             self.latest_preview_constraint = response
+            self.latest_preview_evaluation = evaluation
             self.profile_logger.info(
                 "kinematic_preview: mode=observe tick=%d valid=True reason=%s threshold=%s "
                 "dt_source=nominal dt=%.9g sigma_min=%.9g",
@@ -369,7 +389,7 @@ class InfoFlowServoRuntime:
     def preview_joint_callback(self, msg):
         self._preview_joints.update(msg, time.monotonic(), ros_now=rospy.Time.now().to_sec())
 
-    def evaluate_preview(self, cmd, current_c2w, pose_stamp, servo_dt_sec, query):
+    def evaluate_preview(self, cmd, current_c2w, pose_stamp, servo_dt_sec, query, *, return_evaluation=False):
         """Read-only candidate query; never commits controller state or motion.
 
         query is an EvaluateKinematicModel service proxy. Calling this method
@@ -421,7 +441,79 @@ class InfoFlowServoRuntime:
                 raise ValueError("preview controller state changed during query")
         if time.monotonic()-started > deadline:
             raise ValueError("preview response deadline exceeded")
+        if return_evaluation:
+            return PreviewEvaluation(copy.deepcopy(response), cmd, trace, current_c2w, time.monotonic())
         return response
+
+    def revalidate_cycle_preview(self, evaluation, raw_cmd, current_pose, servo_dt_sec):
+        """Rebuild current-cycle limits and solve a non-actuating projection.
+
+        Caller holds the control lock or owns an isolated controller snapshot.
+        A changed affine map needs a new model
+        query; changing only dt/previous linear limits is handled by re-solving.
+        """
+        if raw_cmd != evaluation.command or raw_cmd.should_stop:
+            raise ValueError("preview cycle command mismatch or policy stop")
+        if not np.allclose(current_pose, evaluation.pose, rtol=0, atol=1e-9):
+            raise ValueError("preview cycle pose changed")
+        self._preview_joints.validate(evaluation.constraint, ros_now=rospy.Time.now().to_sec(),
+                                      wall_now=time.monotonic(), timeout=self.pose_stale_timeout_sec)
+        current = self._compute_servo_candidate(raw_cmd, current_pose, servo_dt_sec)
+        valid, reason, matrix, bias = current.rate_model
+        if (not valid or not np.allclose(matrix.reshape(-1), evaluation.trace.camera_rate_matrix,
+                                        rtol=0, atol=1e-9)
+                or not np.allclose(bias, evaluation.trace.camera_bias, rtol=0, atol=1e-9)):
+            raise ValueError("preview cycle affine model changed:" + reason)
+        msg = copy.deepcopy(evaluation.constraint)
+        msg.servo_dt_sec = servo_dt_sec
+        msg.previous_linear = current.rate_limits["previous"].tolist()
+        msg.linear_speed_limit = current.rate_limits["speed"]
+        msg.linear_step_limit = current.rate_limits["step"]
+        msg.linear_deadband = current.rate_limits["deadband"]
+        gate = KinematicConstraintGate(source_frame=self.world_frame,
+                                       timeout_sec=self.pose_stale_timeout_sec)
+        gate.remember_preview_command(raw_cmd)
+        gate.update(msg, wall_now=evaluation.received_wall)
+        proposal = gate.propose(rates=[raw_cmd.theta_rate, raw_cmd.phi_rate],
+            reference_radius=raw_cmd.reference_radius, reference_scene_center=raw_cmd.reference_scene_center,
+            model_version=raw_cmd.model_version, should_stop=raw_cmd.should_stop,
+            state_allows_motion=True, ros_now=rospy.Time.now().to_sec(), wall_now=time.monotonic())
+        if proposal.valid:
+            projected = copy.deepcopy(raw_cmd)
+            projected.theta_rate, projected.phi_rate = proposal.rates
+            candidate = self._compute_servo_candidate(projected, current_pose, servo_dt_sec)
+            predicted = matrix @ np.asarray(proposal.rates) + bias
+            if not np.allclose(np.r_[candidate.linear, candidate.angular], predicted, rtol=0, atol=1e-9):
+                raise ValueError("preview projected output changed by runtime limits")
+        return proposal
+
+    def _observe_cycle_projection(self, cmd, pose, servo_dt_sec):
+        if self.preview_mode != "observe":
+            return
+        self.latest_cycle_proposal = None
+        try:
+            evaluation = self.latest_preview_evaluation
+            if evaluation is None:
+                raise ValueError("preview cycle model missing")
+            raw, final = self._preview_command_pair()
+            if final.msg != cmd:
+                raise ValueError("preview cycle final command changed")
+            # Numerical optimization must not hold up the control timer. The
+            # worker owns a controller snapshot and cannot commit runtime state.
+            snapshot = copy.copy(self)
+            snapshot._last_linear_cmd = self._last_linear_cmd.copy()
+            snapshot._last_angular_cmd = self._last_angular_cmd.copy()
+            budget = min(self.cycle_projection_budget_sec, .25/max(self.servo_hz, 1e-6))
+            proposal = self._cycle_projection_queries.call(
+                lambda payload: snapshot.revalidate_cycle_preview(*payload),
+                (evaluation, raw.msg, np.array(pose, copy=True), servo_dt_sec), budget)
+            self.latest_cycle_proposal = proposal
+            self.profile_logger.info(
+                "kinematic_cycle_projection: mode=observe tick=%d valid=%s reason=%s "
+                "dt_source=actual dt=%.9g proposed=[%.9g %.9g]",
+                cmd.planner_tick, proposal.valid, proposal.reason, servo_dt_sec, *proposal.rates)
+        except Exception as exc:
+            self.profile_logger.info("kinematic_cycle_projection: mode=observe valid=False reason=%s", exc)
 
     def _validate_preview_response(self, trace, response):
         """Associate an advisory response; this does not authorize execution."""
@@ -668,6 +760,8 @@ class InfoFlowServoRuntime:
         # 2) 通过多重安全门（缺命令/过期/TF失败/位姿过期/策略要求停止）；
         # 3) 将球坐标速度指令转换为 Twist 并发布。
         self.stats.servo_steps += 1
+        if self.preview_mode == "observe":
+            self.latest_cycle_proposal = None
 
         cmd_cache = self.latest_cmd
         if cmd_cache is None:
@@ -700,9 +794,22 @@ class InfoFlowServoRuntime:
             return
 
         if bool(cmd.should_stop):
+            diagnostic_dt = self._servo_dt_sec() if self.preview_mode == "observe" else None
             self._publish_twist(cmd=cmd, reason=str(cmd.stop_reason))
             self._reset_slew_state()
             self.stats.servo_zero_policy_stop += 1
+            if self.preview_mode == "observe":
+                try:
+                    pose, stamp = lookup_latest_pose_from_tf(
+                        self.tf_buffer, world_frame=self.world_frame, camera_frame=self.camera_frame,
+                        timeout_sec=0.)
+                    age = rospy.Time.now().to_sec()-stamp.to_sec()
+                    if stamp.is_zero() or not -.05 <= age <= self.pose_stale_timeout_sec:
+                        raise ValueError("stopped cycle pose stale")
+                    self._observe_cycle_projection(cmd, pose, diagnostic_dt)
+                except Exception as exc:
+                    self.latest_cycle_proposal = None
+                    self.profile_logger.info("kinematic_cycle_projection: mode=observe valid=False reason=%s", exc)
             self._maybe_log_status()
             return
         if cmd.header.frame_id.lstrip("/") != self.world_frame.lstrip("/"):
@@ -768,6 +875,7 @@ class InfoFlowServoRuntime:
 
         try:
             servo_dt_sec = self._servo_dt_sec()
+            self._observe_cycle_projection(cmd, current_c2w, servo_dt_sec)
             candidate = self._compute_servo_candidate(cmd, current_c2w, servo_dt_sec)
             linear_cmd, angular_cmd = candidate.linear, candidate.angular
             rate_model, rate_limits = candidate.rate_model, candidate.rate_limits
@@ -853,6 +961,7 @@ def build_argparser():
     parser.add_argument("-c", "--config", type=str, default="config/rtabmap_config.yaml", help="YAML config file path")
     parser.add_argument("--spherical_cmd_topic", type=str, default="/omnimap/spherical_cmd")
     parser.add_argument("--cmd_topic", type=str, default="/servo_server/delta_twist_camera")
+    parser.add_argument("--kinematic_cycle_projection_budget_sec", type=float, default=0.003)
     parser.add_argument("--kinematic_preview_mode", choices=("off", "observe"), default="off")
     parser.add_argument("--kinematic_preview_hz", type=float, default=2.)
     parser.add_argument("--kinematic_preview_service", default="/omnimap_kinematic_monitor/evaluate_model")

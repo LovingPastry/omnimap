@@ -206,6 +206,14 @@ class ConstraintTests(unittest.TestCase):
         self.gate.update(constraint(servo_dt_sec=0), wall_now=100)
         self.assertEqual(self.propose().reason, "constraint_joint_cycle_invalid")
 
+    def test_preview_and_execution_models_have_distinct_roles(self):
+        self.gate.update(constraint(reason="advisory_preview:ok"), wall_now=100)
+        self.assertEqual(self.propose().reason, "constraint_command_role_mismatch")
+        self.gate.remember_preview_command(command())
+        self.assertTrue(self.propose().valid)
+        self.gate.update(constraint(), wall_now=100)
+        self.assertEqual(self.propose().reason, "constraint_command_role_mismatch")
+
     def test_reject_invalid_configuration(self):
         for fields in (dict(timeout_sec=0), dict(max_sample_skew_sec=np.nan),
                        dict(max_normalized_delta=-1), dict(source_frame="/"), dict(task_frame="")):

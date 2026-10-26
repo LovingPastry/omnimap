@@ -210,8 +210,10 @@ Servo 候选计算已从实际周期拆出，preview 与 actual 复用计算及 
 
 SingleFlightQuery 现在以单个后台 worker 限制 RPC 调用端等待；超时不启动替代请求，晚返回结果丢弃。默认 preview timeout=0.1 秒。evaluate_preview 对输入做独立拷贝，并在返回后以零等待查询最新 TF，拒绝过期或与候选位姿不一致的结果（1e-9 数值容差）。有界查询 2 项、回调 15 项通过，包括真实阻塞、占用拒绝、晚结果丢弃、异常恢复及 TF 变化。未提供底层强制取消或自动执行；本机关节复核已在后续补齐。
 
-本机关节预览复核已接入 evaluate_preview：PreviewJointState 按名称保存独立 q/dq、源时间和接收时间；双时钟新鲜度、重复/倒退/畸形最新样本失效、模型样本不晚于本机样本以及 q/dq 冻结一致性均需通过。topic 参数 kinematic_joint_topic 默认 /joint_states，应匹配实际 Servo/monitor。关节测试 5 项、回调 16 项通过；尚无下一执行周期 dt 或连续执行证明。
+本机关节预览复核已接入 evaluate_preview：PreviewJointState 按名称保存独立 q/dq、源时间和接收时间；双时钟新鲜度、重复/倒退/畸形最新样本失效、模型样本不晚于本机样本以及 q/dq 冻结一致性均需通过。topic 参数 kinematic_joint_topic 默认 /joint_states，应匹配实际 Servo/monitor。关节测试 5 项、回调 16 项通过；随后已补实际周期 dt 建议重算，仍无连续执行证明。
 
 未来时间的本机关节样本在接收时拒绝，不推进已接受时间基线；后续正常新样本可恢复，相关测试已覆盖。
 
-可选 kinematic_preview_mode=observe（默认 off）以独立 2Hz ROS Timer 关联 raw/final 命令并查询模型，使用名义 1/servo_hz 预览 dt，日志明确 dt_source=nominal。结果只存为建议且每轮先失效旧值，无命令发布；原始 policy stop、错配、陈旧或查询期间命令变化均拒绝。跨 Servo 周期仍拒绝，是冻结诊断而非连续执行；实际周期重算/投影执行/恢复仍未接入。回调 18 项通过。
+可选 kinematic_preview_mode=observe（默认 off）以独立 2Hz ROS Timer 关联 raw/final 命令并查询模型，使用名义 1/servo_hz 预览 dt，日志明确 dt_source=nominal。结果只存为建议且每轮先失效旧值，无命令发布；原始 policy stop、错配、陈旧或查询期间命令变化均拒绝。跨 Servo 周期仍拒绝，是冻结诊断而非连续执行；实际周期建议重算现已接入，投影执行/恢复仍未接入。回调 18 项通过。
+
+实际周期 observe 现以 PreviewEvaluation 保留的完整 affine 映射/位姿进行重验证，并按当前有效 dt 和上一线速度重建约束。PI/角速度映射变化要求重新查询；投影结果再次通过真实计算输出一致性检查。preview/execution 来源角色分离。独立快照 worker 默认等待 3ms（最多名义周期四分之一），超时单个占用、不复用晚结果；停止分支先零速再诊断。消费者 16 项、回调 21 项通过，仍不执行建议或自动恢复。

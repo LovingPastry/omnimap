@@ -408,6 +408,83 @@ class ServoTests(unittest.TestCase):
                 self.node.evaluate_preview(self.cmd, pose, rospy.Time(100), .02,
                                           lambda trace: NS(constraint=preview_response(trace)))
 
+    def test_actual_cycle_rebuilds_joint_acceleration_bounds_without_actuation(self):
+        def respond(trace):
+            msg = preview_response(trace)
+            msg.threshold_configured = True
+            msg.a, msg.c, msg.sigma_min, msg.m_min, msg.alpha = [1., 0.], .95, .5, 1.45, 1.
+            msg.joint_rate_matrix = [1., 0.] + [0.]*10
+            msg.joint_velocity_lower, msg.joint_velocity_upper = [-2.]*6, [2.]*6
+            msg.joint_acceleration_bounded = [True]+[False]*5
+            msg.joint_acceleration_lower, msg.joint_acceleration_upper = [-60.]*6, [60.]*6
+            return NS(constraint=msg)
+        evaluation = self.node.evaluate_preview(self.cmd, self.preview_pose, rospy.Time(100), .02,
+                                                respond, return_evaluation=True)
+        with self.node._control_lock:
+            original = self.node.revalidate_cycle_preview(evaluation, self.cmd, self.preview_pose, .02)
+            shorter = self.node.revalidate_cycle_preview(evaluation, self.cmd, self.preview_pose, .016)
+        self.assertTrue(original.valid, original.reason)
+        self.assertTrue(shorter.valid, shorter.reason)
+        self.assertAlmostEqual(original.rates[0], .1)
+        self.assertAlmostEqual(shorter.rates[0], .096)
+        self.assertEqual(evaluation.constraint.servo_dt_sec, .02)
+        self.assertEqual(self.pub.messages, [])
+        self.node.preview_mode = "observe"
+        self.node.latest_preview_evaluation = evaluation
+        self.node.raw_spherical_cmd_callback(self.cmd)
+        with patch.object(self.node._cycle_projection_queries, "call",
+                          side_effect=lambda query, payload, timeout: query(payload)), \
+                patch.object(self.node, "_servo_dt_sec", return_value=.016):
+            self.node._servo_timer_callback(None)
+        self.assertAlmostEqual(self.node.latest_cycle_proposal.rates[0], .096)
+        self.assertAlmostEqual(self.pub.messages[-1].twist.linear.y, .06)
+        self.cmd.should_stop, self.cmd.stop_reason = True, "feedback stop"
+        with patch.object(self.node._cycle_projection_queries, "call",
+                          side_effect=lambda query, payload, timeout: query(payload)), \
+                patch.object(self.node, "_servo_dt_sec", return_value=.016):
+            self.node._servo_timer_callback(None)
+        self.assertTrue(self.node.latest_cycle_proposal.valid)
+        self.assertAlmostEqual(self.node.latest_cycle_proposal.rates[0], .096)
+        self.assert_zero()
+
+    def test_cycle_optimizer_timeout_keeps_zero_and_does_not_start_replacements(self):
+        self.node.preview_mode = "observe"
+        self.node.raw_spherical_cmd_callback(self.cmd)
+        self.cmd.should_stop = True
+        self.node.latest_preview_evaluation = NS(test_model=True)
+        entered, release = threading.Event(), threading.Event()
+        def blocked(*args):
+            entered.set()
+            release.wait()
+            return NS(valid=True, reason="late", rates=(.1, 0.))
+        try:
+            with patch.object(self.node, "revalidate_cycle_preview", side_effect=blocked) as solve:
+                self.node._servo_timer_callback(None)
+                self.assertTrue(entered.is_set())
+                self.assertFalse(release.is_set())
+                self.assertIsNone(self.node.latest_cycle_proposal)
+                self.assert_zero()
+                self.node._servo_timer_callback(None)
+                self.assertEqual(solve.call_count, 1)
+                self.assert_zero()
+        finally:
+            release.set()
+            self.assertTrue(self.node._cycle_projection_queries._active["done"].wait(1))
+        self.assertIsNone(self.node.latest_cycle_proposal)
+
+    def test_actual_cycle_rejects_dt_dependent_affine_bias(self):
+        pose = self.preview_pose.copy()
+        pose[0, 3] = .5
+        self.preview_pose[0, 3] = .5
+        self.node.radial_i_gain = .1
+        evaluation = self.node.evaluate_preview(self.cmd, pose, rospy.Time(100), .02,
+            lambda trace: NS(constraint=preview_response(trace)), return_evaluation=True)
+        with self.node._control_lock:
+            with self.assertRaisesRegex(ValueError, "affine model changed"):
+                self.node.revalidate_cycle_preview(evaluation, self.cmd, pose, .03)
+        self.assertEqual(self.node._radial_integral_error, 0.)
+        self.assertEqual(self.pub.messages, [])
+
     def test_observe_scheduler_queries_raw_when_final_is_stopped_without_motion(self):
         self.node.preview_mode = "observe"
         raw = copy.deepcopy(self.cmd)
