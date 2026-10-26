@@ -9,7 +9,7 @@ import math
 
 import numpy as np
 
-from kinematic_projection import project_spherical_command
+from kinematic_projection import project_feasible_spherical_command
 
 
 @dataclass(frozen=True)
@@ -64,13 +64,15 @@ class KinematicConstraintGate:
         scales = np.asarray(msg.rate_scales, dtype=float)
         original = np.asarray(rates, dtype=float) / scales
         origin = np.asarray(msg.linearization_rates, dtype=float) / scales
-        if np.linalg.norm(original-origin) > self.max_normalized_delta:
+        if np.linalg.norm(original-origin) > self.max_normalized_delta + 1e-12:
             return ProjectionProposal(reason="constraint_candidate_outside_local_radius")
         try:
-            projected, norm = project_spherical_command(original, msg.a, msg.c)
+            projected, norm = project_feasible_spherical_command(
+                original, msg.a, msg.c, local_center=origin,
+                local_radius=self.max_normalized_delta)
         except ValueError as exc:
             return ProjectionProposal(reason="constraint_projection_unavailable:" + str(exc))
-        if np.linalg.norm(projected-origin) > self.max_normalized_delta:
+        if np.linalg.norm(projected-origin) > self.max_normalized_delta + 1e-9:
             return ProjectionProposal(reason="constraint_projection_outside_local_radius")
         return ProjectionProposal(True, "advisory_projection", tuple(projected * scales),
                                   norm, int(msg.planner_tick))

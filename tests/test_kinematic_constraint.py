@@ -111,11 +111,19 @@ class ConstraintTests(unittest.TestCase):
     def test_both_candidate_and_projected_point_stay_local(self):
         self.assertIn("candidate_outside", self.propose(rates=[.2, -.2]).reason)
         self.gate.update(constraint(a=[.1, 0]), wall_now=100)
-        self.assertIn("projection_outside", self.propose().reason)
+        self.assertIn("projection_unavailable", self.propose().reason)
 
     def test_stops_cannot_be_turned_into_escape_commands(self):
         self.assertIn("stop", self.propose(should_stop=True).reason)
         self.assertIn("state_unavailable", self.propose(state_allows_motion=False).reason)
+
+    def test_joint_local_projection_recovers_feasible_advice(self):
+        # Candidate on the local ball; the plain half-space projection is
+        # outside it. The circle/half-space intersection is still feasible.
+        self.gate.update(constraint(c=1.2, m_min=1.7), wall_now=100)
+        result = self.propose(rates=[.1, -.175])
+        self.assertTrue(result.valid, result.reason)
+        np.testing.assert_allclose(result.rates, [.12, -.185], atol=1e-8)
 
     def test_update_owns_sample_and_explicit_recovery(self):
         msg = constraint()

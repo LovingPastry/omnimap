@@ -13,7 +13,7 @@
 | `info_flow/info_flow_planning_node.py` | 接收状态与约束反馈，记录投影建议，发布原始 Fisher 命令和最终命令 |
 | `info_flow/kinematic_feedback.py` | 双时钟超时、frame/指标/状态校验、持续奇异减速及停车 |
 | `info_flow/kinematic_constraint.py` | 关联最近执行命令，验证约束来源/新鲜度/参考球/局部范围，计算只读投影建议 |
-| `info_flow/kinematic_projection.py` | 二维最小半空间投影和实际 Servo 局部速度模型；投影尚未接入控制 |
+| `info_flow/kinematic_projection.py` | 二维半空间、线性限值和仿射范数限值的联合最小投影，以及 Servo 局部速度模型；尚未接入控制 |
 | `info_flow/info_flow_servo_runtime.py` | 生成相机参考点 Twist，发布实际命令追踪，失效零速 |
 | `ros_ws/src/omnimap_kinematics` | 执行侧桥接、MoveIt RobotState monitor 与二维构型导数诊断 |
 
@@ -46,7 +46,8 @@ monitor 使用实际 Servo 模型、group、关节顺序及 tool0 Jacobian，计
 接口、尺度、失效条件见 [二维构型约束诊断](ur5_nbv_kinematic_constraint.md)。
 Planning 已订阅该接口，默认 `--kinematic_projection_mode observe` 只计算/记录建议，不修改命令；
 `off` 可关闭建议计算。消费者的双时钟、命令来源、参考球及局部范围检查已有回调测试。
-仍需现场标定、速度/加速度约束联合处理、停车后的模型恢复和非零闭环验收，再接入控制。
+联合求解器已支持线性关节限值、仿射线速度/每周期速度变化限值和局部球；Planning 当前仅接入半空间与局部球。
+执行侧尚未把速度/加速度可行集写入反馈消息。仍需完成该数据链、现场标定、停车后的模型恢复和非零闭环验收，再接入控制。
 状态减速不能替代这一目标，status code 不能推导 a。
 无效/不可行方向必须零速或重新规划，不复用旧方向；加入速度等额外约束后需联合求解，
 投影后任意裁剪可能破坏半空间约束。

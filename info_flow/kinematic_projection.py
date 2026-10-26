@@ -1,6 +1,107 @@
-"""Pure NumPy half-space projection of two spherical rates."""
+"""Two-dimensional spherical-rate projections and frozen Servo models."""
 
 import numpy as np
+
+
+def project_feasible_spherical_command(u_info, a, c, *, linear_matrix=None,
+                                       linear_bounds=None, norm_limits=(),
+                                       local_center=None, local_radius=None):
+    """Minimize ||u-u_info|| over one simultaneous convex feasible set.
+
+    All matrices act on dimensionless rates u. Linear rows mean L u <= h
+    (e.g. both signs of joint velocity bounds). Each norm limit is (M, b, r)
+    and means ||M u+b|| <= r (camera speed or per-cycle velocity change).
+    The optional local ball bounds the validity of the execution-side model.
+    No post-solve clipping is permitted. Invalid, infeasible or unverified
+    solutions raise ValueError; callers must not execute a partial result.
+    """
+    # Retain exact, dependency-free handling of the basic half-space.
+    basic, _ = project_spherical_command(u_info, a, c)
+    u = np.asarray(u_info, dtype=float)
+    rows = [-np.asarray(a, dtype=float)]
+    bounds = [-float(c)]
+    if (linear_matrix is None) != (linear_bounds is None):
+        raise ValueError("linear matrix and bounds must be supplied together")
+    if linear_matrix is not None:
+        matrix = np.asarray(linear_matrix, dtype=float)
+        rhs = np.asarray(linear_bounds, dtype=float)
+        if (matrix.ndim != 2 or matrix.shape[1] != 2 or rhs.shape != (len(matrix),)
+                or not np.all(np.isfinite(matrix)) or not np.all(np.isfinite(rhs))):
+            raise ValueError("invalid linear feasible set")
+        rows.extend(matrix)
+        bounds.extend(rhs)
+    balls = list(norm_limits)
+    if (local_center is None) != (local_radius is None):
+        raise ValueError("local center and radius must be supplied together")
+    if local_center is not None:
+        center = np.asarray(local_center, dtype=float)
+        if center.shape != (2,):
+            raise ValueError("local center must contain two rates")
+        balls.append((np.eye(2), -center, local_radius))
+    # Normalize constraints to keep physical units out of solver tolerances.
+    linear = []
+    for row, bound in zip(rows, bounds):
+        scale = np.linalg.norm(row)
+        if scale == 0:
+            if bound < 0:
+                raise ValueError("infeasible constant linear constraint")
+            continue
+        if not np.isfinite(scale):
+            raise ValueError("invalid linear constraint scale")
+        linear.append((row / scale, bound / scale))
+    quadratic = []
+    for matrix, bias, radius in balls:
+        matrix, bias = np.asarray(matrix, dtype=float), np.asarray(bias, dtype=float)
+        radius = float(radius)
+        if (matrix.ndim != 2 or matrix.shape[1] != 2 or matrix.shape[0] == 0
+                or bias.shape != (matrix.shape[0],) or not np.all(np.isfinite(matrix))
+                or not np.all(np.isfinite(bias)) or not np.isfinite(radius) or radius <= 0):
+            raise ValueError("norm constraints require finite matrices and positive radii")
+        matrix, bias = matrix / radius, bias / radius
+        if not np.all(np.isfinite(matrix)) or not np.all(np.isfinite(bias)):
+            raise ValueError("invalid normalized norm constraint")
+        quadratic.append((matrix, bias))
+
+    def values(x):
+        return np.asarray([bound - row @ x for row, bound in linear]
+                          + [1.0 - np.dot(m @ x + b, m @ x + b) for m, b in quadratic])
+
+    def jacobian(x):
+        return np.asarray([-row for row, _ in linear]
+                          + [-2.0 * m.T @ (m @ x + b) for m, b in quadratic]).reshape(-1, 2)
+
+    # If the half-space optimum meets all other limits it is the joint optimum.
+    if np.all(values(basic) >= 0):
+        return basic, float(np.linalg.norm(basic-u))
+    try:
+        from scipy.optimize import minimize, nnls
+    except ImportError as exc:
+        raise ValueError("joint projection requires scipy") from exc
+    result = minimize(lambda x: .5 * np.dot(x-u, x-u), basic,
+                      jac=lambda x: x-u, method="SLSQP",
+                      constraints=[dict(type="ineq", fun=values, jac=jacobian)],
+                      options=dict(ftol=1e-10, maxiter=100))
+    point = np.asarray(result.x)
+    slack = values(point)
+    if (not result.success or not np.all(np.isfinite(point))
+            or not np.all(np.isfinite(slack)) or np.any(slack < -1e-9)):
+        raise ValueError("joint projection infeasible or solver failed")
+    # Independently check convex KKT stationarity and complementarity. A solver
+    # success flag alone is not evidence of a minimum-distance feasible result.
+    active = slack <= 1e-7
+    gradient = point-u
+    if np.any(active):
+        try:
+            multipliers, residual = nnls(jacobian(point)[active].T, gradient)
+        except (ValueError, RuntimeError) as exc:
+            raise ValueError("projection optimality check failed") from exc
+        complementarity = np.max(np.abs(multipliers * slack[active]))
+    else:
+        residual, complementarity = np.linalg.norm(gradient), 0.0
+    tolerance = 1e-7 * (1.0 + np.linalg.norm(gradient))
+    if not np.isfinite(residual) or residual > tolerance or complementarity > tolerance:
+        raise ValueError("projection optimum not verified")
+    return point, float(np.linalg.norm(gradient))
 
 
 def project_spherical_command(u_info, a, c):
