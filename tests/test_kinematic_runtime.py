@@ -20,7 +20,7 @@ import tf2_ros
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "info_flow")]
 
-from omnimap_msgs.msg import KinematicStatus, SphericalCommand
+from omnimap_msgs.msg import KinematicStatus, SphericalCommand, KinematicConstraint
 from kinematic_constraint import KinematicConstraintGate
 from kinematic_feedback import KinematicFeedbackGate
 from test_kinematic_feedback import feedback
@@ -201,6 +201,25 @@ class PlanningTests(unittest.TestCase):
         self.assertFalse(node.spherical_cmd_pub.messages[-1].should_stop)
 
 
+def preview_response(trace):
+    result = KinematicConstraint()
+    result.valid, result.reason = True, "advisory_preview:ok:advisory_only"
+    result.header.stamp, result.header.frame_id = rospy.Time(100), "base_link"
+    result.source_frame, result.task_frame = "base_link", "tool0"
+    result.joint_stamp = rospy.Time(100)
+    result.twist_stamp, result.twist_seq = trace.command.header.stamp, trace.command.header.seq
+    result.command_stamp = trace.command_stamp
+    result.planner_tick, result.model_version = trace.planner_tick, trace.model_version
+    result.reference_radius, result.reference_scene_center = trace.reference_radius, trace.reference_scene_center
+    result.linearization_rates, result.rate_scales = trace.spherical_rates, [.1, .1]
+    result.camera_linear_matrix = (np.asarray(trace.camera_rate_matrix).reshape(6, 2)[:3]*.1).reshape(-1)
+    result.camera_linear_bias, result.previous_linear = trace.camera_bias[:3], trace.previous_linear
+    result.servo_dt_sec = trace.servo_dt_sec
+    result.linear_speed_limit, result.linear_step_limit = trace.linear_speed_limit, trace.linear_step_limit
+    result.linear_deadband = trace.linear_deadband
+    return result
+
+
 class ServoTests(unittest.TestCase):
     def setUp(self):
         self.time_patch = patch.object(rospy.Time, "now", return_value=rospy.Time(100))
@@ -317,11 +336,15 @@ class ServoTests(unittest.TestCase):
         self.cmd.should_stop = True
         old_linear = self.node._last_linear_cmd.copy()
         old_angular = self.node._last_angular_cmd.copy()
-        response = object()
-        query = Mock(return_value=NS(constraint=response))
+        response = []
+        def respond(trace):
+            value = preview_response(trace)
+            response.append(value)
+            return NS(constraint=value)
+        query = Mock(side_effect=respond)
         for _ in range(2):
             self.assertIs(self.node.evaluate_preview(
-                self.cmd, pose, rospy.Time(100), .02, query), response)
+                self.cmd, pose, rospy.Time(100), .02, query), response[-1])
         first, second = [call.args[0] for call in query.call_args_list]
         self.assertEqual(first, second)
         self.assertEqual(first.reason, "preview")
@@ -339,6 +362,36 @@ class ServoTests(unittest.TestCase):
             self.node._servo_timer_callback(None)
         self.assertEqual(first.command.twist, self.pub.messages[-1].twist)
         self.assertGreater(self.node._radial_integral_error, .01)
+
+    def test_preview_rejects_wrong_response_and_changed_controller(self):
+        pose = np.eye(4)
+        pose[0, 3] = .6
+        for field, value, reason in (("planner_tick", 41, "provenance"),
+                ("reference_radius", .7, "model mismatch"),
+                ("previous_linear", [1., 0., 0.], "model mismatch"),
+                ("joint_stamp", rospy.Time(99), "stale"),
+                ("reason", "ok:advisory_only", "response invalid")):
+            def respond(trace):
+                result = preview_response(trace)
+                setattr(result, field, value)
+                return NS(constraint=result)
+            with self.assertRaisesRegex(ValueError, reason):
+                self.node.evaluate_preview(self.cmd, pose, rospy.Time(100), .02, respond)
+        def changed(trace):
+            self.node._last_angular_cmd[0] = .01
+            return NS(constraint=preview_response(trace))
+        with self.assertRaisesRegex(ValueError, "controller state changed"):
+            self.node.evaluate_preview(self.cmd, pose, rospy.Time(100), .02, changed)
+        self.assertEqual(self.pub.messages, [])
+        def new_cycle(trace):
+            self.node._control_generation += 1
+            return NS(constraint=preview_response(trace))
+        with self.assertRaisesRegex(ValueError, "controller state changed"):
+            self.node.evaluate_preview(self.cmd, pose, rospy.Time(100), .02, new_cycle)
+        with patch("time.monotonic", side_effect=[100., 100.3]):
+            with self.assertRaisesRegex(ValueError, "deadline exceeded"):
+                self.node.evaluate_preview(self.cmd, pose, rospy.Time(100), .02,
+                                          lambda trace: NS(constraint=preview_response(trace)))
 
     def test_preview_rejects_stale_frame_and_nonaffine_output_before_query(self):
         pose = np.eye(4)

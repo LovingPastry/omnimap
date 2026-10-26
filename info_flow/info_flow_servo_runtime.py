@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import os
 import time
 import threading
@@ -63,6 +64,7 @@ class ServoStats:
 class InfoFlowServoRuntime:
     def __init__(self, args):
         self._control_lock = threading.RLock()
+        self._control_generation = 0
         rospy.init_node("info_flow_servo_runtime", anonymous=True)
         spherical_command_msg = import_spherical_command_msg()
 
@@ -293,6 +295,7 @@ class InfoFlowServoRuntime:
         query is an EvaluateKinematicModel service proxy. Calling this method
         does not authorize use of its response and is not on the Servo timer.
         """
+        cmd = copy.deepcopy(cmd)
         now = rospy.Time.now().to_sec()
         for stamp in (cmd.header.stamp, pose_stamp):
             age = now-stamp.to_sec()
@@ -301,6 +304,8 @@ class InfoFlowServoRuntime:
         if cmd.header.frame_id.lstrip("/") != self.world_frame.lstrip("/"):
             raise ValueError("preview command frame mismatch")
         with self._control_lock:
+            state_before = (self._radial_integral_error, self._last_linear_cmd.copy(),
+                            self._last_angular_cmd.copy(), self._control_generation)
             candidate = self._compute_servo_candidate(cmd, current_c2w, servo_dt_sec)
         msg = TwistStamped()
         msg.header.stamp, msg.header.frame_id = pose_stamp, self.cmd_frame
@@ -310,7 +315,59 @@ class InfoFlowServoRuntime:
                                       rate_model=candidate.rate_model, rate_limits=candidate.rate_limits)
         if not trace.rate_model_valid:
             raise ValueError("preview model unavailable:" + trace.rate_model_reason)
-        return query(trace).constraint
+        started = time.monotonic()
+        response = query(trace).constraint
+        if time.monotonic()-started > self.pose_stale_timeout_sec:
+            raise ValueError("preview response deadline exceeded")
+        self._validate_preview_response(trace, response)
+        with self._control_lock:
+            if (self._control_generation != state_before[3]
+                    or self._radial_integral_error != state_before[0]
+                    or not np.array_equal(self._last_linear_cmd, state_before[1])
+                    or not np.array_equal(self._last_angular_cmd, state_before[2])):
+                raise ValueError("preview controller state changed during query")
+        return response
+
+    def _validate_preview_response(self, trace, response):
+        """Associate an advisory response; this does not authorize execution."""
+        if not response.valid or not response.reason.startswith("advisory_preview:"):
+            raise ValueError("preview response invalid:" + response.reason)
+        if (response.header.frame_id.lstrip("/") != self.world_frame.lstrip("/")
+                or response.source_frame.lstrip("/") != self.world_frame.lstrip("/")
+                or response.task_frame != "tool0"
+                or response.planner_tick != trace.planner_tick
+                or response.model_version != trace.model_version
+                or response.command_stamp != trace.command_stamp
+                or response.twist_stamp != trace.command.header.stamp
+                or response.twist_seq != trace.command.header.seq):
+            raise ValueError("preview response provenance mismatch")
+        now = rospy.Time.now().to_sec()
+        for stamp in (response.header.stamp, response.joint_stamp, response.twist_stamp,
+                      response.command_stamp):
+            age = now-stamp.to_sec()
+            if stamp.is_zero() or age < -.05 or age > self.pose_stale_timeout_sec:
+                raise ValueError("preview response is stale")
+        if abs((response.joint_stamp-response.twist_stamp).to_sec()) > self.pose_stale_timeout_sec:
+            raise ValueError("preview response joint skew")
+        scales = np.asarray(response.rate_scales)
+        if scales.shape != (2,) or not np.all(np.isfinite(scales)) or np.any(scales <= 0):
+            raise ValueError("preview response rate scales invalid")
+        expected_matrix = np.asarray(trace.camera_rate_matrix).reshape(6, 2)[:3]*scales
+        pairs = ((response.reference_radius, trace.reference_radius),
+                 (response.reference_scene_center, trace.reference_scene_center),
+                 (response.linearization_rates, trace.spherical_rates),
+                 (response.camera_linear_matrix, expected_matrix.reshape(-1)),
+                 (response.camera_linear_bias, trace.camera_bias[:3]),
+                 (response.previous_linear, trace.previous_linear),
+                 (response.servo_dt_sec, trace.servo_dt_sec),
+                 (response.linear_speed_limit, trace.linear_speed_limit),
+                 (response.linear_step_limit, trace.linear_step_limit),
+                 (response.linear_deadband, trace.linear_deadband))
+        for actual, expected in pairs:
+            actual, expected = np.asarray(actual), np.asarray(expected)
+            if (actual.shape != expected.shape or not np.all(np.isfinite(actual))
+                    or not np.allclose(actual, expected, rtol=0, atol=1e-12)):
+                raise ValueError("preview response model mismatch")
 
     def _publish_twist(self, *, cmd=None, stamp=None, linear_cmd=None,
                        angular_cmd=None, reason, rate_model=None, rate_limits=None):
@@ -507,6 +564,7 @@ class InfoFlowServoRuntime:
 
     def _servo_timer_callback(self, _event) -> None:
         with self._control_lock:
+            self._control_generation += 1
             self._servo_step()
 
     def _servo_step(self) -> None:
