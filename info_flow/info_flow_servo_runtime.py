@@ -15,7 +15,7 @@ from geometry_msgs.msg import TwistStamped
 from omnimap_msgs.msg import ServoTwistTrace
 from omnimap_msgs.srv import EvaluateKinematicModel
 from scipy.spatial.transform import Rotation as R
-from kinematic_projection import camera_rate_model
+from kinematic_projection import camera_rate_model, unclipped_preview_rate_model
 from kinematic_constraint import KinematicConstraintGate
 from bounded_query import SingleFlightQuery
 from preview_joint_state import PreviewJointState
@@ -410,10 +410,13 @@ class InfoFlowServoRuntime:
             candidate = self._compute_servo_candidate(cmd, current_c2w, servo_dt_sec)
         msg = TwistStamped()
         msg.header.stamp, msg.header.frame_id = pose_stamp, self.cmd_frame
-        msg.twist.linear.x, msg.twist.linear.y, msg.twist.linear.z = candidate.linear
-        msg.twist.angular.x, msg.twist.angular.y, msg.twist.angular.z = candidate.angular
+        preview_model = unclipped_preview_rate_model(candidate.rate_model, [cmd.theta_rate, cmd.phi_rate])
+        _, _, matrix, bias = preview_model
+        mathematical = matrix @ np.asarray([cmd.theta_rate, cmd.phi_rate]) + bias
+        msg.twist.linear.x, msg.twist.linear.y, msg.twist.linear.z = mathematical[:3]
+        msg.twist.angular.x, msg.twist.angular.y, msg.twist.angular.z = mathematical[3:]
         trace = self._make_twist_trace(msg, cmd=cmd, reason="preview",
-                                      rate_model=candidate.rate_model, rate_limits=candidate.rate_limits)
+                                      rate_model=preview_model, rate_limits=candidate.rate_limits)
         if not trace.rate_model_valid:
             raise ValueError("preview model unavailable:" + trace.rate_model_reason)
         started = time.monotonic()
@@ -459,7 +462,8 @@ class InfoFlowServoRuntime:
         self._preview_joints.validate(evaluation.constraint, ros_now=rospy.Time.now().to_sec(),
                                       wall_now=time.monotonic(), timeout=self.pose_stale_timeout_sec)
         current = self._compute_servo_candidate(raw_cmd, current_pose, servo_dt_sec)
-        valid, reason, matrix, bias = current.rate_model
+        valid, reason, matrix, bias = unclipped_preview_rate_model(
+            current.rate_model, [raw_cmd.theta_rate, raw_cmd.phi_rate])
         if (not valid or not np.allclose(matrix.reshape(-1), evaluation.trace.camera_rate_matrix,
                                         rtol=0, atol=1e-9)
                 or not np.allclose(bias, evaluation.trace.camera_bias, rtol=0, atol=1e-9)):

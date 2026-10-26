@@ -1,6 +1,6 @@
 # Companion to the unmodified TwistStamped control interface. rospy assigns
 # Header.seq itself, so it cannot carry the Planning tick reliably.
-# command.header.seq retains the actual outgoing Twist wire sequence (the
+# For reason=motion, command.header.seq retains the outgoing wire sequence (the
 # companion is filled after publishing the Twist), alongside its sample stamp.
 std_msgs/Header header
 uint32 planner_tick
@@ -10,7 +10,9 @@ geometry_msgs/TwistStamped command
 string reason
 # Frozen-state camera-reference affine rate model, same frame as command.
 # Row-major 6x2 matrix: [linear; angular] = B * physical_rates + bias.
-# Invalid when linear clipping/slew/deadband modifies the affine command.
+# For actual motion, invalid when linear limits modify the affine command.
+# For reason=preview, command is the UNCLIPPED mathematical candidate and may
+# violate its limits. Its seq is a request identity, not a published wire seq.
 bool rate_model_valid
 string rate_model_reason
 float64 reference_radius

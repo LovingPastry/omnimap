@@ -147,6 +147,18 @@ class RateModelTests(unittest.TestCase):
             with self.subTest(fields=fields):
                 self.assertFalse(self.model(**fields)[0])
 
+    def test_unclipped_preview_does_not_promote_invalid_execution_models(self):
+        from kinematic_projection import unclipped_preview_rate_model
+        source = self.model(linear_speed_limit=.01)
+        self.assertFalse(source[0])
+        preview = unclipped_preview_rate_model(source, [.1, -.05])
+        self.assertTrue(preview[0])
+        self.assertIn("unclipped_preview", preview[1])
+        self.assertFalse(source[0])
+        for invalid in (self.model(radius=0), self.model(linear_command=[0, 0, 0]),
+                        (False, "unrecognized", source[2], source[3])):
+            self.assertFalse(unclipped_preview_rate_model(invalid, [.1, -.05])[0])
+
     def test_disabled_limits_follow_runtime_semantics(self):
         self.assertTrue(self.model(linear_speed_limit=0, linear_step_limit=0, linear_deadband=0)[0])
 

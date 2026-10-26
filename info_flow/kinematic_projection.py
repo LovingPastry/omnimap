@@ -165,3 +165,20 @@ def camera_rate_model(*, radius, e_theta, e_phi, rates, radial_velocity,
     if not np.allclose(raw, actual, rtol=1e-10, atol=1e-12):
         return False, "rate_model_output_mismatch", matrix, b
     return True, "ok", matrix, b
+
+
+def unclipped_preview_rate_model(rate_model, rates):
+    """Affine candidate before linear limits, exclusively for non-actuating use.
+
+    Speed/slew/deadband belong in the joint feasible set. A clipped source
+    command is not an affine execution trace; its pre-limit mathematical map
+    can still be queried, then projected and checked against actual output.
+    """
+    valid, reason, matrix, bias = rate_model
+    allowed = {"linear_speed_limit_active", "linear_slew_limit_active", "linear_deadband_active"}
+    matrix, bias, rates = np.asarray(matrix), np.asarray(bias), np.asarray(rates)
+    if (not valid and reason not in allowed or matrix.shape != (6, 2)
+            or bias.shape != (6,) or rates.shape != (2,)
+            or not all(np.all(np.isfinite(x)) for x in (matrix, bias, rates))):
+        return False, "preview_affine_model_unavailable:" + reason, matrix, bias
+    return True, "unclipped_preview:" + reason, matrix.copy(), bias.copy()

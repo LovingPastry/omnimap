@@ -1,6 +1,8 @@
 # Non-actuating candidate evaluation. This is not an execution authorization.
 # reason must be "preview"; command is the reconstructed candidate Twist,
-# never a claim that it has been published. All timestamps must be fresh.
+# never a claim that it has been published. Linear limits may be violated by
+# this mathematical candidate; the consumer must solve feasibility and recheck
+# actual output. All timestamps must be fresh.
 omnimap_msgs/ServoTwistTrace candidate
 ---
 omnimap_msgs/KinematicConstraint constraint

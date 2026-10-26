@@ -266,6 +266,15 @@ class ChainTest(unittest.TestCase):
         np.testing.assert_allclose(result.joint_rate_matrix, baseline.joint_rate_matrix)
         np.testing.assert_allclose(result.joint_rate_bias, baseline.joint_rate_bias)
         self.assertGreater(result.joint_stamp.to_sec(), baseline.joint_stamp.to_sec())
+        # A mathematical preview may violate a limit; the service returns its
+        # map and limits, while the consumer must solve feasibility. Never send
+        # this candidate to a control publisher.
+        candidate.linear_speed_limit = .001
+        candidate.rate_model_reason = "unclipped_preview:linear_speed_limit_active"
+        refresh()
+        limited = query(candidate).constraint
+        self.assertTrue(limited.valid, limited.reason)
+        self.assertEqual(limited.linear_speed_limit, .001)
         candidate.command.header.stamp = rospy.Time(1)
         self.assertIn("preview_stale", query(candidate).constraint.reason)
         refresh()

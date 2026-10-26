@@ -9,7 +9,7 @@ import math
 
 import numpy as np
 
-from kinematic_projection import project_feasible_spherical_command
+from kinematic_projection import project_feasible_spherical_command, project_spherical_command
 
 
 @dataclass(frozen=True)
@@ -108,7 +108,22 @@ class KinematicConstraintGate:
                 source_velocity = camera @ origin + bias
                 speed = np.linalg.norm(source_velocity)
                 if speed <= msg.linear_deadband:
-                    raise ValueError("source velocity is inside deadband")
+                    if self.command["kind"] != "preview":
+                        raise ValueError("source velocity is inside deadband")
+                    # A stopped mathematical preview may start inside the
+                    # nonconvex deadband. Pick a supporting direction from the
+                    # barrier-preferred command, then solve all constraints.
+                    preferred, _ = project_spherical_command(original, msg.a, msg.c)
+                    source_velocity = camera @ preferred + bias
+                    speed = np.linalg.norm(source_velocity)
+                    if speed <= 1e-12:
+                        source_velocity = camera @ np.asarray(msg.a)
+                        speed = np.linalg.norm(source_velocity)
+                    if speed <= 1e-12:
+                        source_velocity = camera[:, np.argmax(np.linalg.norm(camera, axis=0))]
+                        speed = np.linalg.norm(source_velocity)
+                    if speed <= 1e-12:
+                        raise ValueError("preview has no linear deadband escape direction")
                 normal = source_velocity / speed
                 linear_matrix = np.vstack((linear_matrix, -normal @ camera))
                 linear_bounds = np.r_[linear_bounds, normal @ bias-msg.linear_deadband]

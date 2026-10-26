@@ -408,6 +408,49 @@ class ServoTests(unittest.TestCase):
                 self.node.evaluate_preview(self.cmd, pose, rospy.Time(100), .02,
                                           lambda trace: NS(constraint=preview_response(trace)))
 
+    def test_zero_candidate_can_propose_deadband_escape_without_moving(self):
+        self.cmd.theta_rate = 0.
+        self.node.linear_deadband = .005
+        def respond(trace):
+            msg = preview_response(trace)
+            msg.threshold_configured = True
+            msg.a, msg.c, msg.sigma_min, msg.m_min, msg.alpha = [1., 0.], .1, .5, .6, 1.
+            msg.joint_velocity_lower, msg.joint_velocity_upper = [-2.]*6, [2.]*6
+            return NS(constraint=msg)
+        evaluation = self.node.evaluate_preview(self.cmd, self.preview_pose, rospy.Time(100), .02,
+                                                respond, return_evaluation=True)
+        self.assertIn("linear_deadband_active", evaluation.trace.rate_model_reason)
+        with self.node._control_lock:
+            proposal = self.node.revalidate_cycle_preview(evaluation, self.cmd, self.preview_pose, .02)
+        self.assertTrue(proposal.valid, proposal.reason)
+        self.assertAlmostEqual(proposal.rates[0], .01)
+        self.assertEqual(self.pub.messages, [])
+        self.assertEqual(self.trace_pub.messages, [])
+
+    def test_clipped_candidates_project_before_runtime_output_check(self):
+        def respond(trace):
+            msg = preview_response(trace)
+            msg.threshold_configured = True
+            msg.a, msg.c, msg.sigma_min, msg.m_min, msg.alpha = [1., 0.], .8, .5, 1.3, 1.
+            msg.joint_velocity_lower, msg.joint_velocity_upper = [-2.]*6, [2.]*6
+            return NS(constraint=msg)
+        for limit in ("speed", "slew"):
+            self.node.linear_vel_max = .054 if limit == "speed" else .1
+            self.node.linear_accel_max = 2.7 if limit == "slew" else 0.
+            candidate = self.node._compute_servo_candidate(self.cmd, self.preview_pose, .02)
+            self.assertFalse(candidate.rate_model[0])
+            evaluation = self.node.evaluate_preview(self.cmd, self.preview_pose, rospy.Time(100), .02,
+                respond, return_evaluation=True)
+            self.assertTrue(evaluation.trace.rate_model_valid)
+            self.assertAlmostEqual(evaluation.trace.command.twist.linear.y, .06)
+            self.assertAlmostEqual(candidate.linear[1], .054)
+            with self.node._control_lock:
+                proposal = self.node.revalidate_cycle_preview(evaluation, self.cmd, self.preview_pose, .02)
+            self.assertTrue(proposal.valid, proposal.reason)
+            self.assertAlmostEqual(proposal.rates[0], .09)
+        self.assertEqual(self.pub.messages, [])
+        self.assertEqual(self.trace_pub.messages, [])
+
     def test_actual_cycle_rebuilds_joint_acceleration_bounds_without_actuation(self):
         def respond(trace):
             msg = preview_response(trace)
@@ -553,7 +596,7 @@ class ServoTests(unittest.TestCase):
                     lambda trace: NS(constraint=preview_response(trace)))
         self.assertEqual(self.pub.messages, [])
 
-    def test_preview_rejects_stale_frame_and_nonaffine_output_before_query(self):
+    def test_preview_rejects_stale_frame_and_invalid_model_before_query(self):
         pose = np.eye(4)
         pose[0, 3] = .6
         query = Mock()
@@ -564,8 +607,8 @@ class ServoTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "frame"):
             self.node.evaluate_preview(self.cmd, pose, rospy.Time(100), .02, query)
         self.cmd.header.frame_id = "base_link"
-        self.node.linear_accel_max = .001
-        with self.assertRaisesRegex(ValueError, "linear_slew_limit_active"):
+        self.cmd.theta_rate = float("nan")
+        with self.assertRaisesRegex(ValueError, "nonfinite"):
             self.node.evaluate_preview(self.cmd, pose, rospy.Time(100), .02, query)
         query.assert_not_called()
         self.assertEqual(self.pub.messages, [])
