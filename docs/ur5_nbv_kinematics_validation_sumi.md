@@ -188,6 +188,7 @@ rostopic echo -n 5 /omnimap/bridge_status
 rostopic echo -n 5 /omnimap/kinematic_status
 rosbag record -O kinematic_chain.bag /omnimap/spherical_cmd_raw /omnimap/spherical_cmd \
   /omnimap/servo_twist_trace /omnimap/bridge_status /omnimap/kinematic_status /omnimap/kinematic_constraint \
+  /omnimap/kinematic_model \
   /servo_server/delta_twist_camera /servo_server/delta_twist_cmds \
   /servo_server/status /joint_states /tf /tf_static
 ```
@@ -265,3 +266,21 @@ Servo 现可选择 kinematic_preview_source=stream，在模型同采样位姿上
 ## 2026-10-26 非零投影执行验证
 
 servo_execution.test 在隔离 ROS master、合成 URDF 和 /test/* topic 下运行实际 enforce，非零输出经真实桥接进入独立 FK/Jacobian 理想关节积分模型。3 项通过：投影速率和速度上限、关节移动、MoveIt halt 持续零速及新模型恢复、policy stop 与关节断流恢复。测试加速度/阈值/时延裕量仅用于合成模型，没有驱动真实 UR5。当前代码侧核心闭环已接入，真实 m_min/执行预算标定和硬件验收未完成。
+
+## 2026-10-26 20:55 仅 monitor 的现场复核
+
+在既有驱动、MoveIt 和 Servo 上运行正式 diagnostics.launch，显式使用
+`start_bridge:=false start_servo:=false`，观察约 12 秒后退出本次节点。
+未启动控制 publisher、未发送零速或非零运动命令，也未修改控制器或伪造状态反馈。
+
+启动日志确认加载 `ur5_workcell`、`manipulator`，速度尺度 Dq 六项均为 π rad/s，
+关节顺序为 shoulder_pan、shoulder_lift、elbow、wrist_1、wrist_2、wrist_3。
+真实关节数据持续到达，但 221 条 KinematicModel 中有效数为 0：
+2 条为启动初期 joint_states_missing，219 条为 moveit_status_stale_or_invalid_stamp。
+本次未收到 `/servo_server/status`，故没有通过状态新鲜度门槛。
+这能证明真实模型可加载、真实关节可接收，不能证明模型/TF 对齐或闭环运动通过。
+失效模型中的空关节名、未置位边界等字段不可用来判断实际 RobotModel 缺少限值。
+
+本机证据为 `/tmp/omnimap_monitor_readonly_live.log` 和
+`/tmp/omnimap_monitor_readonly_live.json`。下一步应先核验 Servo 在该运行模式下何时发布状态，
+再进行现场监督下的零速链路验收；不得把缺失状态当成健康、延长超时来掩盖缺失，或填造状态值。
