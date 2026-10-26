@@ -1,6 +1,6 @@
 # OmniMap 计算端运动学反馈升级
 
-更新：2026-10-25。本文按当前源码维护，替代 2026-10-22 的实施前清单。
+更新：2026-10-26。本文按当前源码维护，替代 2026-10-22 的实施前清单。
 当前工作区为 `/home/sumi/experience/omnimap`，代码通过 Git 同步到算力端；部署路径可不同。
 执行端见 [sumi 升级](ur5_nbv_kinematics_upgrade_sumi.md)，模式参数、日志和测试命令见
 [本机验收](ur5_nbv_kinematics_validation_local.md)。
@@ -10,8 +10,9 @@
 | 源码 | 职责 |
 |---|---|
 | `ros_ws/src/omnimap_msgs/msg/KinematicStatus.msg` | 独立 14 字段反馈，消息已生成 |
-| `info_flow/info_flow_planning_node.py` | 接收反馈，发布原始 Fisher 命令和最终命令 |
+| `info_flow/info_flow_planning_node.py` | 接收状态与约束反馈，记录投影建议，发布原始 Fisher 命令和最终命令 |
 | `info_flow/kinematic_feedback.py` | 双时钟超时、frame/指标/状态校验、持续奇异减速及停车 |
+| `info_flow/kinematic_constraint.py` | 关联最近执行命令，验证约束来源/新鲜度/参考球/局部范围，计算只读投影建议 |
 | `info_flow/kinematic_projection.py` | 二维最小半空间投影和实际 Servo 局部速度模型；投影尚未接入控制 |
 | `info_flow/info_flow_servo_runtime.py` | 生成相机参考点 Twist，发布实际命令追踪，失效零速 |
 | `ros_ws/src/omnimap_kinematics` | 执行侧桥接、MoveIt RobotState monitor 与二维构型导数诊断 |
@@ -43,8 +44,9 @@ monitor 使用实际 Servo 模型、group、关节顺序及 tool0 Jacobian，计
 投影函数已拒绝非有限输入和不可用修正方向。新增独立 KinematicConstraint 消息，
 执行侧按实际 Servo 映射和同一 MoveIt 模型生成 a、drift；显式配置 m_min 后才生成有限 c。
 接口、尺度、失效条件见 [二维构型约束诊断](ur5_nbv_kinematic_constraint.md)。
-Planning 尚未订阅/使用该接口。仍需现场标定、消费者新鲜度与线性化范围验证、
-速度/加速度约束联合处理和停车后的模型恢复，再接入控制。
+Planning 已订阅该接口，默认 `--kinematic_projection_mode observe` 只计算/记录建议，不修改命令；
+`off` 可关闭建议计算。消费者的双时钟、命令来源、参考球及局部范围检查已有回调测试。
+仍需现场标定、速度/加速度约束联合处理、停车后的模型恢复和非零闭环验收，再接入控制。
 状态减速不能替代这一目标，status code 不能推导 a。
 无效/不可行方向必须零速或重新规划，不复用旧方向；加入速度等额外约束后需联合求解，
 投影后任意裁剪可能破坏半空间约束。
@@ -57,6 +59,7 @@ conda activate InfoFlow
 source /opt/ros/noetic/setup.bash
 source ros_ws/devel/setup.bash
 python tests/test_kinematic_feedback.py
+python tests/test_kinematic_constraint.py
 python tests/test_kinematic_runtime.py
 ```
 
@@ -71,3 +74,6 @@ python tests/test_kinematic_runtime.py
 
 Int8 status 没有源时间戳，不能声称与 Twist 属于同一 MoveIt 内部周期。
 2026-10-25 已有真实关节状态零速诊断；持续对齐、减速标定、硬件断链和非零闭环仍未验收。
+
+2026-10-26 再次只读检查本机默认 ROS master 不可访问，现场数据门槛仍未完成。
+这不影响代码与隔离回调验证，不能据此假定实机链路已经运行。

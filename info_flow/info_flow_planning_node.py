@@ -28,6 +28,7 @@ from omnimap.gaussian.renderer.nbv.policy_improvements import nbv_policy_from_co
 from omnimap.util.utils import get_section_logger
 from planner_snapshot import PlannerSnapshot, load_planner_snapshot_file
 from kinematic_feedback import KinematicFeedbackGate, MOVEIT_STATUS_TEXT
+from kinematic_constraint import KinematicConstraintGate
 
 
 @dataclass
@@ -52,10 +53,10 @@ class InfoFlowPlanningNode:
         rospy.init_node("info_flow_planning_node", anonymous=True)
         _, SphericalCommandMsg = import_omnimap_msgs()
         try:
-            from omnimap_msgs.msg import KinematicStatus
+            from omnimap_msgs.msg import KinematicStatus, KinematicConstraint
         except ImportError as exc:
             raise RuntimeError(
-                "KinematicStatus is unavailable; build ros_ws and source ros_ws/devel/setup.bash"
+                "KinematicStatus/KinematicConstraint is unavailable; build ros_ws and source ros_ws/devel/setup.bash"
             ) from exc
 
         self.args = args
@@ -81,6 +82,14 @@ class InfoFlowPlanningNode:
             deceleration_scale=float(args.kinematic_deceleration_scale),
         )
         self.kinematic_status_lock = threading.Lock()
+        self.kinematic_constraint_lock = threading.Lock()
+        self.kinematic_projection_mode = args.kinematic_projection_mode
+        self.kinematic_constraint_gate = KinematicConstraintGate(
+            source_frame=args.kinematic_source_frame, task_frame=args.kinematic_task_frame,
+            timeout_sec=args.kinematic_constraint_timeout_sec,
+            max_sample_skew_sec=args.kinematic_constraint_max_sample_skew_sec,
+            max_normalized_delta=args.kinematic_projection_local_radius,
+        )
         if rospy.resolve_name(args.raw_spherical_cmd_topic) == rospy.resolve_name(args.spherical_cmd_topic):
             raise ValueError("raw and execution spherical command topics must differ")
 
@@ -179,6 +188,10 @@ class InfoFlowPlanningNode:
             KinematicStatus,
             self.kinematic_status_callback,
             queue_size=1,
+        )
+        self.kinematic_constraint_sub = rospy.Subscriber(
+            args.kinematic_constraint_topic, KinematicConstraint,
+            self.kinematic_constraint_callback, queue_size=1,
         )
         self.timer = rospy.Timer(
             rospy.Duration(1.0 / max(self.planner_hz, 1e-6)),
@@ -473,6 +486,37 @@ class InfoFlowPlanningNode:
         )
         return snapshot
 
+    def kinematic_constraint_callback(self, msg):
+        with self.kinematic_constraint_lock:
+            self.kinematic_constraint_gate.update(msg, wall_now=time.monotonic())
+
+    def _observe_kinematic_projection(self, fields, decision):
+        if self.kinematic_projection_mode == "off":
+            return
+        # Evaluate after Fisher and status scaling, before publishing a new
+        # command replaces the model's known source. This never edits fields.
+        with self.kinematic_constraint_lock:
+            proposal = self.kinematic_constraint_gate.propose(
+                rates=[fields["theta_rate"], fields["phi_rate"]],
+                reference_radius=fields["reference_radius"],
+                reference_scene_center=fields["reference_scene_center"],
+                model_version=fields["model_version"], should_stop=fields["should_stop"],
+                state_allows_motion=not decision.should_stop,
+                ros_now=rospy.Time.now().to_sec(), wall_now=time.monotonic(),
+            )
+            feedback = self.kinematic_constraint_gate.latest
+        self.profile_logger.info(
+            "kinematic_projection: mode=observe tick=%d source_tick=%d valid=%s reason=%s "
+            "feedback_stamp=%.9f joint_stamp=%.9f twist_stamp=%.9f "
+            "candidate=[%.9g %.9g] proposed=[%.9g %.9g] correction_norm=%.9g",
+            fields["planner_tick"], int(getattr(feedback, "planner_tick", 0)),
+            proposal.valid, proposal.reason,
+            feedback.header.stamp.to_sec() if feedback else 0.0,
+            feedback.joint_stamp.to_sec() if feedback else 0.0,
+            feedback.twist_stamp.to_sec() if feedback else 0.0,
+            fields["theta_rate"], fields["phi_rate"], *proposal.rates, proposal.correction_norm,
+        )
+
     def _publish_spherical_command(
         self,
         *,
@@ -507,6 +551,9 @@ class InfoFlowPlanningNode:
         msg.should_stop = bool(should_stop)
         msg.stop_reason = str(stop_reason)
         (self.spherical_cmd_pub if publisher is None else publisher).publish(msg)
+        if publisher is None:
+            with self.kinematic_constraint_lock:
+                self.kinematic_constraint_gate.remember_command(msg)
 
     def _publish_stop_command(
         self,
@@ -762,6 +809,7 @@ class InfoFlowPlanningNode:
                 command_fields["phi_rate"] *= decision.speed_scale
                 if decision.speed_scale < 1.0:
                     command_fields["stop_reason"] = decision.reason
+        self._observe_kinematic_projection(command_fields, decision)
         self._publish_spherical_command(**command_fields)
         self.profile_logger.info(
             "kinematic_feedback: tick=%d command_stamp=%.9f mode=%s feedback_tick=%d "
@@ -883,6 +931,13 @@ def build_argparser():
     parser.add_argument("--raw_spherical_cmd_topic", type=str, default="/omnimap/spherical_cmd_raw")
     parser.add_argument("--kinematic_feedback_mode", choices=("observe", "enforce"), default="observe",
                         help="observe logs only; enable enforce after validating execution-side diagnostics")
+    parser.add_argument("--kinematic_projection_mode", choices=("off", "observe"), default="observe",
+                        help="diagnostic projection only; no continuous control enforcement yet")
+    parser.add_argument("--kinematic_constraint_topic", default="/omnimap/kinematic_constraint")
+    parser.add_argument("--kinematic_constraint_timeout_sec", type=float, default=0.3)
+    parser.add_argument("--kinematic_constraint_max_sample_skew_sec", type=float, default=0.1)
+    parser.add_argument("--kinematic_projection_local_radius", type=float, default=0.25,
+                        help="maximum dimensionless distance from linearization rates; diagnostic bound")
     parser.add_argument("--kinematic_status_topic", type=str, default="/omnimap/kinematic_status")
     parser.add_argument("--kinematic_status_timeout_sec", type=float, default=0.5)
     parser.add_argument("--kinematic_source_frame", type=str, default="base_link")

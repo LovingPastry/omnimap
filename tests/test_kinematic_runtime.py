@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "info_flow")]
 
 from omnimap_msgs.msg import KinematicStatus, SphericalCommand
+from kinematic_constraint import KinematicConstraintGate
 from kinematic_feedback import KinematicFeedbackGate
 from test_kinematic_feedback import feedback
 
@@ -60,7 +61,7 @@ def logger():
 
 def planner(mode="enforce"):
     node = planning.InfoFlowPlanningNode.__new__(planning.InfoFlowPlanningNode)
-    for name in ("pose_lock", "snapshot_ref_lock", "stats_lock", "motion_policy_lock", "kinematic_status_lock"):
+    for name in ("pose_lock", "snapshot_ref_lock", "stats_lock", "motion_policy_lock", "kinematic_status_lock", "kinematic_constraint_lock"):
         setattr(node, name, threading.Lock())
     node.stats = planning.PlanningStats()
     node.planner_tick = 41
@@ -76,6 +77,8 @@ def planner(mode="enforce"):
     node.reference_center_mode = node.reference_radius_source_current = "fixed"
     node.kinematic_feedback_mode = mode
     node.kinematic_gate = KinematicFeedbackGate(deceleration_duration_sec=0)
+    node.kinematic_projection_mode = "observe"
+    node.kinematic_constraint_gate = KinematicConstraintGate()
     node.world_frame = "base_link"
     node.profile_logger = logger()
     node.SphericalCommandMsg = SphericalCommand
@@ -110,6 +113,32 @@ class PlanningTests(unittest.TestCase):
             self.assertEqual(raw, output)
             self.assertFalse(output.should_stop)
             self.assertTrue(any("mode=observe" in line for line in node.profile_logger.lines))
+
+    def test_projection_advice_is_logged_without_changing_control(self):
+        from omnimap_msgs.msg import KinematicConstraint
+        node = planner("observe")
+        node.kinematic_status_callback(feedback())
+        node._planning_timer_callback(None)  # establishes the actual source command
+        msg = KinematicConstraint()
+        msg.header.stamp = msg.joint_stamp = msg.twist_stamp = msg.command_stamp = rospy.Time(100)
+        msg.header.frame_id = msg.source_frame = "base_link"
+        msg.task_frame = "tool0"
+        msg.planner_tick, msg.model_version = 42, 7
+        msg.valid = msg.threshold_configured = True
+        msg.reference_radius = .6
+        msg.rate_scales, msg.linearization_rates = [.1, .1], [.1, -.2]
+        msg.a, msg.c, msg.sigma_min, msg.m_min, msg.alpha = [1, 0], 1.05, .5, 1.55, 1.
+        node.kinematic_constraint_callback(msg)
+        node._planning_timer_callback(None)
+        raw, output = node.raw_spherical_cmd_pub.messages[-1], node.spherical_cmd_pub.messages[-1]
+        self.assertEqual(raw, output)
+        self.assertEqual((output.theta_rate, output.phi_rate), (.1, -.2))
+        self.assertTrue(any("reason=advisory_projection" in line and "proposed=[0.105 -0.2]" in line
+                            for line in node.profile_logger.lines))
+        # The same old constraint no longer refers to the latest published command.
+        node._planning_timer_callback(None)
+        self.assertTrue(any("constraint_execution_command_unmatched" in line for line in node.profile_logger.lines))
+        self.assertEqual(planning.build_argparser().parse_args([]).kinematic_projection_mode, "observe")
 
     def test_enforce_stops_and_raw_remains_replayable(self):
         for msg in (None, feedback(stamp=90), feedback(task_frame="camera"),

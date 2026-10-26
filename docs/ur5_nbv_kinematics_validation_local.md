@@ -79,7 +79,7 @@ Planning 不加载机器人模型、不计算 Jacobian、不从 MoveIt code 推�
 不能仅凭 `transform_chain_valid=true` 声明已经验证关节顺序。
 
 `kinematic_projection.py` 保留二维最小半空间投影定义，要求 `u_info/a` 为两个有限速率、`c` 为有限标量。
-需要修正而方向范数不可用时抛出 `ValueError`。新的 KinematicConstraint 提供执行侧 `a/drift` 及显式阈值下的 `c`，连续投影仍未接入控制路径；
+需要修正而方向范数不可用时抛出 `ValueError`。新的 KinematicConstraint 提供执行侧 `a/drift` 及显式阈值下的 `c`，Planning 已验证并记录投影建议，仍未接入控制路径；
 将来接入时，调用方必须把该异常转成零速或重新规划，禁止复用上一次修正方向。
 当前 enforce 只使用真实反馈进行状态停车和持续奇异减速。
 
@@ -95,6 +95,7 @@ source ros_ws/devel/setup.bash
 python -m py_compile info_flow/info_flow_planning_node.py info_flow/kinematic_feedback.py \
   info_flow/kinematic_projection.py info_flow/info_flow_servo_runtime.py info_flow/servo_runtime_common.py
 python tests/test_kinematic_feedback.py
+python tests/test_kinematic_constraint.py
 python tests/test_kinematic_runtime.py
 ```
 
@@ -137,3 +138,9 @@ rosbag record -O kinematic_chain.bag /omnimap/spherical_cmd_raw /omnimap/spheric
 | 无效方向、TF 过期或桥接中断时降级 | 投影拒绝无效输入；enforce 对失效反馈停车；Servo 失效输出零速 | 现场 monitor 的失效检测以及断链/超时的零速验证 |
 
 确认以上数据对齐后再使用 enforce；连续投影需完成 [构型约束诊断](ur5_nbv_kinematic_constraint.md) 所列的现场标定和控制接入门槛。
+
+## 2026-10-26 消费者回归
+
+Planning 新增独立 KinematicConstraint 订阅及只读投影日志；投影建议与最终控制命令明确分开。
+消费者测试 10 项、Planning/Servo 回调 10 项通过。控制层联合速度约束、停车后模型重新获取和现场验收未完成。
+参数、失效原因及日志定义见 [约束接口](ur5_nbv_kinematic_constraint.md)。

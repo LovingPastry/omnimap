@@ -1,6 +1,6 @@
 # 执行侧二维构型约束诊断
 
-更新：2026-10-25。该接口已实现局部方向导数和半空间参数的诊断输出，尚未接入控制。
+更新：2026-10-26。该接口已实现局部方向导数和半空间参数的诊断输出，尚未接入控制。
 它补充 [执行端升级](ur5_nbv_kinematics_upgrade_sumi.md)，不替代现场标定和非零闭环验收。
 
 ## 数据链和计算定义
@@ -73,8 +73,8 @@ rostopic echo -n 1 /omnimap/kinematic_constraint
 ## 控制接入前仍需完成
 
 本接口描述冻结 pose/PI/slew 状态下的局部映射；有限速率修正可能进入限速或 deadband 分支，
-后续周期的姿态、积分器和下游 MoveIt 也会变化。Planning 尚未订阅此接口，也未把投影结果发送到机器人。
-接入时必须校验双时钟年龄、命令来源/参考球和线性化点，处理速度/加速度约束与真实执行残差。
+后续周期的姿态、积分器和下游 MoveIt 也会变化。Planning 已订阅此接口并计算只读建议，未把投影结果发送到机器人。
+消费者已校验双时钟年龄、命令来源/参考球和局部范围；控制接入仍须处理速度/加速度约束与真实执行残差。
 不能投影后任意裁剪再宣称仍满足半空间；不可行时零速/重新规划，不复用旧方向。
 恢复停车还需定义模型重新获取机制，避免等不到运动 trace 而无法恢复。
 
@@ -85,3 +85,33 @@ rostopic echo -n 1 /omnimap/kinematic_constraint
 inventory 1 项通过；直接节点和正式 diagnostics.launch 两套隔离 ROS 测试各 9 项通过。
 独立 NumPy FK 有限差分核对 a/drift；显式测试阈值只在隔离合成模型中设置，正式 launch 验证未配置时 c 为 NaN。
 日志：`/tmp/omnimap_constraint_test.log`、`/tmp/omnimap_constraint_launch_test.log`。
+
+## Planning 只读消费（2026-10-26）
+
+`--kinematic_projection_mode observe` 为默认，只记录候选命令与投影建议；`off` 关闭计算。
+此参数没有 enforce 选项；已有 `--kinematic_feedback_mode enforce` 仍仅控制状态停车/缩放。
+原始 Fisher 与最终执行命令的发布顺序和数值不受投影观察影响。
+
+| Planning 参数 | 默认值 |
+|---|---|
+| `--kinematic_constraint_topic` | `/omnimap/kinematic_constraint` |
+| `--kinematic_constraint_timeout_sec` | `0.3` s |
+| `--kinematic_constraint_max_sample_skew_sec` | `0.1` s |
+| `--kinematic_projection_local_radius` | `0.25`（无量纲速率空间） |
+
+收到约束后缓存独立副本；在 Fisher 计算及状态缩放完成后，按最新反馈计算建议，再发布本 tick 最终命令。
+校验包括：
+
+- 接收 monotonic 时间与 header/joint/twist 源时间均不过期；禁止零/非有限时间、超过 50 ms 的未来时间。
+- joint 与 twist 采样时间差、source/task/header frame、上游 valid、显式阈值、有限尺度和指标。
+- c 与 `-alpha*(sigma_min-m_min)-drift` 一致，逆映射残差不超过 1e-6。
+- 来源 tick/model/command stamp 和速率必须对应 Planning **最近一次最终执行命令**，不能拿 raw Fisher 代替。
+  新发布的 stop/命令会立即使旧约束来源不再匹配。
+- 当前地图版本、当前候选参考球、源执行命令参考球一致；候选和投影都处于线性化速率的配置半径内。
+- 策略已经 stop、状态反馈不可用/急停时不计算逃逸命令；无可用投影方向时只记录失败。
+
+日志 `kinematic_projection:` 记录 tick、source tick、三个时间、有效性/原因、候选/建议速率和归一化修正量。
+该局部半径是诊断筛选参数，未证明它足以控制真实线性化误差；不能作为速度或加速度上限。
+
+InfoFlow 消费者测试 10 项、Planning/Servo 回调 10 项通过，覆盖建议不改控制、过期/未来消息、
+源命令替换、参考球变化、未配置阈值、约束不一致、局部范围和恢复。未发送任何机器人运动命令。
