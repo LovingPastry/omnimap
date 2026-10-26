@@ -167,3 +167,7 @@ rostest omnimap_kinematics servo_preview.test
 
 测试构造运行参数后实例化实际 Servo 类，不调用生产 CLI 的配置加载；源码从包的真实路径
 解析仓库根目录，因此支持机器人 catkin_ws 内的符号链接部署。新用例已加入 CMake rostest 清单。
+
+## 2026-10-26 连续模型流验证
+
+新增 KinematicModel，同一 MoveIt monitor 连续发布同采样 J、相机位姿和完整指标梯度。直接节点及生产 launch 的两套 ROS 用例覆盖独立 FK/梯度比较、关节变化后更新、无桥接依赖、停车失效，以及快照到二维约束的转换与非法数据拒绝。自动只读 Servo 链路另有 4 项回归，部署脚本检查新生成文件。此为合成关节/TF 数值变化的证据，未验证实际运动或 Servo 流式控制接入；细节见升级文档。

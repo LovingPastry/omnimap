@@ -5,6 +5,8 @@ Independent NumPy forward kinematics and finite differences check the monitor's
 frame, reference point, variable order, normalization and measured speed.
 """
 import copy
+import sys
+from pathlib import Path
 import threading
 import time
 import unittest
@@ -15,13 +17,15 @@ import rospy
 import rostest
 import tf2_ros
 from geometry_msgs.msg import TransformStamped, TwistStamped
-from omnimap_msgs.msg import BridgeStatus, KinematicStatus, ServoTwistTrace, KinematicConstraint
+from omnimap_msgs.msg import BridgeStatus, KinematicStatus, ServoTwistTrace, KinematicConstraint, KinematicModel
 from omnimap_msgs.srv import EvaluateKinematicModel
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Int8
 from rosgraph_msgs.msg import Clock
 from roscpp.srv import GetLoggers
 from tf.transformations import euler_matrix, rotation_matrix, quaternion_from_matrix
+sys.path.insert(0, str(Path(__file__).resolve().parents[4]/"info_flow"))
+from kinematic_model import constraint_from_model
 
 
 def values(msg):
@@ -46,10 +50,11 @@ class ChainTest(unittest.TestCase):
                 "joint_topic": "/test/joints", "status_topic": "feedback",
                 "cartesian_command_in_topic": "/test/tool_twist"})
         cls.lock = threading.RLock()
-        cls.kinematic, cls.bridge, cls.output, cls.constraint = None, None, None, None
+        cls.kinematic, cls.bridge, cls.output, cls.constraint, cls.model = None, None, None, None, None
         cls.subs = [rospy.Subscriber(topic, kind, lambda msg, key=key: setattr(cls, key, msg))
                     for topic, kind, key in [("/test/kinematic", KinematicStatus, "kinematic"),
                                       ("/test/constraint", KinematicConstraint, "constraint"),
+                                      ("/test/model", KinematicModel, "model"),
                         ("/test/bridge", BridgeStatus, "bridge"), ("/test/tool_twist", TwistStamped, "output")]]
         cls.joint_pub = rospy.Publisher("/test/joints", JointState, queue_size=1)
         cls.status_pub = rospy.Publisher("/test/servo/feedback", Int8, queue_size=1)
@@ -288,6 +293,93 @@ class ChainTest(unittest.TestCase):
         rejected = query(candidate).constraint
         self.assertFalse(rejected.valid)
         self.assertEqual(rejected.reason, "moveit_not_executable")
+
+    def test_stream_snapshot_matches_independent_model_and_gradient(self):
+        self.wait(lambda: self.model is not None and self.model.valid, "model snapshot")
+        model = self.model
+        q = np.asarray(model.joint_position)
+        jac = self.independent_jacobian(q)
+        np.testing.assert_allclose(np.asarray(model.task_jacobian).reshape(6, 6), jac, atol=1e-7)
+        poses = self.fk(q)
+        np.testing.assert_allclose(np.asarray(model.camera_c2w).reshape(4, 4),
+                                   poses["cam_1_color_optical_frame"], atol=1e-9)
+        np.testing.assert_allclose(model.camera_tool_offset,
+            poses["cam_1_color_optical_frame"][:3, 3]-poses["tool0"][:3, 3], atol=1e-9)
+        dx = np.asarray(model.task_velocity_scales)
+        dq = np.asarray(model.joint_velocity_upper)
+        def metric(position):
+            normalized = self.independent_jacobian(position)/dx[:, None]*dq[None, :]
+            return np.linalg.svd(normalized, compute_uv=False)[-1]
+        self.assertAlmostEqual(model.sigma_min, metric(q), places=7)
+        gradient = []
+        for i in range(6):
+            delta = np.eye(6)[i]*1e-4
+            gradient.append((metric(q+delta)-metric(q-delta))/2e-4)
+        np.testing.assert_allclose(model.metric_gradient, gradient, atol=2e-5, rtol=2e-3)
+        self.assertEqual((model.source_frame, model.task_frame, model.camera_frame),
+                         ("base_link", "tool0", "cam_1_color_optical_frame"))
+        self.assertEqual(list(model.joint_names), ["j%d" % i for i in range(1, 7)])
+        self.assertGreater(model.joint_stamp.to_sec(), 0.)
+        trace = copy.deepcopy(self.latest_trace)
+        trace.reason, trace.command.header.stamp = "preview", model.joint_stamp
+        result = constraint_from_model(model, trace, received_wall=time.monotonic(),
+            ros_now=rospy.Time.now().to_sec(), wall_now=time.monotonic())
+        self.wait(lambda: self.constraint is not None and self.constraint.valid, "directional comparison")
+        np.testing.assert_allclose(result.joint_rate_matrix, self.constraint.joint_rate_matrix, atol=1e-7)
+        np.testing.assert_allclose(result.joint_rate_bias, self.constraint.joint_rate_bias, atol=1e-7)
+        np.testing.assert_allclose(result.a, self.constraint.a, atol=2e-5, rtol=2e-3)
+        self.assertAlmostEqual(result.drift, self.constraint.drift, delta=2e-5)
+        self.assertEqual(result.reason, "advisory_preview:model_snapshot")
+        self.assertEqual(result.twist_seq, trace.command.header.seq)
+        for field, value in (("sigma_min", model.sigma_min+1),
+                             ("metric_gradient", [float("nan")]*6),
+                             ("joint_names", ["j1"]*6)):
+            bad = copy.deepcopy(model)
+            setattr(bad, field, value)
+            with self.assertRaises(ValueError):
+                constraint_from_model(bad, trace, received_wall=time.monotonic(),
+                    ros_now=rospy.Time.now().to_sec(), wall_now=time.monotonic())
+        with self.assertRaisesRegex(ValueError, "receipt stale"):
+            constraint_from_model(model, trace, received_wall=time.monotonic()-.5,
+                ros_now=rospy.Time.now().to_sec(), wall_now=time.monotonic())
+        trace.command.header.stamp = rospy.Time(1)
+        with self.assertRaisesRegex(ValueError, "provenance"):
+            constraint_from_model(model, trace, received_wall=time.monotonic(),
+                ros_now=rospy.Time.now().to_sec(), wall_now=time.monotonic())
+
+    def test_stream_updates_during_joint_motion_and_without_bridge(self):
+        self.wait(lambda: self.model is not None and self.model.valid, "initial stream")
+        first = self.model
+        converted = []
+        for step in range(1, 6):
+            with self.lock:
+                target = self.q.copy()
+                target[0] = .2+.005*step
+                self.__class__.q = target
+            self.wait(lambda: self.model.valid and abs(self.model.joint_position[0]-target[0]) < 1e-10,
+                      "moving model")
+            snapshot = self.model
+            trace = copy.deepcopy(self.latest_trace)
+            trace.reason, trace.command.header.stamp = "preview", snapshot.joint_stamp
+            converted.append(constraint_from_model(snapshot, trace, received_wall=time.monotonic(),
+                ros_now=rospy.Time.now().to_sec(), wall_now=time.monotonic()))
+        self.assertGreater(np.linalg.norm(np.asarray(converted[-1].joint_rate_matrix)-
+                                          converted[0].joint_rate_matrix), 1e-4)
+        moved = self.model
+        self.assertGreater(moved.model_sequence, first.model_sequence)
+        self.assertGreater(moved.joint_stamp.to_sec(), first.joint_stamp.to_sec())
+        self.assertGreater(np.linalg.norm(np.asarray(moved.task_jacobian)-first.task_jacobian), 1e-3)
+        self.assertGreater(np.linalg.norm(np.asarray(moved.camera_c2w)-first.camera_c2w), 1e-3)
+        with self.lock:
+            self.__class__.send_input = False
+        time.sleep(.5)
+        self.assertFalse(self.kinematic.transform_chain_valid)
+        self.assertTrue(self.model.valid, self.model.reason)
+        self.assertGreater(self.model.model_sequence, moved.model_sequence)
+        with self.lock:
+            self.__class__.code = 2
+        self.wait(lambda: not self.model.valid and self.model.reason == "moveit_not_executable",
+                  "stream status stop")
 
     def test_directional_model_matches_independent_fk_and_bridge(self):
         self.wait(lambda: self.constraint is not None and self.constraint.valid, "constraint derivatives")

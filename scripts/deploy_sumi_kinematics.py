@@ -22,7 +22,9 @@ def main():
     messages = repo/"ros_ws/devel/lib/python3/dist-packages"
     if not (target/"package.xml").is_file() or not (target/"scripts").is_dir():
         parser.error("robot package not found: " + str(target))
-    if (not (messages/"omnimap_msgs/msg/_BridgeStatus.py").is_file() or
+    if (any(not (messages/name).is_file() for name in (
+            "omnimap_msgs/msg/_BridgeStatus.py", "omnimap_msgs/msg/_KinematicModel.py",
+            "omnimap_msgs/srv/_EvaluateKinematicModel.py")) or
             not (repo/"ros_ws/devel/lib/omnimap_kinematics/omnimap_kinematic_monitor").is_file()):
         parser.error("build first: ./scripts/build_ros_ws.sh --with-kinematics")
     # Preflight all conflicts before changing either package or bridge.

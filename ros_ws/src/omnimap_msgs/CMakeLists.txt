@@ -13,6 +13,7 @@ add_message_files(
   SphericalCommand.msg
   KinematicStatus.msg
   KinematicConstraint.msg
+  KinematicModel.msg
   BridgeStatus.msg
   ServoTwistTrace.msg
 )

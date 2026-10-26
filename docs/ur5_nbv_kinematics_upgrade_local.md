@@ -243,3 +243,27 @@ rostest omnimap_kinematics servo_preview.test
 
 测试构造运行参数后实例化实际 Servo 类，不调用生产 CLI 的配置加载；源码从包的真实路径
 解析仓库根目录，因此支持机器人 catkin_ws 内的符号链接部署。新用例已加入 CMake rostest 清单。
+
+### 连续同采样模型流与二维转换（2026-10-26）
+
+新增只读 `/omnimap/kinematic_model`（私有参数 kinematic_model_topic）。同一个 MoveIt
+monitor 按 publish_hz 连续发布 KinematicModel，不依赖旧桥接命令，也无需先发运动命令。
+每个快照包含递增 model_sequence、发布/关节/status 接收时间、实际关节顺序与 q/dq/模型边界、
+base_link 表达的 tool0 Jacobian、同关节时间的相机 c2w/参考点偏移、归一化 sigma_min 和
+六关节完整指标梯度。梯度沿各关节单位方向作两档中心差分，并检查数值稳定性。
+TF/关节/status 失效、MoveIt 2–5/未知码或最小奇异值不可微时发布 valid=false，
+不拿旧快照冒充有效结果。m_min 仍默认未配置，不能据此宣称已标定。
+
+`info_flow/kinematic_model.py:constraint_from_model` 可由快照及同时间的相机数学候选重建
+KinematicConstraint：一次参考点变换后求 J*[A,bq]=[B*rate_scales,b]，再算
+`a=gradient^T*A`、`drift=gradient^T*bq`。转换验证双时钟年龄、时间/frame、数组/边界、
+位姿旋转、指标与 Jacobian 自洽、秩和逆解残差；返回独立复制的只读 preview 约束。
+调用方必须由该快照 camera_c2w 重新计算候选，不能给旧位姿候选仅改时间标签。
+没有在 Python 加载另一套机器人模型。
+
+两套 ROS 测试均增加独立 NumPy FK/Jacobian/完整梯度比较，关节数值连续变化时快照和
+转换后的速率映射随之更新，旧桥接过期仍更新，MoveIt halt 使快照失效；非法来源/模型拒绝。
+这证明模型流和转换接口能够跟随合成关节样本，尚未把 Servo 的冻结查询路径切换为流式控制。
+运动中的时延/残差处理、最终投影执行与实机标定验收仍待完成。
+新增消息需两端重建并重启 monitor；既有消息字段/MD5 本批未改变。
+部署脚本现检查新模型消息及查询服务的生成文件，避免把旧构建当成完整部署。

@@ -20,6 +20,7 @@
   <node pkg="omnimap_kinematics" type="omnimap_kinematic_monitor" name="test_monitor" output="screen">
     <param name="servo_ns" value="/test/servo"/>
     <param name="constraint_m_min" value="0.1"/>
+    <param name="kinematic_model_topic" value="/test/model"/>
     <param name="kinematic_constraint_topic" value="/test/constraint"/>
     <param name="kinematic_status_topic" value="/test/kinematic"/>
     <param name="bridge_status_topic" value="/test/bridge"/>

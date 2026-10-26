@@ -227,3 +227,29 @@ preview 的 camera_rate_matrix/bias 现表示限幅前数学候选；command 可
 健康准备未就绪时，回调立即清除缓存模型/建议并推进健康代次；查询与求解在同一代次才可保存结果，存储检查与反馈更新由同一锁串行化。因此即使工作期间先停车再快速恢复健康，也不能复用停车前结果，须重新查询。测试已覆盖该交错顺序。
 
 新增 servo_preview.test 端到端验证（4 项通过）：真实 Servo 订阅/Timer、RPC、monitor 和桥接在合成 /test/* 场景自动生成当前周期建议，覆盖 MoveIt halt、关节断流和原始 policy stop。最终命令始终 stop，捕获输出全为零；未运行真实地图/Fisher或实机，不证明运动中连续控制。构建和 CMake rostest 注册通过。
+
+### 连续同采样模型流与二维转换（2026-10-26）
+
+新增只读 `/omnimap/kinematic_model`（私有参数 kinematic_model_topic）。同一个 MoveIt
+monitor 按 publish_hz 连续发布 KinematicModel，不依赖旧桥接命令，也无需先发运动命令。
+每个快照包含递增 model_sequence、发布/关节/status 接收时间、实际关节顺序与 q/dq/模型边界、
+base_link 表达的 tool0 Jacobian、同关节时间的相机 c2w/参考点偏移、归一化 sigma_min 和
+六关节完整指标梯度。梯度沿各关节单位方向作两档中心差分，并检查数值稳定性。
+TF/关节/status 失效、MoveIt 2–5/未知码或最小奇异值不可微时发布 valid=false，
+不拿旧快照冒充有效结果。m_min 仍默认未配置，不能据此宣称已标定。
+
+`info_flow/kinematic_model.py:constraint_from_model` 可由快照及同时间的相机数学候选重建
+KinematicConstraint：一次参考点变换后求 J*[A,bq]=[B*rate_scales,b]，再算
+`a=gradient^T*A`、`drift=gradient^T*bq`。转换验证双时钟年龄、时间/frame、数组/边界、
+位姿旋转、指标与 Jacobian 自洽、秩和逆解残差；返回独立复制的只读 preview 约束。
+调用方必须由该快照 camera_c2w 重新计算候选，不能给旧位姿候选仅改时间标签。
+没有在 Python 加载另一套机器人模型。
+
+两套 ROS 测试均增加独立 NumPy FK/Jacobian/完整梯度比较，关节数值连续变化时快照和
+转换后的速率映射随之更新，旧桥接过期仍更新，MoveIt halt 使快照失效；非法来源/模型拒绝。
+这证明模型流和转换接口能够跟随合成关节样本，尚未把 Servo 的冻结查询路径切换为流式控制。
+运动中的时延/残差处理、最终投影执行与实机标定验收仍待完成。
+新增消息需两端重建并重启 monitor；既有消息字段/MD5 本批未改变。
+部署脚本现检查新模型消息及查询服务的生成文件，避免把旧构建当成完整部署。
+
+本批构建通过，模型流直接节点/生产 launch 两套各 12 项、自动 Servo 预览链 4 项、部署 3 项，共 31 项相关测试通过。新消息增加类型，既有消息字段未改；算力端与执行端仍需生成新类型并重启 monitor。

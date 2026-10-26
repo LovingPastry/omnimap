@@ -11,3 +11,6 @@ spherical_rate_scales: [0.1, 0.1]
 constraint_alpha: 1.0
 # constraint_m_min is deliberately unset until measured for this model and Dx/Dq.
 # Merely setting it configures a threshold; it does not prove calibration.
+
+# Read-only continuous model, selected independently of the bridge command.
+kinematic_model_topic: /omnimap/kinematic_model
