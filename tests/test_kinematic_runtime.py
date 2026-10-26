@@ -16,6 +16,7 @@ from unittest.mock import Mock, patch
 import numpy as np
 import rospy
 import tf2_ros
+from sensor_msgs.msg import JointState
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "info_flow")]
@@ -207,6 +208,8 @@ def preview_response(trace):
     result.header.stamp, result.header.frame_id = rospy.Time(100), "base_link"
     result.source_frame, result.task_frame = "base_link", "tool0"
     result.joint_stamp = rospy.Time(100)
+    result.joint_names = ["j%d" % i for i in range(6)]
+    result.joint_position, result.joint_velocity = [0.]*6, [0.]*6
     result.twist_stamp, result.twist_seq = trace.command.header.stamp, trace.command.header.seq
     result.command_stamp = trace.command_stamp
     result.planner_tick, result.model_version = trace.planner_tick, trace.model_version
@@ -249,6 +252,10 @@ class ServoTests(unittest.TestCase):
                                     reference_radius=0.6, reference_scene_center=[0, 0, 0])
         self.cmd.header.stamp, self.cmd.header.frame_id = rospy.Time(100), "base_link"
         self.node.spherical_cmd_callback(self.cmd)
+        self.joint_sample = JointState(name=["j%d" % i for i in range(6)],
+                                       position=[0.]*6, velocity=[0.]*6)
+        self.joint_sample.header.stamp = rospy.Time(100)
+        self.node.preview_joint_callback(self.joint_sample)
         self.preview_pose = np.eye(4)
         self.preview_pose[0, 3] = .6
         self.preview_lookup = patch.object(servo, "lookup_latest_pose_from_tf",
@@ -399,6 +406,16 @@ class ServoTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "deadline exceeded"):
                 self.node.evaluate_preview(self.cmd, pose, rospy.Time(100), .02,
                                           lambda trace: NS(constraint=preview_response(trace)))
+
+    def test_preview_rechecks_local_joints_even_when_tf_is_unchanged(self):
+        def respond(trace):
+            self.joint_sample.position[0] = .001
+            self.joint_sample.header.stamp = rospy.Time.from_sec(100.01)
+            self.node.preview_joint_callback(self.joint_sample)
+            return NS(constraint=preview_response(trace))
+        with self.assertRaisesRegex(ValueError, "joint state changed"):
+            self.node.evaluate_preview(self.cmd, self.preview_pose, rospy.Time(100), .02, respond)
+        self.assertEqual(self.pub.messages, [])
 
     def test_preview_rechecks_latest_tf_after_response(self):
         pose = self.preview_pose.copy()

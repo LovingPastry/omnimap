@@ -16,6 +16,8 @@ from omnimap_msgs.msg import ServoTwistTrace
 from scipy.spatial.transform import Rotation as R
 from kinematic_projection import camera_rate_model
 from bounded_query import SingleFlightQuery
+from preview_joint_state import PreviewJointState
+from sensor_msgs.msg import JointState
 
 from servo_runtime_common import (
     configure_servo_logging,
@@ -67,6 +69,7 @@ class InfoFlowServoRuntime:
         self._control_lock = threading.RLock()
         self._control_generation = 0
         self._preview_queries = SingleFlightQuery()
+        self._preview_joints = PreviewJointState()
         self.preview_timeout_sec = float(args.kinematic_preview_timeout_sec)
         if not np.isfinite(self.preview_timeout_sec) or self.preview_timeout_sec <= 0:
             raise ValueError("kinematic_preview_timeout_sec must be finite and positive")
@@ -132,6 +135,8 @@ class InfoFlowServoRuntime:
             self.spherical_cmd_callback,
             queue_size=1,
         )
+        self.preview_joint_sub = rospy.Subscriber(
+            args.kinematic_joint_topic, JointState, self.preview_joint_callback, queue_size=1)
         self.timer = rospy.Timer(
             rospy.Duration(1.0 / max(self.servo_hz, 1e-6)),
             self._servo_timer_callback,
@@ -294,6 +299,9 @@ class InfoFlowServoRuntime:
                 trace.servo_dt_sec = rate_limits["dt"]
         return trace
 
+    def preview_joint_callback(self, msg):
+        self._preview_joints.update(msg, time.monotonic(), ros_now=rospy.Time.now().to_sec())
+
     def evaluate_preview(self, cmd, current_c2w, pose_stamp, servo_dt_sec, query):
         """Read-only candidate query; never commits controller state or motion.
 
@@ -336,6 +344,8 @@ class InfoFlowServoRuntime:
                 or not np.all(np.isfinite(latest_pose))
                 or not np.allclose(latest_pose, current_c2w, rtol=0, atol=1e-9)):
             raise ValueError("preview pose changed during query")
+        self._preview_joints.validate(response, ros_now=rospy.Time.now().to_sec(),
+                                      wall_now=time.monotonic(), timeout=self.pose_stale_timeout_sec)
         with self._control_lock:
             if (self._control_generation != state_before[3]
                     or self._radial_integral_error != state_before[0]
@@ -776,6 +786,7 @@ def build_argparser():
     parser.add_argument("-c", "--config", type=str, default="config/rtabmap_config.yaml", help="YAML config file path")
     parser.add_argument("--spherical_cmd_topic", type=str, default="/omnimap/spherical_cmd")
     parser.add_argument("--cmd_topic", type=str, default="/servo_server/delta_twist_camera")
+    parser.add_argument("--kinematic_joint_topic", default="/joint_states")
     parser.add_argument("--kinematic_preview_timeout_sec", type=float, default=0.1)
     parser.add_argument("--twist_trace_topic", type=str, default="/omnimap/servo_twist_trace")
     parser.add_argument("--cmd_frame", type=str, default="base_link")
