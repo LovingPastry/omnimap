@@ -48,7 +48,7 @@ Planning 已订阅该接口，默认 `--kinematic_projection_mode observe` 只�
 `off` 可关闭建议计算。消费者的双时钟、命令来源、参考球及局部范围检查已有回调测试。
 联合求解器已支持线性关节限值、仿射线速度/每周期速度变化限值和局部球；Planning 当前接入半空间、局部球与实际 RobotModel 关节速度上下限。
 执行侧通过 KinematicConstraint 发布带关节名称的 qdot=A u+bq，以及源 Servo 周期的相机线速度、速度变化限值和死区。
-Planning 已将这些限值联合求解。仍需执行时重新校验、关节加速度/位置可行性处理、现场标定、停车后的模型恢复和非零闭环验收，再接入控制。
+Planning 已将这些限值联合求解。仍需执行时重新校验、制动距离与实际关节加速度验证、现场标定、停车后的模型恢复和非零闭环验收，再接入控制。
 状态减速不能替代这一目标，status code 不能推导 a。
 无效/不可行方向必须零速或重新规划，不复用旧方向；加入速度等额外约束后需联合求解，
 投影后任意裁剪可能破坏半空间约束。
@@ -79,3 +79,14 @@ Int8 status 没有源时间戳，不能声称与 Twist 属于同一 MoveIt 内�
 
 2026-10-26 再次只读检查本机默认 ROS master 不可访问，现场数据门槛仍未完成。
 这不影响代码与隔离回调验证，不能据此假定实机链路已经运行。
+
+### 源周期关节位置与加速度边界（2026-10-26）
+
+ServoTwistTrace 传输实际 `servo_dt_sec`；KinematicConstraint 传输对应关节样本的
+`joint_position`、`joint_velocity`，以及 RobotModel 的位置/加速度上下限和各关节 bounded 标记。
+Planning 对有界关节联合求解 `q_min <= q + dt*(A*u+bq) <= q_max`，以及
+`dq + a_min*dt <= A*u+bq <= dq + a_max*dt`。模型未配置的加速度上限不填猜测值；
+日志 `acceleration_limits_complete` 明确标记是否六个关节均有上限。
+这是一周期 Euler 预测和相对测量速度的约束，不证明真实执行加速度或制动距离安全；
+源关节样本与 Twist 允许的小量时间偏差也仍需在执行重校验中处理。
+两条消息 MD5 均改变，算力端和执行端必须重新构建并重启相关节点。

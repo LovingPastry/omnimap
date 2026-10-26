@@ -508,13 +508,13 @@ class InfoFlowPlanningNode:
         self.profile_logger.info(
             "kinematic_projection: mode=observe tick=%d source_tick=%d valid=%s reason=%s "
             "feedback_stamp=%.9f joint_stamp=%.9f twist_stamp=%.9f "
-            "candidate=[%.9g %.9g] proposed=[%.9g %.9g] correction_norm=%.9g",
+            "candidate=[%.9g %.9g] proposed=[%.9g %.9g] correction_norm=%.9g acceleration_limits_complete=%s",
             fields["planner_tick"], int(getattr(feedback, "planner_tick", 0)),
             proposal.valid, proposal.reason,
             feedback.header.stamp.to_sec() if feedback else 0.0,
             feedback.joint_stamp.to_sec() if feedback else 0.0,
             feedback.twist_stamp.to_sec() if feedback else 0.0,
-            fields["theta_rate"], fields["phi_rate"], *proposal.rates, proposal.correction_norm,
+            fields["theta_rate"], fields["phi_rate"], *proposal.rates, proposal.correction_norm, proposal.acceleration_limits_complete,
         )
 
     def _publish_spherical_command(

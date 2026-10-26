@@ -1,5 +1,5 @@
-# Advisory local model only. Includes RobotModel joint velocity bounds, but not
-# joint acceleration, collision or joint-position constraints. Physical spherical
+# Advisory local model only. Includes available RobotModel bounds and one-cycle
+# linearized constraints, not collision or braking-distance guarantees. Physical spherical
 # rates = rate_scales * u; a dot u >= c uses dimensionless u.
 std_msgs/Header header
 time joint_stamp
@@ -41,3 +41,13 @@ float64[3] previous_linear
 float64 linear_speed_limit
 float64 linear_step_limit
 float64 linear_deadband
+# Source Servo cycle, not a guarantee of the future execution interval.
+float64 servo_dt_sec
+float64[6] joint_position
+float64[6] joint_velocity
+bool[6] joint_position_bounded
+float64[6] joint_position_lower
+float64[6] joint_position_upper
+bool[6] joint_acceleration_bounded
+float64[6] joint_acceleration_lower
+float64[6] joint_acceleration_upper

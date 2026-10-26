@@ -35,7 +35,11 @@ def constraint(**changes):
                   joint_velocity_lower=[-1.] * 6, joint_velocity_upper=[1.] * 6,
                   camera_linear_matrix=[0.] * 6, camera_linear_bias=[0.] * 3,
                   previous_linear=[0.] * 3, linear_speed_limit=0.,
-                  linear_step_limit=0., linear_deadband=0.)
+                  linear_step_limit=0., linear_deadband=0., servo_dt_sec=.02,
+                  joint_position=[0.]*6, joint_velocity=[0.]*6,
+                  joint_position_bounded=[False]*6, joint_acceleration_bounded=[False]*6,
+                  joint_position_lower=[0.]*6, joint_position_upper=[0.]*6,
+                  joint_acceleration_lower=[0.]*6, joint_acceleration_upper=[0.]*6)
     fields.update(changes)
     return NS(**fields)
 
@@ -182,6 +186,25 @@ class ConstraintTests(unittest.TestCase):
         self.assertFalse(self.propose().valid)
         self.gate.update(constraint(), wall_now=100)
         self.assertTrue(self.propose().valid)
+
+    def test_joint_cycle_bounds(self):
+        common = dict(a=[0., 0.], c=0., m_min=.5,
+                      joint_rate_matrix=[1., 0.]+[0.]*10)
+        self.gate.update(constraint(**common, joint_position=[.9802]+[0.]*5,
+            joint_position_bounded=[True]+[False]*5,
+            joint_position_lower=[-1.]*6, joint_position_upper=[1.]*6), wall_now=100)
+        result = self.propose()
+        self.assertTrue(result.valid, result.reason)
+        self.assertAlmostEqual(result.rates[0], .099)
+        self.gate.update(constraint(**common, joint_velocity=[.98]+[0.]*5,
+            joint_acceleration_bounded=[True]*6,
+            joint_acceleration_lower=[-.5]*6, joint_acceleration_upper=[.5]*6), wall_now=100)
+        result = self.propose()
+        self.assertTrue(result.valid, result.reason)
+        self.assertAlmostEqual(result.rates[0], .099)
+        self.assertTrue(result.acceleration_limits_complete)
+        self.gate.update(constraint(servo_dt_sec=0), wall_now=100)
+        self.assertEqual(self.propose().reason, "constraint_joint_cycle_invalid")
 
     def test_reject_invalid_configuration(self):
         for fields in (dict(timeout_sec=0), dict(max_sample_skew_sec=np.nan),

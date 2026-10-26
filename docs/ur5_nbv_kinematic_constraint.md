@@ -74,7 +74,7 @@ rostopic echo -n 1 /omnimap/kinematic_constraint
 
 本接口描述冻结 pose/PI/slew 状态下的局部映射；有限速率修正可能进入限速或 deadband 分支，
 后续周期的姿态、积分器和下游 MoveIt 也会变化。Planning 已订阅此接口并计算只读建议，未把投影结果发送到机器人。
-消费者已校验双时钟年龄、命令来源/参考球和局部范围，并联合求解源周期的速度/slew 约束；控制接入仍须执行时重新校验、处理关节加速度/位置约束与真实执行残差。
+消费者已校验双时钟年龄、命令来源/参考球和局部范围，并联合求解源周期的速度/slew 约束；控制接入仍须执行时重新校验、验证制动距离、实际关节加速度与真实执行残差。
 不能投影后任意裁剪再宣称仍满足半空间；不可行时零速/重新规划，不复用旧方向。
 恢复停车还需定义模型重新获取机制，避免等不到运动 trace 而无法恢复。
 
@@ -130,7 +130,7 @@ SciPy 已列在 environment.yaml 和执行侧依赖中。求解后独立检查�
 
 Planning 观察模式已使用半空间与局部球联合求解：旧实现会拒绝半空间投影在球外、但交集内仍有解的情况。
 RobotModel 关节速度约束和源 Servo 周期的相机线速度/slew 约束现已通过 KinematicConstraint 接入；
-因此没有增加连续控制 enforce 模式。关节加速度需要对应采样的上一执行速度和周期，不能凭任意 dt 推导。
+因此没有增加连续控制 enforce 模式。源周期关节边界见下节，执行时仍须重新验证。
 
 新增求解器测试 8 项通过，覆盖解析交点、限速后破坏半空间的反例、仿射偏置、不可行交集和伪成功结果；
 消费者现为 11 项，实际 Planning/Servo 回调 10 项通过。均为软件验证，不代表真实机器人验收。
@@ -146,7 +146,7 @@ KinematicConstraint 新增 `joint_names[6]`、row-major `joint_rate_matrix[12]`�
 Planning 检查名称数量/唯一性、数组形状、有限值及上下限符号，构造
 `A u <= upper-bq` 与 `-A u <= bq-lower`，和半空间、局部球一起求解。
 该约束是模型级速度界限，不包含 MoveIt 的动态碰撞减速、状态缩放或控制器实际跟踪误差，仍只输出观察建议。
-没有新增关节加速度或位置约束，不能把这一阶段解释为完整执行可行集。
+此阶段随后补入下述源周期位置/加速度边界，仍不能解释为完整执行可行集。
 
 ### 源 Servo 周期的相机线速度限值
 
@@ -175,3 +175,16 @@ Planning 同时加入 `||M u+b||<=speed` 和 `||M u+b-previous||<=step`。
 直接节点和正式 diagnostics.launch 两套隔离 ROS 测试各 9 项通过，使用独立 NumPy FK/Jacobian
 核对 A、bq、关节顺序和模型速度上下限。日志为 `/tmp/omnimap_joint_bounds_test.log` 和
 `/tmp/omnimap_joint_bounds_launch_test.log`。合成模型验证不代表 UR5 实机验收。
+
+### 源周期关节位置与加速度边界（2026-10-26）
+
+ServoTwistTrace 传输实际 `servo_dt_sec`；KinematicConstraint 传输对应关节样本的
+`joint_position`、`joint_velocity`，以及 RobotModel 的位置/加速度上下限和各关节 bounded 标记。
+Planning 对有界关节联合求解 `q_min <= q + dt*(A*u+bq) <= q_max`，以及
+`dq + a_min*dt <= A*u+bq <= dq + a_max*dt`。模型未配置的加速度上限不填猜测值；
+日志 `acceleration_limits_complete` 明确标记是否六个关节均有上限。
+这是一周期 Euler 预测和相对测量速度的约束，不证明真实执行加速度或制动距离安全；
+源关节样本与 Twist 允许的小量时间偏差也仍需在执行重校验中处理。
+两条消息 MD5 均改变，算力端和执行端必须重新构建并重启相关节点。
+
+本阶段构建通过：消费者 15 项、Planning/Servo 回调 11 项、隔离 ROS 两套各 9 项通过。ROS 合成模型验证了位置边界传输与缺失加速度上限标记；加速度已配置的消费者数值分支通过，仍需补充已配置上限的 RobotModel 集成覆盖。未操作真实机器人。

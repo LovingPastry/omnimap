@@ -127,6 +127,7 @@ class PlanningTests(unittest.TestCase):
         msg.valid = msg.threshold_configured = True
         msg.reference_radius = .6
         msg.rate_scales, msg.linearization_rates = [.1, .1], [.1, -.2]
+        msg.servo_dt_sec = .02
         msg.joint_names = [f"joint_{i}" for i in range(6)]
         msg.joint_velocity_lower, msg.joint_velocity_upper = [-1.]*6, [1.]*6
         msg.a, msg.c, msg.sigma_min, msg.m_min, msg.alpha = [1, 0], 1.05, .5, 1.55, 1.
@@ -303,6 +304,7 @@ class ServoTests(unittest.TestCase):
         np.testing.assert_array_equal(trace.previous_linear, [0., .05, 0.])
         np.testing.assert_allclose(self.node._last_linear_cmd, [0., .06, 0.])
         self.assertEqual(trace.linear_step_limit, .06)
+        self.assertEqual(trace.servo_dt_sec, .03)
 
     def test_missing_stale_and_nonfinite_commands_stop(self):
         cached = self.node.latest_cmd

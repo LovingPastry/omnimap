@@ -282,6 +282,7 @@ class InfoFlowServoRuntime:
                 trace.linear_speed_limit = rate_limits["speed"]
                 trace.linear_step_limit = rate_limits["step"]
                 trace.linear_deadband = rate_limits["deadband"]
+                trace.servo_dt_sec = rate_limits["dt"]
         self.twist_trace_pub.publish(trace)
         self.profile_logger.info(
             "servo_twist: tick=%d model_v=%d command_stamp=%.9f twist_stamp=%.9f "
@@ -537,7 +538,8 @@ class InfoFlowServoRuntime:
                 linear_deadband=self.linear_deadband,
             )
             rate_limits = dict(previous=self._last_linear_cmd.copy(), speed=max(0.0, self.linear_vel_max),
-                               step=self.linear_accel_max * servo_dt_sec, deadband=self.linear_deadband)
+                               step=self.linear_accel_max * servo_dt_sec, deadband=self.linear_deadband,
+                               dt=servo_dt_sec)
             self._last_linear_cmd = linear_cmd.copy()
             self._last_angular_cmd = angular_cmd.copy()
 

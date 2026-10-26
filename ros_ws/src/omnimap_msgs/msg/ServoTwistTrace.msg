@@ -24,3 +24,4 @@ float64[3] previous_linear
 float64 linear_speed_limit
 float64 linear_step_limit
 float64 linear_deadband
+float64 servo_dt_sec

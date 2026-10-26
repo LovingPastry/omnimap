@@ -19,6 +19,7 @@ class ProjectionProposal:
     rates: tuple = (0.0, 0.0)
     correction_norm: float = 0.0
     source_tick: int = 0
+    acceleration_limits_complete: bool = False
 
 
 class KinematicConstraintGate:
@@ -72,6 +73,21 @@ class KinematicConstraintGate:
             linear_matrix = np.vstack((joint_matrix, -joint_matrix))
             linear_bounds = np.r_[np.asarray(msg.joint_velocity_upper)-joint_bias,
                                   joint_bias-np.asarray(msg.joint_velocity_lower)]
+            # One source-cycle Euler prediction, not a stopping-distance model.
+            position_rows = np.asarray(msg.joint_position_bounded, dtype=bool)
+            accel_rows = np.asarray(msg.joint_acceleration_bounded, dtype=bool)
+            dt = msg.servo_dt_sec
+            for selected, lower, upper in (
+                    (position_rows,
+                     (np.asarray(msg.joint_position_lower)-msg.joint_position)/dt,
+                     (np.asarray(msg.joint_position_upper)-msg.joint_position)/dt),
+                    (accel_rows,
+                     np.asarray(msg.joint_velocity)+np.asarray(msg.joint_acceleration_lower)*dt,
+                     np.asarray(msg.joint_velocity)+np.asarray(msg.joint_acceleration_upper)*dt)):
+                matrix = joint_matrix[selected]
+                linear_matrix = np.vstack((linear_matrix, matrix, -matrix))
+                linear_bounds = np.r_[linear_bounds, (upper-joint_bias)[selected],
+                                      (joint_bias-lower)[selected]]
             camera = np.asarray(msg.camera_linear_matrix, dtype=float).reshape(3, 2)
             bias = np.asarray(msg.camera_linear_bias, dtype=float)
             limits = []
@@ -98,7 +114,7 @@ class KinematicConstraintGate:
         if np.linalg.norm(projected-origin) > self.max_normalized_delta + 1e-9:
             return ProjectionProposal(reason="constraint_projection_outside_local_radius")
         return ProjectionProposal(True, "advisory_projection", tuple(projected * scales),
-                                  norm, int(msg.planner_tick))
+                                  norm, int(msg.planner_tick), bool(np.all(msg.joint_acceleration_bounded)))
 
     def _validate(self, rates, radius, center, model_version, should_stop, state_ok, ros_now, wall_now):
         if should_stop:
@@ -133,17 +149,32 @@ class KinematicConstraintGate:
             return "constraint_joint_names_invalid"
         scalars = (radius, msg.reference_radius, msg.sigma_min, msg.m_min, msg.alpha,
                    msg.c, msg.drift, msg.inverse_residual, msg.derivative_error,
-                   msg.linear_speed_limit, msg.linear_step_limit, msg.linear_deadband)
+                   msg.linear_speed_limit, msg.linear_step_limit, msg.linear_deadband, msg.servo_dt_sec)
         arrays = ((rates, (2,)), (center, (3,)), (msg.reference_scene_center, (3,)),
                   (msg.rate_scales, (2,)), (msg.linearization_rates, (2,)), (msg.a, (2,)),
                   (msg.joint_rate_matrix, (12,)), (msg.joint_rate_bias, (6,)),
                   (msg.joint_velocity_lower, (6,)), (msg.joint_velocity_upper, (6,)),
                   (msg.camera_linear_matrix, (6,)), (msg.camera_linear_bias, (3,)),
-                  (msg.previous_linear, (3,)))
+                  (msg.previous_linear, (3,)), (msg.joint_position, (6,)), (msg.joint_velocity, (6,)),
+                  (msg.joint_position_lower, (6,)), (msg.joint_position_upper, (6,)),
+                  (msg.joint_acceleration_lower, (6,)), (msg.joint_acceleration_upper, (6,)))
         if (not all(math.isfinite(float(value)) for value in scalars)
                 or any(np.asarray(value).shape != shape or not np.all(np.isfinite(value))
                        for value, shape in arrays)):
             return "constraint_nonfinite_or_shape"
+        if (msg.servo_dt_sec <= 0 or len(msg.joint_position_bounded) != 6
+                or len(msg.joint_acceleration_bounded) != 6):
+            return "constraint_joint_cycle_invalid"
+        position_rows = np.asarray(msg.joint_position_bounded, dtype=bool)
+        accel_rows = np.asarray(msg.joint_acceleration_bounded, dtype=bool)
+        if (np.any(np.asarray(msg.joint_position_lower)[position_rows] >=
+                   np.asarray(msg.joint_position_upper)[position_rows])
+                or np.any(np.asarray(msg.joint_acceleration_lower)[accel_rows] >= 0)
+                or np.any(np.asarray(msg.joint_acceleration_upper)[accel_rows] <= 0)):
+            return "constraint_joint_dynamic_bounds_invalid"
+        if (np.any(np.asarray(msg.joint_position)[position_rows] < np.asarray(msg.joint_position_lower)[position_rows])
+                or np.any(np.asarray(msg.joint_position)[position_rows] > np.asarray(msg.joint_position_upper)[position_rows])):
+            return "constraint_joint_position_outside_bounds"
         if min(msg.linear_speed_limit, msg.linear_step_limit, msg.linear_deadband) < 0:
             return "constraint_linear_limits_invalid"
         if (np.any(np.asarray(msg.joint_velocity_lower) >= 0)

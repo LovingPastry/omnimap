@@ -160,6 +160,7 @@ class ChainTest(unittest.TestCase):
                     matrix[0, 0] = matrix[1, 1] = 0.2
                     trace.camera_rate_matrix = matrix.reshape(-1).tolist()
                     trace.camera_bias = [cls.rate_model_error, 0, 0.03, 0.1, -0.2, 0.3]
+                    trace.servo_dt_sec = .02
                     trace.linear_limits_valid = cls.linear_limits_valid
                     trace.previous_linear = [0.01, 0, 0.03]
                     trace.linear_speed_limit, trace.linear_step_limit, trace.linear_deadband = .1, .05, .001
@@ -249,6 +250,11 @@ class ChainTest(unittest.TestCase):
         np.testing.assert_allclose(np.asarray(result.joint_rate_matrix).reshape(6, 2),
                                    directions[:, :2], atol=1e-7)
         np.testing.assert_allclose(result.joint_rate_bias, directions[:, 2], atol=1e-7)
+        self.assertEqual(result.servo_dt_sec, .02)
+        self.assertTrue(all(result.joint_position_bounded))
+        self.assertFalse(any(result.joint_acceleration_bounded))
+        np.testing.assert_allclose(result.joint_position_lower, [-6.28]*6)
+        np.testing.assert_allclose(result.joint_position_upper, [6.28]*6)
         np.testing.assert_allclose(result.joint_velocity_upper, np.arange(1, 7))
         np.testing.assert_allclose(result.joint_velocity_lower, -np.arange(1, 7))
         np.testing.assert_allclose(np.asarray(result.camera_linear_matrix).reshape(3, 2), task[:3, :2])
