@@ -74,7 +74,7 @@ rostopic echo -n 1 /omnimap/kinematic_constraint
 
 本接口描述冻结 pose/PI/slew 状态下的局部映射；有限速率修正可能进入限速或 deadband 分支，
 后续周期的姿态、积分器和下游 MoveIt 也会变化。Planning 已订阅此接口并计算只读建议，未把投影结果发送到机器人。
-消费者已校验双时钟年龄、命令来源/参考球和局部范围；控制接入仍须处理速度/加速度约束与真实执行残差。
+消费者已校验双时钟年龄、命令来源/参考球和局部范围，并联合求解源周期的速度/slew 约束；控制接入仍须执行时重新校验、处理关节加速度/位置约束与真实执行残差。
 不能投影后任意裁剪再宣称仍满足半空间；不可行时零速/重新规划，不复用旧方向。
 恢复停车还需定义模型重新获取机制，避免等不到运动 trace 而无法恢复。
 
@@ -129,7 +129,7 @@ SciPy 已列在 environment.yaml 和执行侧依赖中。求解后独立检查�
 不可行、失败、非有限结果或无法确认最优性时返回失败，不裁剪结果。这些是数值容差，不是硬件安全裕量。
 
 Planning 观察模式已使用半空间与局部球联合求解：旧实现会拒绝半空间投影在球外、但交集内仍有解的情况。
-RobotModel 关节速度约束现已通过 KinematicConstraint 接入；相机速度/加速度约束仍只有求解器接口和解析测试；
+RobotModel 关节速度约束和源 Servo 周期的相机线速度/slew 约束现已通过 KinematicConstraint 接入；
 因此没有增加连续控制 enforce 模式。关节加速度需要对应采样的上一执行速度和周期，不能凭任意 dt 推导。
 
 新增求解器测试 8 项通过，覆盖解析交点、限速后破坏半空间的反例、仿射偏置、不可行交集和伪成功结果；
@@ -147,6 +147,29 @@ Planning 检查名称数量/唯一性、数组形状、有限值及上下限符�
 `A u <= upper-bq` 与 `-A u <= bq-lower`，和半空间、局部球一起求解。
 该约束是模型级速度界限，不包含 MoveIt 的动态碰撞减速、状态缩放或控制器实际跟踪误差，仍只输出观察建议。
 没有新增关节加速度或位置约束，不能把这一阶段解释为完整执行可行集。
+
+### 源 Servo 周期的相机线速度限值
+
+ServoTwistTrace 新增显式 `linear_limits_valid`、`previous_linear[3]`、`linear_speed_limit`、
+`linear_step_limit`、`linear_deadband`。previous 是更新前的命令；step 是本周期实际 `linear_accel_max*servo_dt_sec`，
+不是 Planning 周期推算值。零 speed/step 表示禁用，负 speed 的旧禁用语义在 trace 中规范化为零。
+monitor 拒绝缺失有效标记、非有限或负限值，并把前三行相机映射乘以速率尺度后发布为
+`camera_linear_matrix[6]`、`camera_linear_bias[3]`，和上一速度及限值一起传入 KinematicConstraint。
+这组矩阵保留相机参考点；关节映射仍用经杠杆臂修正的 tool0 Twist，不能混用。
+
+Planning 同时加入 `||M u+b||<=speed` 和 `||M u+b-previous||<=step`。
+死区外部不是凸集，故沿源速度单位方向 n 加入保守半空间 `n.T(M u+b)>=deadband`；
+该半空间可能拒绝转向很大的可行速度，因此建议是这个保守凸集合内的最小修正，不是整个非凸死区外部的全局最优。
+源速度已处于死区时拒绝模型。角速度在冻结 pose 下不随两个球面速率变化，其实际限幅后数值已包含于偏置。
+
+这些上限只描述源 trace 的周期。下一执行周期的 pose、PI、previous 和 dt 都可能变化；
+数值容差也可能在限幅边界产生微小误差。执行时必须重新获取并验证模型，不能把当前观察建议直接作为闭环保证。
+源命令本身已限幅、slew 或 deadband 生效时，仍发布无效局部模型；启动/停车恢复机制尚未完成。
+
+本阶段消息/C++ 构建通过，InfoFlow 消费者 14 项、Planning/Servo 回调 11 项、求解器 8 项、
+原有反馈/局部模型 11 项通过；隔离节点及正式 launch 两套 ROS 测试各 9 项通过。
+新增测试验证实际周期 step、更新前 previous、相机参考点矩阵、死区保守投影及缺失限值标记拒绝。
+日志：`/tmp/omnimap_linear_limits_test.log`、`/tmp/omnimap_linear_limits_launch_test.log`。
 
 消息/C++ 构建通过；消费者现为 12 项、实际 Planning/Servo 回调 10 项通过。
 直接节点和正式 diagnostics.launch 两套隔离 ROS 测试各 9 项通过，使用独立 NumPy FK/Jacobian

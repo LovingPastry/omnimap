@@ -81,6 +81,7 @@ class ChainTest(unittest.TestCase):
             self.__class__.tf_error = 0.0
             self.__class__.rate_model_valid = True
             self.__class__.rate_model_error = 0.0
+            self.__class__.linear_limits_valid = True
         self.wait(lambda: self.kinematic is not None and self.kinematic.transform_chain_valid,
                   "healthy chain", timeout=6)
 
@@ -159,6 +160,9 @@ class ChainTest(unittest.TestCase):
                     matrix[0, 0] = matrix[1, 1] = 0.2
                     trace.camera_rate_matrix = matrix.reshape(-1).tolist()
                     trace.camera_bias = [cls.rate_model_error, 0, 0.03, 0.1, -0.2, 0.3]
+                    trace.linear_limits_valid = cls.linear_limits_valid
+                    trace.previous_linear = [0.01, 0, 0.03]
+                    trace.linear_speed_limit, trace.linear_step_limit, trace.linear_deadband = .1, .05, .001
                     cls.input_pub.publish(msg)
                     # rospy has now assigned msg.header.seq. Nested headers in
                     # the trace preserve that actual wire sequence.
@@ -247,6 +251,11 @@ class ChainTest(unittest.TestCase):
         np.testing.assert_allclose(result.joint_rate_bias, directions[:, 2], atol=1e-7)
         np.testing.assert_allclose(result.joint_velocity_upper, np.arange(1, 7))
         np.testing.assert_allclose(result.joint_velocity_lower, -np.arange(1, 7))
+        np.testing.assert_allclose(np.asarray(result.camera_linear_matrix).reshape(3, 2), task[:3, :2])
+        np.testing.assert_allclose(result.camera_linear_bias, [0, 0, .03])
+        np.testing.assert_allclose(result.previous_linear, [.01, 0, .03])
+        self.assertEqual((result.linear_speed_limit, result.linear_step_limit, result.linear_deadband),
+                         (.1, .05, .001))
         self.assertEqual(list(result.joint_names), ["j%d" % i for i in range(1, 7)])
         def metric(q):
             scaled = self.independent_jacobian(q)/((np.arange(1, 7)*0.1)[:, None]) * np.arange(1, 7)[None, :]
@@ -270,6 +279,7 @@ class ChainTest(unittest.TestCase):
     def test_constraint_rejects_limits_mismatch_and_singular_state(self):
         self.wait(lambda: self.constraint is not None and self.constraint.valid, "initial derivatives")
         for field, value, reason in (("rate_model_valid", False, "servo_rate_model_invalid"),
+                                      ("linear_limits_valid", False, "servo_linear_limits_invalid"),
                                       ("rate_model_error", 0.1, "servo_rate_model_mismatch")):
             with self.lock:
                 old = getattr(self.__class__, field)

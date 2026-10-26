@@ -276,6 +276,10 @@ class ServoTests(unittest.TestCase):
         self.assertEqual(companion.model_version, 7)
         self.assertEqual(companion.command, msg)
         self.assertTrue(companion.rate_model_valid, companion.rate_model_reason)
+        self.assertTrue(companion.linear_limits_valid)
+        np.testing.assert_array_equal(companion.previous_linear, [0, 0, 0])
+        self.assertEqual(companion.linear_speed_limit, .1)
+        self.assertEqual(companion.linear_step_limit, 0.)
         matrix = np.array(companion.camera_rate_matrix).reshape(6, 2)
         np.testing.assert_allclose(matrix @ companion.spherical_rates + companion.camera_bias,
                                    [msg.twist.linear.x, msg.twist.linear.y, msg.twist.linear.z,
@@ -285,6 +289,20 @@ class ServoTests(unittest.TestCase):
         buffer = io.BytesIO()
         companion.serialize(buffer)
         self.assertEqual(type(companion)().deserialize(buffer.getvalue()), companion)
+
+    def test_limit_trace_uses_previous_command_and_actual_cycle_step(self):
+        self.node._last_linear_cmd = np.array([0., .05, 0.])
+        self.node.linear_accel_max = 2.
+        pose = np.eye(4)
+        pose[0, 3] = .6
+        with patch.object(servo, "lookup_latest_pose_from_tf", return_value=(pose, rospy.Time(100))), \
+                patch.object(self.node, "_servo_dt_sec", return_value=.03):
+            self.node._servo_timer_callback(None)
+        trace = self.trace_pub.messages[-1]
+        self.assertTrue(trace.rate_model_valid, trace.rate_model_reason)
+        np.testing.assert_array_equal(trace.previous_linear, [0., .05, 0.])
+        np.testing.assert_allclose(self.node._last_linear_cmd, [0., .06, 0.])
+        self.assertEqual(trace.linear_step_limit, .06)
 
     def test_missing_stale_and_nonfinite_commands_stop(self):
         cached = self.node.latest_cmd

@@ -1,7 +1,7 @@
 """Validate execution-side local models and compute non-actuating proposals.
 
-This consumer deliberately has no enforce mode: camera speed/acceleration
-constraints and a stop/recovery model remain to be integrated.
+This consumer deliberately has no enforce mode: model recovery, execution
+revalidation and calibration remain to be integrated.
 """
 from dataclasses import dataclass
 import copy
@@ -69,12 +69,30 @@ class KinematicConstraintGate:
         try:
             joint_matrix = np.asarray(msg.joint_rate_matrix, dtype=float).reshape(6, 2)
             joint_bias = np.asarray(msg.joint_rate_bias, dtype=float)
+            linear_matrix = np.vstack((joint_matrix, -joint_matrix))
+            linear_bounds = np.r_[np.asarray(msg.joint_velocity_upper)-joint_bias,
+                                  joint_bias-np.asarray(msg.joint_velocity_lower)]
+            camera = np.asarray(msg.camera_linear_matrix, dtype=float).reshape(3, 2)
+            bias = np.asarray(msg.camera_linear_bias, dtype=float)
+            limits = []
+            for limit, offset in ((msg.linear_speed_limit, bias),
+                                  (msg.linear_step_limit, bias-np.asarray(msg.previous_linear))):
+                if limit > 0:
+                    limits.append((camera, offset, limit))
+            if msg.linear_deadband > 0:
+                # The exterior of the deadband ball is nonconvex. Keep the
+                # convex supporting halfspace oriented by the source velocity.
+                source_velocity = camera @ origin + bias
+                speed = np.linalg.norm(source_velocity)
+                if speed <= msg.linear_deadband:
+                    raise ValueError("source velocity is inside deadband")
+                normal = source_velocity / speed
+                linear_matrix = np.vstack((linear_matrix, -normal @ camera))
+                linear_bounds = np.r_[linear_bounds, normal @ bias-msg.linear_deadband]
             projected, norm = project_feasible_spherical_command(
                 original, msg.a, msg.c, local_center=origin,
                 local_radius=self.max_normalized_delta,
-                linear_matrix=np.vstack((joint_matrix, -joint_matrix)),
-                linear_bounds=np.r_[np.asarray(msg.joint_velocity_upper)-joint_bias,
-                                    joint_bias-np.asarray(msg.joint_velocity_lower)])
+                linear_matrix=linear_matrix, linear_bounds=linear_bounds, norm_limits=limits)
         except ValueError as exc:
             return ProjectionProposal(reason="constraint_projection_unavailable:" + str(exc))
         if np.linalg.norm(projected-origin) > self.max_normalized_delta + 1e-9:
@@ -114,15 +132,20 @@ class KinematicConstraintGate:
                 or any(not name.strip() for name in msg.joint_names)):
             return "constraint_joint_names_invalid"
         scalars = (radius, msg.reference_radius, msg.sigma_min, msg.m_min, msg.alpha,
-                   msg.c, msg.drift, msg.inverse_residual, msg.derivative_error)
+                   msg.c, msg.drift, msg.inverse_residual, msg.derivative_error,
+                   msg.linear_speed_limit, msg.linear_step_limit, msg.linear_deadband)
         arrays = ((rates, (2,)), (center, (3,)), (msg.reference_scene_center, (3,)),
                   (msg.rate_scales, (2,)), (msg.linearization_rates, (2,)), (msg.a, (2,)),
                   (msg.joint_rate_matrix, (12,)), (msg.joint_rate_bias, (6,)),
-                  (msg.joint_velocity_lower, (6,)), (msg.joint_velocity_upper, (6,)))
+                  (msg.joint_velocity_lower, (6,)), (msg.joint_velocity_upper, (6,)),
+                  (msg.camera_linear_matrix, (6,)), (msg.camera_linear_bias, (3,)),
+                  (msg.previous_linear, (3,)))
         if (not all(math.isfinite(float(value)) for value in scalars)
                 or any(np.asarray(value).shape != shape or not np.all(np.isfinite(value))
                        for value, shape in arrays)):
             return "constraint_nonfinite_or_shape"
+        if min(msg.linear_speed_limit, msg.linear_step_limit, msg.linear_deadband) < 0:
+            return "constraint_linear_limits_invalid"
         if (np.any(np.asarray(msg.joint_velocity_lower) >= 0)
                 or np.any(np.asarray(msg.joint_velocity_upper) <= 0)):
             return "constraint_joint_bounds_invalid"

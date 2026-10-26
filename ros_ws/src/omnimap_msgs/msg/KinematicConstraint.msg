@@ -1,5 +1,5 @@
 # Advisory local model only. Includes RobotModel joint velocity bounds, but not
-# acceleration, camera speed, collision or joint-position constraints. Physical spherical
+# joint acceleration, collision or joint-position constraints. Physical spherical
 # rates = rate_scales * u; a dot u >= c uses dimensionless u.
 std_msgs/Header header
 time joint_stamp
@@ -33,3 +33,11 @@ float64[12] joint_rate_matrix
 float64[6] joint_rate_bias
 float64[6] joint_velocity_lower
 float64[6] joint_velocity_upper
+# Frozen Servo camera-reference linear velocity: matrix*u+bias, m/s.
+float64[6] camera_linear_matrix
+float64[3] camera_linear_bias
+float64[3] previous_linear
+# Zero means disabled for speed/step; step is accel_max * actual Servo dt.
+float64 linear_speed_limit
+float64 linear_step_limit
+float64 linear_deadband

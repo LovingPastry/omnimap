@@ -339,6 +339,22 @@ private:
     if (!camera.allFinite() || !bias.allFinite() || !rates.allFinite() ||
         (camera*rates+bias-twist(trace.command)).norm() > 1e-9)
       throw std::runtime_error("servo_rate_model_mismatch");
+    if (!trace.linear_limits_valid || !std::isfinite(trace.linear_speed_limit) ||
+        !std::isfinite(trace.linear_step_limit) || !std::isfinite(trace.linear_deadband) ||
+        trace.linear_speed_limit < 0 || trace.linear_step_limit < 0 || trace.linear_deadband < 0 ||
+        !std::all_of(trace.previous_linear.begin(), trace.previous_linear.end(),
+                     [](double value) { return std::isfinite(value); }))
+      throw std::runtime_error("servo_linear_limits_invalid");
+    out.previous_linear = trace.previous_linear;
+    out.linear_speed_limit = trace.linear_speed_limit;
+    out.linear_step_limit = trace.linear_step_limit;
+    out.linear_deadband = trace.linear_deadband;
+    for (size_t row = 0; row < 3; ++row)
+    {
+      out.camera_linear_bias[row] = bias[row];
+      for (size_t col = 0; col < 2; ++col)
+        out.camera_linear_matrix[row*2+col] = camera(row,col)*rate_scales_[col];
+    }
     const auto cam = pose(tf_.lookupTransform(base_, camera_, trace.command.header.stamp, ros::Duration(0)).transform);
     const auto tool = pose(tf_.lookupTransform(base_, tool_, trace.command.header.stamp, ros::Duration(0)).transform);
     const Eigen::Vector3d offset = cam.translation()-tool.translation();

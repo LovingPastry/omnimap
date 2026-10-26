@@ -18,3 +18,9 @@ float64[3] reference_scene_center
 float64[2] spherical_rates
 float64[12] camera_rate_matrix
 float64[6] camera_bias
+# Limits from this exact Servo cycle, before updating the previous command.
+bool linear_limits_valid
+float64[3] previous_linear
+float64 linear_speed_limit
+float64 linear_step_limit
+float64 linear_deadband

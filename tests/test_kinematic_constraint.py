@@ -32,7 +32,10 @@ def constraint(**changes):
                   inverse_residual=1e-14, derivative_error=1e-8,
                   joint_names=[f"joint_{i}" for i in range(6)],
                   joint_rate_matrix=[0.] * 12, joint_rate_bias=[0.] * 6,
-                  joint_velocity_lower=[-1.] * 6, joint_velocity_upper=[1.] * 6)
+                  joint_velocity_lower=[-1.] * 6, joint_velocity_upper=[1.] * 6,
+                  camera_linear_matrix=[0.] * 6, camera_linear_bias=[0.] * 3,
+                  previous_linear=[0.] * 3, linear_speed_limit=0.,
+                  linear_step_limit=0., linear_deadband=0.)
     fields.update(changes)
     return NS(**fields)
 
@@ -145,6 +148,30 @@ class ConstraintTests(unittest.TestCase):
         self.gate.update(constraint(joint_rate_matrix=matrix.ravel(),
                                     joint_velocity_upper=[1.01, 1, 1, 1, 1, 1]), wall_now=100)
         self.assertIn("projection_unavailable", self.propose().reason)
+
+    def test_camera_speed_and_slew_use_camera_reference_affine_model(self):
+        fields = dict(camera_linear_matrix=[.1, 0, 0, .1, 0, 0],
+                      camera_linear_bias=[0, .2, 0], previous_linear=[.1, 0, 0])
+        for limits, y in ((dict(linear_speed_limit=.106), np.sqrt(.106**2-.105**2)),
+                          (dict(linear_step_limit=.006), np.sqrt(.006**2-.005**2))):
+            self.gate.update(constraint(**fields, **limits), wall_now=100)
+            result = self.propose(rates=[.1, -.18])
+            self.assertTrue(result.valid, result.reason)
+            np.testing.assert_allclose(result.rates, [.105, -.2+y], atol=1e-8)
+        self.gate.update(constraint(**fields, linear_speed_limit=.102), wall_now=100)
+        self.assertIn("projection_unavailable", self.propose().reason)
+
+    def test_deadband_supporting_halfspace_and_invalid_limits(self):
+        fields = dict(camera_linear_matrix=[.1, 0, 0, 0, 0, 0], linear_deadband=.09,
+                      a=[-1, 0], c=-.95, m_min=.5, drift=.95)
+        self.gate.update(constraint(**fields), wall_now=100)
+        result = self.propose(rates=[.08, -.2])
+        self.assertTrue(result.valid, result.reason)
+        np.testing.assert_allclose(result.rates, [.09, -.2], atol=1e-8)
+        for changes in (dict(linear_deadband=.11), dict(linear_step_limit=-1),
+                        dict(previous_linear=[np.nan]*3), dict(camera_linear_matrix=[0]*5)):
+            self.gate.update(constraint(**{**fields, **changes}), wall_now=100)
+            self.assertFalse(self.propose().valid)
 
     def test_update_owns_sample_and_explicit_recovery(self):
         msg = constraint()

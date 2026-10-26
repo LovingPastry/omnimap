@@ -248,7 +248,7 @@ class InfoFlowServoRuntime:
         return max(timeout_sec, adaptive_timeout)
 
     def _publish_twist(self, *, cmd=None, stamp=None, linear_cmd=None,
-                       angular_cmd=None, reason, rate_model=None):
+                       angular_cmd=None, reason, rate_model=None, rate_limits=None):
         """Log the exact camera-reference Twist sent to the bridge, including zeros."""
         if linear_cmd is None:
             msg = publish_zero_twist(self.cmd_pub, cmd_frame=self.cmd_frame, stamp=stamp)
@@ -276,6 +276,12 @@ class InfoFlowServoRuntime:
             trace.spherical_rates = [float(cmd.theta_rate), float(cmd.phi_rate)]
             trace.camera_rate_matrix = matrix.reshape(-1).tolist()
             trace.camera_bias = bias.tolist()
+            if rate_limits is not None:
+                trace.linear_limits_valid = True
+                trace.previous_linear = rate_limits["previous"].tolist()
+                trace.linear_speed_limit = rate_limits["speed"]
+                trace.linear_step_limit = rate_limits["step"]
+                trace.linear_deadband = rate_limits["deadband"]
         self.twist_trace_pub.publish(trace)
         self.profile_logger.info(
             "servo_twist: tick=%d model_v=%d command_stamp=%.9f twist_stamp=%.9f "
@@ -530,6 +536,8 @@ class InfoFlowServoRuntime:
                 linear_step_limit=self.linear_accel_max * servo_dt_sec,
                 linear_deadband=self.linear_deadband,
             )
+            rate_limits = dict(previous=self._last_linear_cmd.copy(), speed=max(0.0, self.linear_vel_max),
+                               step=self.linear_accel_max * servo_dt_sec, deadband=self.linear_deadband)
             self._last_linear_cmd = linear_cmd.copy()
             self._last_angular_cmd = angular_cmd.copy()
 
@@ -540,6 +548,7 @@ class InfoFlowServoRuntime:
                 stamp=pose_stamp,
                 reason="motion",
                 rate_model=rate_model,
+                rate_limits=rate_limits,
             )
             self._planner_log_throttle(
                 "reference_sphere_servo",
