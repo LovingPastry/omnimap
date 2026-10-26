@@ -12,6 +12,11 @@
     status_topic: feedback
     cartesian_command_in_topic: /test/tool_twist
   </rosparam>
+  <!-- Nonuniform partial overrides exercise RobotModel acceleration ordering. -->
+  <rosparam ns="robot_description_planning/joint_limits">
+    j1: {has_acceleration_limits: true, max_acceleration: 0.7}
+    j3: {has_acceleration_limits: true, max_acceleration: 1.3}
+  </rosparam>
   <node pkg="omnimap_kinematics" type="omnimap_kinematic_monitor" name="test_monitor" output="screen">
     <param name="servo_ns" value="/test/servo"/>
     <param name="constraint_m_min" value="0.1"/>

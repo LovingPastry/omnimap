@@ -252,7 +252,15 @@ class ChainTest(unittest.TestCase):
         np.testing.assert_allclose(result.joint_rate_bias, directions[:, 2], atol=1e-7)
         self.assertEqual(result.servo_dt_sec, .02)
         self.assertTrue(all(result.joint_position_bounded))
-        self.assertFalse(any(result.joint_acceleration_bounded))
+        expected_acceleration = [rospy.get_param(
+            "/robot_description_planning/joint_limits/j%d/max_acceleration" % i, 0.)
+            for i in range(1, 7)]
+        self.assertEqual(list(result.joint_acceleration_bounded),
+                         [value > 0 for value in expected_acceleration])
+        np.testing.assert_allclose(result.joint_acceleration_upper, expected_acceleration)
+        np.testing.assert_allclose(result.joint_acceleration_lower, -np.array(expected_acceleration))
+        np.testing.assert_allclose(result.joint_position, q)
+        np.testing.assert_allclose(result.joint_velocity, self.dq)
         np.testing.assert_allclose(result.joint_position_lower, [-6.28]*6)
         np.testing.assert_allclose(result.joint_position_upper, [6.28]*6)
         np.testing.assert_allclose(result.joint_velocity_upper, np.arange(1, 7))
