@@ -148,6 +148,13 @@ observe 测试保持零输出；新增 servo_execution.test 用非零投影命�
 
 ## 实机阶段仍需完成
 
+2026-10-26 20:50（Asia/Shanghai）只读现场检查：ROS master、UR 驱动和 `/servo_server`
+在线，`/joint_states` 有真实零速样本；但 monitor、桥接和 OmniMap Twist trace 尚无发布者，
+`constraint_m_min` 未设置。因此当前现场还没有投影执行或闭环验收证据。
+运行中的 `/robot_description_planning/joint_limits` 为六关节速度上限 π rad/s、
+加速度界限开启且上限 5 rad/s²，与磁盘 YAML 不同；这些是读取到的配置值，不是实测标定。
+执行端证据和下一步见 [sumi 现场核对](ur5_nbv_kinematics_upgrade_sumi.md#本轮只读现场核对)。
+
 1. 现场标定 m_min 和执行年龄/关节变化/任务残差限值，验证适用工况与真实误差裕量。
 2. 核验真实模型、关节顺序、相机标定、普通桥接配置和执行反馈；确认实际速度/加速度及停车效果。
 3. 完成硬件断链、保护停机后的人工恢复边界和非零闭环验收，保留完整数据与有效配置。

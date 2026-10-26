@@ -136,7 +136,7 @@ rostest omnimap_kinematics servo_execution.test
 ```
 
 前两套用独立 NumPy FK/有限差分校验实际 C++ J、完整梯度、a/drift、参考点与关节顺序，
-并覆盖时间/TF/状态失效。后两套实际运行 Servo 的订阅/Timer、monitor 和桥接，
+并覆盖时间/TF/状态失效。query/stream 两套实际运行 Servo 的订阅/Timer、monitor 和桥接，
 覆盖查询或流式建议、关节断流、MoveIt 停车及新模型恢复；stream 另验证关节变化后的连续建议更新。
 observe 测试输入为合成关节/TF/球面命令且保持零速。servo_execution.test 则发布真实 ROS 非零
 投影命令，经普通桥接输出驱动独立 FK/Jacobian 理想关节积分模型，验证限速、MoveIt halt、
@@ -152,3 +152,22 @@ KinematicConstraint、KinematicModel、实际 MoveIt status、joint_states 和 T
 1. 用现场真实模型/减速数据标定 m_min，确定并验证执行年龄、关节变化和任务残差限值。
 2. 验证关节顺序、相机标定、普通桥接和真实执行反馈，评估采样时延、实际速度/加速度及制动效果。
 3. 完成硬件断链、恢复及非零闭环验收，不绕过 MoveIt 停车或机器人保护停机。
+
+## 本轮只读现场核对
+
+2026-10-26 20:50（Asia/Shanghai）读取本机 ROS master 和有效参数，未启动节点或发布控制命令。
+采集记录：`/tmp/omnimap_kinematic_inventory_current.txt`（本机临时文件，不随 Git 同步）。
+
+- master、UR 驱动、MoveIt 和 `/servo_server` 在线；真实 `/joint_states` 样本六关节速度均为零。
+- `/servo_server/delta_twist_cmds` 有 Servo 订阅者、无发布者。
+  `/omnimap/kinematic_status`、`kinematic_constraint`、`bridge_status`、`servo_twist_trace`
+  及相机输入 topic 尚未注册；不能据此声称整条反馈链已部署运行。
+- `constraint_m_min` 和普通桥接的 `filter_mode` 参数均未设置；没有实机执行门槛已满足的证据。
+- 有效 `/robot_description_planning/joint_limits` 六关节速度上限均为 π rad/s，
+  `has_acceleration_limits=true`、`max_acceleration=5.0` rad/s²。
+  磁盘 `ur5_moveit_config/config/joint_limits.yaml` 则包含不同速度/位置界限且未列加速度。
+  因此应追溯实际 launch 参数来源，使用 monitor 读取的有效 RobotModel 核验；不能仅依据文件名判断生效值，
+  也不能把读取到的加速度配置当作实际机器人加速度或制动能力。
+
+下一步为启动仅诊断的 monitor、确认真实模型/TF 连续对齐，再依据现场记录确定 m_min 和三个执行限值。
+本轮没有实机非零运动、保护停机恢复或制动测量结果，软件测试中的数值不能补齐这些证据。
