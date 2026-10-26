@@ -257,6 +257,9 @@ class ServoTests(unittest.TestCase):
                                        position=[0.]*6, velocity=[0.]*6)
         self.joint_sample.header.stamp = rospy.Time(100)
         self.node.preview_joint_callback(self.joint_sample)
+        with patch("time.monotonic", return_value=99.89):
+            self.node.preview_status_callback(feedback(stamp=99.89))
+        self.node.preview_status_callback(feedback())
         self.preview_pose = np.eye(4)
         self.preview_pose[0, 3] = .6
         self.preview_lookup = patch.object(servo, "lookup_latest_pose_from_tf",
@@ -489,6 +492,46 @@ class ServoTests(unittest.TestCase):
         self.assertTrue(self.node.latest_cycle_proposal.valid)
         self.assertAlmostEqual(self.node.latest_cycle_proposal.rates[0], .096)
         self.assert_zero()
+
+    def test_new_moveit_stop_rejects_previously_ready_model(self):
+        evaluation = self.node.evaluate_preview(self.cmd, self.preview_pose, rospy.Time(100), .02,
+            lambda trace: NS(constraint=preview_response(trace)), return_evaluation=True)
+        self.node.latest_preview_evaluation = evaluation
+        self.node.latest_cycle_proposal = NS(valid=True)
+        self.node.preview_status_callback(feedback(moveit_status=2, stamp=100.01))
+        self.assertIsNone(self.node.latest_preview_evaluation)
+        self.assertIsNone(self.node.latest_cycle_proposal)
+        with self.node._control_lock:
+            with self.assertRaisesRegex(ValueError, "projection_moveit_stop:2"):
+                self.node.revalidate_cycle_preview(evaluation, self.cmd, self.preview_pose, .02)
+        self.assertEqual(self.pub.messages, [])
+
+    def test_status_stop_arriving_during_solve_discards_result(self):
+        self.node.preview_mode = "observe"
+        self.node.raw_spherical_cmd_callback(self.cmd)
+        self.node.latest_preview_evaluation = NS(test_model=True)
+        def solve(query, payload, timeout):
+            self.node.preview_status_callback(feedback(moveit_status=4, stamp=100.01))
+            return NS(valid=True, reason="advisory_projection", rates=(.1, 0.))
+        with patch.object(self.node._cycle_projection_queries, "call", side_effect=solve):
+            self.node._servo_timer_callback(None)
+        self.assertIsNone(self.node.latest_cycle_proposal)
+        self.assertAlmostEqual(self.pub.messages[-1].twist.linear.y, .06)
+
+    def test_stop_and_fast_health_recovery_still_rejects_old_solve(self):
+        self.node.preview_mode = "observe"
+        self.node.raw_spherical_cmd_callback(self.cmd)
+        self.node.latest_preview_evaluation = NS(test_model=True)
+        self.node.projection_readiness.recovery_sec = 0.
+        def solve(query, payload, timeout):
+            for code, stamp in ((4, 100.01), (0, 100.02), (0, 100.03)):
+                self.node.preview_status_callback(feedback(moveit_status=code, stamp=stamp))
+            self.node._validate_projection_readiness()
+            return NS(valid=True, reason="advisory_projection", rates=(.1, 0.))
+        with patch.object(self.node._cycle_projection_queries, "call", side_effect=solve):
+            self.node._servo_timer_callback(None)
+        self.assertIsNone(self.node.latest_cycle_proposal)
+        self.assertTrue(any("health epoch changed" in line for line in self.log.lines))
 
     def test_cycle_optimizer_timeout_keeps_zero_and_does_not_start_replacements(self):
         self.node.preview_mode = "observe"

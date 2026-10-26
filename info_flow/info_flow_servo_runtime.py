@@ -12,13 +12,14 @@ import numpy as np
 import rospy
 import tf2_ros
 from geometry_msgs.msg import TwistStamped
-from omnimap_msgs.msg import ServoTwistTrace
+from omnimap_msgs.msg import ServoTwistTrace, KinematicStatus
 from omnimap_msgs.srv import EvaluateKinematicModel
 from scipy.spatial.transform import Rotation as R
 from kinematic_projection import camera_rate_model, unclipped_preview_rate_model
 from kinematic_constraint import KinematicConstraintGate
 from bounded_query import SingleFlightQuery
 from preview_joint_state import PreviewJointState
+from projection_readiness import ProjectionReadinessGate
 from sensor_msgs.msg import JointState
 
 from servo_runtime_common import (
@@ -78,6 +79,8 @@ class ServoStats:
 class InfoFlowServoRuntime:
     def __init__(self, args):
         self._control_lock = threading.RLock()
+        self._projection_status_lock = threading.Lock()
+        self._projection_health_epoch = 0
         self._control_generation = 0
         self._preview_queries = SingleFlightQuery()
         self._cycle_projection_queries = SingleFlightQuery()
@@ -142,6 +145,9 @@ class InfoFlowServoRuntime:
         self.angular_accel_max = max(0.0, float(args.angular_accel_max))
         self.status_log_interval_sec = max(0.2, float(args.status_log_interval_sec))
 
+        self.projection_readiness = ProjectionReadinessGate(
+            source_frame=self.world_frame, timeout_sec=self.pose_stale_timeout_sec,
+            recovery_sec=args.kinematic_projection_recovery_sec)
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
         self.cmd_pub = rospy.Publisher(args.cmd_topic, TwistStamped, queue_size=1)
@@ -166,6 +172,8 @@ class InfoFlowServoRuntime:
             self.spherical_cmd_callback,
             queue_size=1,
         )
+        self.preview_status_sub = rospy.Subscriber(
+            args.kinematic_status_topic, KinematicStatus, self.preview_status_callback, queue_size=1)
         self.preview_joint_sub = rospy.Subscriber(
             args.kinematic_joint_topic, JointState, self.preview_joint_callback, queue_size=1)
         self.timer = rospy.Timer(
@@ -364,6 +372,9 @@ class InfoFlowServoRuntime:
         self.latest_preview_constraint = None
         self.latest_preview_evaluation = None
         try:
+            with self._projection_status_lock:
+                self._validate_projection_readiness()
+                health_epoch = self._projection_health_epoch
             raw, final = self._preview_command_pair()
             pose, stamp = lookup_latest_pose_from_tf(
                 self.tf_buffer, world_frame=self.world_frame, camera_frame=self.camera_frame, timeout_sec=0.)
@@ -376,8 +387,12 @@ class InfoFlowServoRuntime:
             new_raw, new_final = self._preview_command_pair()
             if new_raw.msg != raw.msg or new_final.msg != final.msg:
                 raise ValueError("preview command changed during query")
-            self.latest_preview_constraint = response
-            self.latest_preview_evaluation = evaluation
+            with self._projection_status_lock:
+                self._validate_projection_readiness()
+                if self._projection_health_epoch != health_epoch:
+                    raise ValueError("projection health epoch changed during work")
+                self.latest_preview_constraint = response
+                self.latest_preview_evaluation = evaluation
             self.profile_logger.info(
                 "kinematic_preview: mode=observe tick=%d valid=True reason=%s threshold=%s "
                 "dt_source=nominal dt=%.9g sigma_min=%.9g",
@@ -385,6 +400,22 @@ class InfoFlowServoRuntime:
                 proposed_dt, response.sigma_min)
         except Exception as exc:
             self.profile_logger.info("kinematic_preview: mode=observe valid=False reason=%s", exc)
+
+    def preview_status_callback(self, msg):
+        now, wall = rospy.Time.now().to_sec(), time.monotonic()
+        with self._projection_status_lock:
+            self.projection_readiness.update(msg, ros_now=now, wall_now=wall)
+            if not self.projection_readiness.decision(ros_now=now, wall_now=wall).ready:
+                self._projection_health_epoch += 1
+                self.latest_cycle_proposal = None
+                self.latest_preview_constraint = None
+                self.latest_preview_evaluation = None
+
+    def _validate_projection_readiness(self):
+        decision = self.projection_readiness.decision(
+            ros_now=rospy.Time.now().to_sec(), wall_now=time.monotonic())
+        if not decision.ready:
+            raise ValueError(decision.reason)
 
     def preview_joint_callback(self, msg):
         self._preview_joints.update(msg, time.monotonic(), ros_now=rospy.Time.now().to_sec())
@@ -455,6 +486,7 @@ class InfoFlowServoRuntime:
         A changed affine map needs a new model
         query; changing only dt/previous linear limits is handled by re-solving.
         """
+        self._validate_projection_readiness()
         if raw_cmd != evaluation.command or raw_cmd.should_stop:
             raise ValueError("preview cycle command mismatch or policy stop")
         if not np.allclose(current_pose, evaluation.pose, rtol=0, atol=1e-9):
@@ -496,6 +528,9 @@ class InfoFlowServoRuntime:
             return
         self.latest_cycle_proposal = None
         try:
+            with self._projection_status_lock:
+                self._validate_projection_readiness()
+                health_epoch = self._projection_health_epoch
             evaluation = self.latest_preview_evaluation
             if evaluation is None:
                 raise ValueError("preview cycle model missing")
@@ -511,7 +546,11 @@ class InfoFlowServoRuntime:
             proposal = self._cycle_projection_queries.call(
                 lambda payload: snapshot.revalidate_cycle_preview(*payload),
                 (evaluation, raw.msg, np.array(pose, copy=True), servo_dt_sec), budget)
-            self.latest_cycle_proposal = proposal
+            with self._projection_status_lock:
+                self._validate_projection_readiness()
+                if self._projection_health_epoch != health_epoch:
+                    raise ValueError("projection health epoch changed during work")
+                self.latest_cycle_proposal = proposal
             self.profile_logger.info(
                 "kinematic_cycle_projection: mode=observe tick=%d valid=%s reason=%s "
                 "dt_source=actual dt=%.9g proposed=[%.9g %.9g]",
@@ -965,6 +1004,8 @@ def build_argparser():
     parser.add_argument("-c", "--config", type=str, default="config/rtabmap_config.yaml", help="YAML config file path")
     parser.add_argument("--spherical_cmd_topic", type=str, default="/omnimap/spherical_cmd")
     parser.add_argument("--cmd_topic", type=str, default="/servo_server/delta_twist_camera")
+    parser.add_argument("--kinematic_status_topic", default="/omnimap/kinematic_status")
+    parser.add_argument("--kinematic_projection_recovery_sec", type=float, default=0.1)
     parser.add_argument("--kinematic_cycle_projection_budget_sec", type=float, default=0.003)
     parser.add_argument("--kinematic_preview_mode", choices=("off", "observe"), default="off")
     parser.add_argument("--kinematic_preview_hz", type=float, default=2.)
