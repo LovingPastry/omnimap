@@ -249,6 +249,12 @@ class ServoTests(unittest.TestCase):
                                     reference_radius=0.6, reference_scene_center=[0, 0, 0])
         self.cmd.header.stamp, self.cmd.header.frame_id = rospy.Time(100), "base_link"
         self.node.spherical_cmd_callback(self.cmd)
+        self.preview_pose = np.eye(4)
+        self.preview_pose[0, 3] = .6
+        self.preview_lookup = patch.object(servo, "lookup_latest_pose_from_tf",
+            return_value=(self.preview_pose, rospy.Time(100)))
+        self.preview_lookup.start()
+        self.addCleanup(self.preview_lookup.stop)
 
     def assert_zero(self):
         msg = self.pub.messages[-1]
@@ -328,6 +334,7 @@ class ServoTests(unittest.TestCase):
     def test_preview_query_is_repeatable_and_does_not_commit_or_publish(self):
         pose = np.eye(4)
         pose[0, 3] = .5
+        self.preview_pose[0, 3] = .5
         self.node.enable_angular, self.node.angular_accel_max = True, .5
         self.node._last_angular_cmd = np.array([.01, 0., 0.])
         self.node.radial_gain, self.node.radial_i_gain = .01, .02
@@ -392,6 +399,19 @@ class ServoTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "deadline exceeded"):
                 self.node.evaluate_preview(self.cmd, pose, rospy.Time(100), .02,
                                           lambda trace: NS(constraint=preview_response(trace)))
+
+    def test_preview_rechecks_latest_tf_after_response(self):
+        pose = self.preview_pose.copy()
+        def respond(trace):
+            self.preview_pose[0, 3] += .001
+            return NS(constraint=preview_response(trace))
+        with self.assertRaisesRegex(ValueError, "pose changed"):
+            self.node.evaluate_preview(self.cmd, pose, rospy.Time(100), .02, respond)
+        with patch.object(servo, "lookup_latest_pose_from_tf", return_value=(pose, rospy.Time(99))):
+            with self.assertRaisesRegex(ValueError, "latest pose is stale"):
+                self.node.evaluate_preview(self.cmd, pose, rospy.Time(100), .02,
+                    lambda trace: NS(constraint=preview_response(trace)))
+        self.assertEqual(self.pub.messages, [])
 
     def test_preview_rejects_stale_frame_and_nonaffine_output_before_query(self):
         pose = np.eye(4)

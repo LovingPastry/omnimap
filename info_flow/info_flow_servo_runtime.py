@@ -15,6 +15,7 @@ from geometry_msgs.msg import TwistStamped
 from omnimap_msgs.msg import ServoTwistTrace
 from scipy.spatial.transform import Rotation as R
 from kinematic_projection import camera_rate_model
+from bounded_query import SingleFlightQuery
 
 from servo_runtime_common import (
     configure_servo_logging,
@@ -65,6 +66,10 @@ class InfoFlowServoRuntime:
     def __init__(self, args):
         self._control_lock = threading.RLock()
         self._control_generation = 0
+        self._preview_queries = SingleFlightQuery()
+        self.preview_timeout_sec = float(args.kinematic_preview_timeout_sec)
+        if not np.isfinite(self.preview_timeout_sec) or self.preview_timeout_sec <= 0:
+            raise ValueError("kinematic_preview_timeout_sec must be finite and positive")
         rospy.init_node("info_flow_servo_runtime", anonymous=True)
         spherical_command_msg = import_spherical_command_msg()
 
@@ -296,6 +301,7 @@ class InfoFlowServoRuntime:
         does not authorize use of its response and is not on the Servo timer.
         """
         cmd = copy.deepcopy(cmd)
+        current_c2w = np.array(current_c2w, dtype=float, copy=True)
         now = rospy.Time.now().to_sec()
         for stamp in (cmd.header.stamp, pose_stamp):
             age = now-stamp.to_sec()
@@ -316,16 +322,28 @@ class InfoFlowServoRuntime:
         if not trace.rate_model_valid:
             raise ValueError("preview model unavailable:" + trace.rate_model_reason)
         started = time.monotonic()
-        response = query(trace).constraint
-        if time.monotonic()-started > self.pose_stale_timeout_sec:
+        deadline = min(self.preview_timeout_sec, self.pose_stale_timeout_sec)
+        response = self._preview_queries.call(query, trace, deadline).constraint
+        if time.monotonic()-started > deadline:
             raise ValueError("preview response deadline exceeded")
         self._validate_preview_response(trace, response)
+        latest_pose, latest_stamp = lookup_latest_pose_from_tf(
+            self.tf_buffer, world_frame=self.world_frame, camera_frame=self.camera_frame, timeout_sec=0.)
+        latest_age = rospy.Time.now().to_sec()-latest_stamp.to_sec()
+        if latest_stamp.is_zero() or latest_age < -.05 or latest_age > self.pose_stale_timeout_sec:
+            raise ValueError("preview latest pose is stale")
+        if (np.asarray(latest_pose).shape != (4, 4)
+                or not np.all(np.isfinite(latest_pose))
+                or not np.allclose(latest_pose, current_c2w, rtol=0, atol=1e-9)):
+            raise ValueError("preview pose changed during query")
         with self._control_lock:
             if (self._control_generation != state_before[3]
                     or self._radial_integral_error != state_before[0]
                     or not np.array_equal(self._last_linear_cmd, state_before[1])
                     or not np.array_equal(self._last_angular_cmd, state_before[2])):
                 raise ValueError("preview controller state changed during query")
+        if time.monotonic()-started > deadline:
+            raise ValueError("preview response deadline exceeded")
         return response
 
     def _validate_preview_response(self, trace, response):
@@ -758,6 +776,7 @@ def build_argparser():
     parser.add_argument("-c", "--config", type=str, default="config/rtabmap_config.yaml", help="YAML config file path")
     parser.add_argument("--spherical_cmd_topic", type=str, default="/omnimap/spherical_cmd")
     parser.add_argument("--cmd_topic", type=str, default="/servo_server/delta_twist_camera")
+    parser.add_argument("--kinematic_preview_timeout_sec", type=float, default=0.1)
     parser.add_argument("--twist_trace_topic", type=str, default="/omnimap/servo_twist_trace")
     parser.add_argument("--cmd_frame", type=str, default="base_link")
     parser.add_argument("--world_frame", type=str, default="base_link")
