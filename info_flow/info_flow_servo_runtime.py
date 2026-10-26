@@ -13,6 +13,7 @@ import rospy
 import tf2_ros
 from geometry_msgs.msg import TwistStamped
 from omnimap_msgs.msg import ServoTwistTrace
+from omnimap_msgs.srv import EvaluateKinematicModel
 from scipy.spatial.transform import Rotation as R
 from kinematic_projection import camera_rate_model
 from bounded_query import SingleFlightQuery
@@ -70,6 +71,17 @@ class InfoFlowServoRuntime:
         self._control_generation = 0
         self._preview_queries = SingleFlightQuery()
         self._preview_joints = PreviewJointState()
+        self.preview_mode = args.kinematic_preview_mode
+        if self.preview_mode not in ("off", "observe"):
+            raise ValueError("invalid kinematic_preview_mode")
+        self.preview_hz = float(args.kinematic_preview_hz)
+        if not np.isfinite(self.preview_hz) or self.preview_hz <= 0:
+            raise ValueError("kinematic_preview_hz must be finite and positive")
+        self.latest_raw_cmd = None
+        self.latest_preview_constraint = None
+        self.preview_query = None
+        self.preview_timer = None
+        self.raw_cmd_sub = None
         self.preview_timeout_sec = float(args.kinematic_preview_timeout_sec)
         if not np.isfinite(self.preview_timeout_sec) or self.preview_timeout_sec <= 0:
             raise ValueError("kinematic_preview_timeout_sec must be finite and positive")
@@ -83,6 +95,9 @@ class InfoFlowServoRuntime:
         self.camera_frame = str(args.camera_frame)
         self.cmd_frame = str(args.cmd_frame)
         self.cmd_topic = str(args.cmd_topic)
+        if (self.preview_mode == "observe" and
+                rospy.resolve_name(args.spherical_cmd_raw_topic) == rospy.resolve_name(args.spherical_cmd_topic)):
+            raise ValueError("preview requires distinct raw and final command topics")
         if rospy.resolve_name(args.twist_trace_topic) == rospy.resolve_name(self.cmd_topic):
             raise ValueError("twist_trace_topic and cmd_topic must differ")
         if (not self.world_frame.lstrip("/") or
@@ -141,6 +156,12 @@ class InfoFlowServoRuntime:
             rospy.Duration(1.0 / max(self.servo_hz, 1e-6)),
             self._servo_timer_callback,
         )
+
+        if self.preview_mode == "observe":
+            self.preview_query = rospy.ServiceProxy(args.kinematic_preview_service, EvaluateKinematicModel)
+            self.raw_cmd_sub = rospy.Subscriber(args.spherical_cmd_raw_topic, spherical_command_msg,
+                                               self.raw_spherical_cmd_callback, queue_size=1)
+            self.preview_timer = rospy.Timer(rospy.Duration(1./self.preview_hz), self._preview_timer_callback)
 
         self.main_logger.info(
             ("轻量 Servo runtime 已启动：spherical_cmd_topic=%s cmd_topic=%s servo_hz=%.1f cmd_timeout=%.3fs adaptive_scale=%.2f adaptive_cap=%.3fs"),
@@ -298,6 +319,52 @@ class InfoFlowServoRuntime:
                 trace.linear_deadband = rate_limits["deadband"]
                 trace.servo_dt_sec = rate_limits["dt"]
         return trace
+
+    def raw_spherical_cmd_callback(self, msg):
+        self.latest_raw_cmd = CachedSphericalCommand(copy.deepcopy(msg), time.monotonic())
+
+    def _preview_command_pair(self):
+        raw, final = self.latest_raw_cmd, self.latest_cmd
+        if raw is None or final is None:
+            raise ValueError("preview raw/final command missing")
+        raw, final = copy.deepcopy(raw), copy.deepcopy(final)
+        now = time.monotonic()
+        timeout = self._effective_cmd_timeout_sec()
+        if any(not 0 <= now-cache.receipt_wall_time <= timeout for cache in (raw, final)):
+            raise ValueError("preview raw/final command stale")
+        a, b = raw.msg, final.msg
+        if (a.header.stamp != b.header.stamp or a.header.frame_id != b.header.frame_id
+                or a.planner_tick != b.planner_tick
+                or a.model_version != b.model_version or a.reference_radius != b.reference_radius
+                or list(a.reference_scene_center) != list(b.reference_scene_center)):
+            raise ValueError("preview raw/final command mismatch")
+        if a.should_stop:
+            raise ValueError("preview policy requests stop")
+        return raw, final
+
+    def _preview_timer_callback(self, _event):
+        if self.preview_mode != "observe":
+            return
+        self.latest_preview_constraint = None
+        try:
+            raw, final = self._preview_command_pair()
+            pose, stamp = lookup_latest_pose_from_tf(
+                self.tf_buffer, world_frame=self.world_frame, camera_frame=self.camera_frame, timeout_sec=0.)
+            # A proposed interval only: this callback must not advance the
+            # actual Servo clock or claim a future measured execution dt.
+            proposed_dt = 1./self.servo_hz
+            response = self.evaluate_preview(raw.msg, pose, stamp, proposed_dt, self.preview_query)
+            new_raw, new_final = self._preview_command_pair()
+            if new_raw.msg != raw.msg or new_final.msg != final.msg:
+                raise ValueError("preview command changed during query")
+            self.latest_preview_constraint = response
+            self.profile_logger.info(
+                "kinematic_preview: mode=observe tick=%d valid=True reason=%s threshold=%s "
+                "dt_source=nominal dt=%.9g sigma_min=%.9g",
+                raw.msg.planner_tick, response.reason, response.threshold_configured,
+                proposed_dt, response.sigma_min)
+        except Exception as exc:
+            self.profile_logger.info("kinematic_preview: mode=observe valid=False reason=%s", exc)
 
     def preview_joint_callback(self, msg):
         self._preview_joints.update(msg, time.monotonic(), ros_now=rospy.Time.now().to_sec())
@@ -786,6 +853,10 @@ def build_argparser():
     parser.add_argument("-c", "--config", type=str, default="config/rtabmap_config.yaml", help="YAML config file path")
     parser.add_argument("--spherical_cmd_topic", type=str, default="/omnimap/spherical_cmd")
     parser.add_argument("--cmd_topic", type=str, default="/servo_server/delta_twist_camera")
+    parser.add_argument("--kinematic_preview_mode", choices=("off", "observe"), default="off")
+    parser.add_argument("--kinematic_preview_hz", type=float, default=2.)
+    parser.add_argument("--kinematic_preview_service", default="/omnimap_kinematic_monitor/evaluate_model")
+    parser.add_argument("--spherical_cmd_raw_topic", default="/omnimap/spherical_cmd_raw")
     parser.add_argument("--kinematic_joint_topic", default="/joint_states")
     parser.add_argument("--kinematic_preview_timeout_sec", type=float, default=0.1)
     parser.add_argument("--twist_trace_topic", type=str, default="/omnimap/servo_twist_trace")

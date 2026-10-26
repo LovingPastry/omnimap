@@ -103,7 +103,7 @@ monitor 新增私有只读服务 `~evaluate_model`，类型 `omnimap_msgs/Evalua
 服务从新鲜关节历史选择与候选时间相近且 TF 覆盖的样本，检查实际 MoveIt 状态、模型/TF、
 映射重建、导数和可用限值，返回标记 `advisory_preview:` 的 KinematicConstraint。
 查询不依赖旧 BridgeStatus，不向任何控制/反馈 topic 发布；失效在响应中显式标记。
-这补齐了停车后不借助先行运动即可重新获取模型的接口；Servo 现已具备无副作用候选计算及显式查询方法，但尚未调度自动查询；
+这补齐了停车后不借助先行运动即可重新获取模型的接口；Servo 现已具备无副作用候选计算、显式查询及可选 observe 调度；
 自动恢复与执行前重校验仍未接入。调用结果不能直接作为执行许可。
 新增服务需两端重建消息包并重启 monitor；本次既有消息字段及 MD5 不变。
 
@@ -114,7 +114,7 @@ monitor 新增私有只读服务 `~evaluate_model`，类型 `omnimap_msgs/Evalua
 `evaluate_preview(cmd, pose, pose_stamp, dt, query)` 检查来源时间/frame，构造 preview trace，
 调用传入的 EvaluateKinematicModel service proxy；不会发布命令或追踪，也不会推进积分、
 slew 或周期时钟。控制锁保护候选计算与实际周期之间的状态读取，RPC 在锁外执行。
-方法可用于停车命令的只读评估，但没有增加自动订阅、查询线程或运动恢复入口；
+方法可用于停车命令的只读评估；可选 observe 调度见后文，尚无运动恢复入口；
 响应已检查候选关联、返回年龄、控制器周期变化和返回后的最新 TF；执行周期复核仍需接入，最新关节复核见后文。
 
 ### 预览响应关联与周期失效（2026-10-26）
@@ -136,7 +136,7 @@ pose_stale_timeout_sec 限制。`SingleFlightQuery` 在单个 daemon worker 中�
 返回后立即读取最新 TF（零等待），要求时间新鲜且与请求位姿在 1e-9 数值容差内一致；
 这适用于冻结状态的预览，不能当作运动中模型误差的硬件安全裕量。
 RPC 等待期间不持有控制锁；候选计算和末尾控制器状态比较持锁。命令/位姿/请求均独立拷贝。
-新增 2 项有界查询测试及 15 项回调测试通过。自动调度、执行 dt 复核、
+新增 2 项有界查询测试及 15 项回调测试通过。执行 dt 复核、
 连续投影执行和恢复运动仍未接入。
 
 ### 本机关节流复核（2026-10-26）
@@ -148,6 +148,30 @@ Servo 以 `--kinematic_joint_topic`（默认 `/joint_states`，部署时须与�
 畸形、重复/倒退时间样本使旧好样本失效；更新且合格的样本才恢复检查。
 本次关节状态 5 项、实际回调 16 项测试通过，包括 TF 不变但关节变化的拒绝。
 本机样本复核仍是返回后的单次观察，不能证明后续执行期间状态不变；
-下一执行周期重算、自动调度、投影执行与恢复仍未接入。
+下一执行周期重算、投影执行与恢复仍未接入。
 
 未来时间的本机关节样本在接收时拒绝，不推进已接受时间基线；后续正常新样本可恢复，相关测试已覆盖。
+
+### 自动只读 observe 调度（2026-10-26）
+
+Servo 参数 `--kinematic_preview_mode observe` 显式启用独立 ROS Timer（默认 off，
+`--kinematic_preview_hz 2`）；`--kinematic_preview_service` 默认
+`/omnimap_kinematic_monitor/evaluate_model`。调度订阅 `--spherical_cmd_raw_topic`
+（默认 `/omnimap/spherical_cmd_raw`，须与最终命令 topic 不同）。
+查询前后均核对原始/最终命令的 tick、model、来源时间/frame、参考球和接收年龄，
+原始策略 stop 禁止查询；最终状态反馈 stop 可做只读评估。原始/最终 Header.seq
+由不同 publisher 分配，不用于二者关联。查询期间任一命令变化，结果即失效。
+结果只存为 `latest_preview_constraint` 并写 kinematic_preview 日志，不发布任何控制/追踪消息。
+每次调度先清除旧建议，错误或超时不会保留上次结果。调度不推进 Servo 周期时钟。
+预览 dt 使用 1/servo_hz，日志标记 `dt_source=nominal`，不代表测得的未来执行周期。
+同样保留查询期间 Servo 周期变化失效检查，因此查询跨过控制周期时会被拒绝；
+当前是冻结状态诊断，并不保证运动中持续取得可用模型。18 项回调测试通过。
+
+```bash
+python info_flow/info_flow_servo_runtime.py --kinematic_preview_mode observe \
+  --kinematic_preview_hz 2 --kinematic_preview_timeout_sec 0.1 \
+  --kinematic_joint_topic /joint_states
+```
+
+命令是部署选项，未在实机执行；实际 joint topic 应与 Servo/monitor 配置一致。
+下一步仍需实际周期重算、投影执行、恢复状态机和现场标定验收。

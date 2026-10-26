@@ -6,6 +6,7 @@ Source ROS + ros_ws/devel/setup.bash, then run this file in InfoFlow.
 """
 
 import io
+import copy
 import sys
 import threading
 import unittest
@@ -406,6 +407,51 @@ class ServoTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "deadline exceeded"):
                 self.node.evaluate_preview(self.cmd, pose, rospy.Time(100), .02,
                                           lambda trace: NS(constraint=preview_response(trace)))
+
+    def test_observe_scheduler_queries_raw_when_final_is_stopped_without_motion(self):
+        self.node.preview_mode = "observe"
+        raw = copy.deepcopy(self.cmd)
+        raw.header.seq = 123  # independent ROS publishers need not share seq
+        self.node.raw_spherical_cmd_callback(raw)
+        self.cmd.should_stop, self.cmd.stop_reason = True, "kinematic feedback stale"
+        self.cmd.theta_rate = 0.
+        self.node.preview_query = Mock(side_effect=lambda trace: NS(constraint=preview_response(trace)))
+        self.node._preview_timer_callback(None)
+        self.assertIsNotNone(self.node.latest_preview_constraint)
+        trace = self.node.preview_query.call_args.args[0]
+        self.assertEqual(trace.spherical_rates, [.1, 0.])
+        self.assertEqual(trace.servo_dt_sec, .02)
+        self.assertIsNone(self.node._last_servo_wall)
+        self.assertEqual(self.node._radial_integral_error, 0.)
+        self.assertEqual(self.pub.messages, [])
+        self.assertEqual(self.trace_pub.messages, [])
+        self.assertTrue(any("dt_source=nominal" in line for line in self.log.lines))
+        raw.planner_tick += 1
+        self.node.raw_spherical_cmd_callback(raw)
+        self.node._preview_timer_callback(None)
+        self.assertIsNone(self.node.latest_preview_constraint)
+        self.assertEqual(self.node.preview_query.call_count, 1)
+
+    def test_scheduler_off_policy_stop_and_changed_command_are_not_accepted(self):
+        self.node.preview_query = Mock()
+        self.node._preview_timer_callback(None)
+        self.node.preview_query.assert_not_called()
+        self.node.preview_mode = "observe"
+        raw = copy.deepcopy(self.cmd)
+        raw.should_stop = True
+        self.node.raw_spherical_cmd_callback(raw)
+        self.node._preview_timer_callback(None)
+        self.node.preview_query.assert_not_called()
+        raw.should_stop = False
+        self.node.raw_spherical_cmd_callback(raw)
+        def changed(trace):
+            result = preview_response(trace)
+            self.cmd.model_version += 1
+            return NS(constraint=result)
+        self.node.preview_query.side_effect = changed
+        self.node._preview_timer_callback(None)
+        self.assertIsNone(self.node.latest_preview_constraint)
+        self.assertEqual(self.pub.messages, [])
 
     def test_preview_rechecks_local_joints_even_when_tf_is_unchanged(self):
         def respond(trace):

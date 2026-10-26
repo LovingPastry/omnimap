@@ -200,7 +200,7 @@ Planning 对有界关节联合求解 `q_min <= q + dt*(A*u+bq) <= q_max`，以�
 服务不发布任何命令或反馈消息，不检查碰撞轨迹，也不授权控制；阈值未配置仍返回
 `threshold_configured=false` 和不可用的 c。执行方仍须生成正确候选并在使用时重新校验。
 
-候选查询构建通过，两套隔离 ROS 测试各 10 项通过；新增用例覆盖旧桥接过期后重新查询、模型/新关节样本一致性、请求过期、错误 frame 和 MoveIt 停车拒绝。未运行实机，Servo 已有显式只读预览方法，尚未调度自动查询或恢复。
+候选查询构建通过，两套隔离 ROS 测试各 10 项通过；新增用例覆盖旧桥接过期后重新查询、模型/新关节样本一致性、请求过期、错误 frame 和 MoveIt 停车拒绝。未运行实机，Servo 已有显式只读预览方法，已有可选 observe 调度，尚未恢复运动。
 
 Servo 候选计算已从实际周期拆出，preview 与 actual 复用计算及 trace 构造；PI/slew 状态仅在实际周期提交。回调测试覆盖重复预览无状态变化/无发布、同状态实际输出一致、过期/frame/非仿射输出在 RPC 前拒绝。预览查询在控制锁外执行，不构成自动恢复或执行许可。
 
@@ -213,3 +213,5 @@ SingleFlightQuery 现在以单个后台 worker 限制 RPC 调用端等待；超�
 本机关节预览复核已接入 evaluate_preview：PreviewJointState 按名称保存独立 q/dq、源时间和接收时间；双时钟新鲜度、重复/倒退/畸形最新样本失效、模型样本不晚于本机样本以及 q/dq 冻结一致性均需通过。topic 参数 kinematic_joint_topic 默认 /joint_states，应匹配实际 Servo/monitor。关节测试 5 项、回调 16 项通过；尚无下一执行周期 dt 或连续执行证明。
 
 未来时间的本机关节样本在接收时拒绝，不推进已接受时间基线；后续正常新样本可恢复，相关测试已覆盖。
+
+可选 kinematic_preview_mode=observe（默认 off）以独立 2Hz ROS Timer 关联 raw/final 命令并查询模型，使用名义 1/servo_hz 预览 dt，日志明确 dt_source=nominal。结果只存为建议且每轮先失效旧值，无命令发布；原始 policy stop、错配、陈旧或查询期间命令变化均拒绝。跨 Servo 周期仍拒绝，是冻结诊断而非连续执行；实际周期重算/投影执行/恢复仍未接入。回调 18 项通过。
