@@ -127,6 +127,8 @@ class PlanningTests(unittest.TestCase):
         msg.valid = msg.threshold_configured = True
         msg.reference_radius = .6
         msg.rate_scales, msg.linearization_rates = [.1, .1], [.1, -.2]
+        msg.joint_names = [f"joint_{i}" for i in range(6)]
+        msg.joint_velocity_lower, msg.joint_velocity_upper = [-1.]*6, [1.]*6
         msg.a, msg.c, msg.sigma_min, msg.m_min, msg.alpha = [1, 0], 1.05, .5, 1.55, 1.
         node.kinematic_constraint_callback(msg)
         node._planning_timer_callback(None)

@@ -1,5 +1,5 @@
-# Advisory local model only. No controller may assume this includes velocity,
-# acceleration, collision or joint-position constraints. Physical spherical
+# Advisory local model only. Includes RobotModel joint velocity bounds, but not
+# acceleration, camera speed, collision or joint-position constraints. Physical spherical
 # rates = rate_scales * u; a dot u >= c uses dimensionless u.
 std_msgs/Header header
 time joint_stamp
@@ -26,3 +26,10 @@ bool threshold_configured
 float64 m_min
 float64 alpha
 float64 c
+# qdot = joint_rate_matrix * u + joint_rate_bias, rad/s, row-major 6x2.
+# All rows follow joint_names, exactly the monitor's MoveIt group order.
+string[6] joint_names
+float64[12] joint_rate_matrix
+float64[6] joint_rate_bias
+float64[6] joint_velocity_lower
+float64[6] joint_velocity_upper

@@ -57,7 +57,7 @@ c = -alpha * (m - m_min) - drift
 
 ## 构建与记录
 
-本次扩展了 ServoTwistTrace，ROS 消息 MD5 会改变。两端需同步代码、重建消息并重启使用它的节点，
+本次系列改动扩展了 ServoTwistTrace 和 KinematicConstraint，ROS 消息 MD5 会改变。两端需同步代码、重建消息并重启使用它的节点，
 旧节点和新节点不可混用。计算端无需 MoveIt，只构建消息；执行端构建 monitor：
 
 ```bash
@@ -129,8 +129,26 @@ SciPy 已列在 environment.yaml 和执行侧依赖中。求解后独立检查�
 不可行、失败、非有限结果或无法确认最优性时返回失败，不裁剪结果。这些是数值容差，不是硬件安全裕量。
 
 Planning 观察模式已使用半空间与局部球联合求解：旧实现会拒绝半空间投影在球外、但交集内仍有解的情况。
-速度/加速度约束目前只有求解器接口和解析测试，**尚未通过 KinematicConstraint 消息接入**；
+RobotModel 关节速度约束现已通过 KinematicConstraint 接入；相机速度/加速度约束仍只有求解器接口和解析测试；
 因此没有增加连续控制 enforce 模式。关节加速度需要对应采样的上一执行速度和周期，不能凭任意 dt 推导。
 
 新增求解器测试 8 项通过，覆盖解析交点、限速后破坏半空间的反例、仿射偏置、不可行交集和伪成功结果；
 消费者现为 11 项，实际 Planning/Servo 回调 10 项通过。均为软件验证，不代表真实机器人验收。
+
+### 关节速度反馈链
+
+KinematicConstraint 新增 `joint_names[6]`、row-major `joint_rate_matrix[12]`、
+`joint_rate_bias[6]`、`joint_velocity_lower[6]` 和 `joint_velocity_upper[6]`。
+矩阵就是生成方向导数时用同一个 Jacobian 求出的 A，偏置是 bq；输入是无量纲 u，输出为 rad/s。
+上下限直接读取该 MoveIt RobotModel 的 min/max velocity，不能把 Dq 的正上限当作不对称下限。
+顺序与模型 group 完全一致，不依赖 JointState 消息顺序。
+
+Planning 检查名称数量/唯一性、数组形状、有限值及上下限符号，构造
+`A u <= upper-bq` 与 `-A u <= bq-lower`，和半空间、局部球一起求解。
+该约束是模型级速度界限，不包含 MoveIt 的动态碰撞减速、状态缩放或控制器实际跟踪误差，仍只输出观察建议。
+没有新增关节加速度或位置约束，不能把这一阶段解释为完整执行可行集。
+
+消息/C++ 构建通过；消费者现为 12 项、实际 Planning/Servo 回调 10 项通过。
+直接节点和正式 diagnostics.launch 两套隔离 ROS 测试各 9 项通过，使用独立 NumPy FK/Jacobian
+核对 A、bq、关节顺序和模型速度上下限。日志为 `/tmp/omnimap_joint_bounds_test.log` 和
+`/tmp/omnimap_joint_bounds_launch_test.log`。合成模型验证不代表 UR5 实机验收。

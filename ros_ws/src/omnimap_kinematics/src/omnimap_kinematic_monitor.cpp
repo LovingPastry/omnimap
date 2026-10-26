@@ -123,6 +123,7 @@ public:
     {
       const auto& bound = model_->getVariableBounds(names_[i]);
       if (!bound.velocity_bounded_ || !std::isfinite(bound.max_velocity_) || bound.max_velocity_ <= 0 ||
+          !std::isfinite(bound.min_velocity_) || bound.min_velocity_ >= 0 ||
           !std::isfinite(dx[i]) || dx[i] <= 0)
         throw std::runtime_error("invalid task scale or RobotModel velocity bound for " + names_[i]);
       dx_[i] = dx[i]; dq_[i] = bound.max_velocity_;
@@ -358,6 +359,16 @@ private:
     out.inverse_residual = (dx_.cwiseInverse().asDiagonal()*(jacobian*directions-requested)).norm();
     if (!std::isfinite(out.inverse_residual) || out.inverse_residual > 1e-6)
       throw std::runtime_error("task_inverse_residual");
+    for (size_t row = 0; row < 6; ++row)
+    {
+      out.joint_names[row] = names_[row];
+      const auto& bound = model_->getVariableBounds(names_[row]);
+      out.joint_velocity_lower[row] = bound.min_velocity_;
+      out.joint_velocity_upper[row] = bound.max_velocity_;
+      out.joint_rate_bias[row] = directions(row, 2);
+      for (size_t col = 0; col < 2; ++col)
+        out.joint_rate_matrix[row*2+col] = directions(row, col);
+    }
     out.derivative_error = 0;
     for (int col = 0; col < 2; ++col)
       out.a[col] = directionalDerivative(directions.col(col), out.derivative_error);

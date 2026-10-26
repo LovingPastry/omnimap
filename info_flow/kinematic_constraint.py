@@ -1,7 +1,7 @@
 """Validate execution-side local models and compute non-actuating proposals.
 
-This consumer deliberately has no enforce mode: the producer has not yet
-provided the joint/speed/acceleration feasible set or a stop/recovery model.
+This consumer deliberately has no enforce mode: camera speed/acceleration
+constraints and a stop/recovery model remain to be integrated.
 """
 from dataclasses import dataclass
 import copy
@@ -67,9 +67,14 @@ class KinematicConstraintGate:
         if np.linalg.norm(original-origin) > self.max_normalized_delta + 1e-12:
             return ProjectionProposal(reason="constraint_candidate_outside_local_radius")
         try:
+            joint_matrix = np.asarray(msg.joint_rate_matrix, dtype=float).reshape(6, 2)
+            joint_bias = np.asarray(msg.joint_rate_bias, dtype=float)
             projected, norm = project_feasible_spherical_command(
                 original, msg.a, msg.c, local_center=origin,
-                local_radius=self.max_normalized_delta)
+                local_radius=self.max_normalized_delta,
+                linear_matrix=np.vstack((joint_matrix, -joint_matrix)),
+                linear_bounds=np.r_[np.asarray(msg.joint_velocity_upper)-joint_bias,
+                                    joint_bias-np.asarray(msg.joint_velocity_lower)])
         except ValueError as exc:
             return ProjectionProposal(reason="constraint_projection_unavailable:" + str(exc))
         if np.linalg.norm(projected-origin) > self.max_normalized_delta + 1e-9:
@@ -105,14 +110,22 @@ class KinematicConstraintGate:
             return "constraint_upstream_invalid:" + msg.reason
         if not msg.threshold_configured:
             return "constraint_threshold_unset"
+        if (len(msg.joint_names) != 6 or len(set(msg.joint_names)) != 6
+                or any(not name.strip() for name in msg.joint_names)):
+            return "constraint_joint_names_invalid"
         scalars = (radius, msg.reference_radius, msg.sigma_min, msg.m_min, msg.alpha,
                    msg.c, msg.drift, msg.inverse_residual, msg.derivative_error)
         arrays = ((rates, (2,)), (center, (3,)), (msg.reference_scene_center, (3,)),
-                  (msg.rate_scales, (2,)), (msg.linearization_rates, (2,)), (msg.a, (2,)))
+                  (msg.rate_scales, (2,)), (msg.linearization_rates, (2,)), (msg.a, (2,)),
+                  (msg.joint_rate_matrix, (12,)), (msg.joint_rate_bias, (6,)),
+                  (msg.joint_velocity_lower, (6,)), (msg.joint_velocity_upper, (6,)))
         if (not all(math.isfinite(float(value)) for value in scalars)
                 or any(np.asarray(value).shape != shape or not np.all(np.isfinite(value))
                        for value, shape in arrays)):
             return "constraint_nonfinite_or_shape"
+        if (np.any(np.asarray(msg.joint_velocity_lower) >= 0)
+                or np.any(np.asarray(msg.joint_velocity_upper) <= 0)):
+            return "constraint_joint_bounds_invalid"
         if (min(radius, msg.reference_radius, msg.m_min, msg.alpha) <= 0 or msg.sigma_min < 0
                 or min(msg.rate_scales) <= 0 or msg.derivative_error < 0
                 or not 0 <= msg.inverse_residual <= 1e-6):

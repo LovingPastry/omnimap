@@ -29,7 +29,10 @@ def constraint(**changes):
                   reference_radius=0.6, reference_scene_center=[0, 0, 0],
                   rate_scales=[0.1, 0.1], linearization_rates=[0.1, -0.2],
                   a=[1, 0], c=1.05, sigma_min=0.5, m_min=1.55, alpha=1., drift=0.,
-                  inverse_residual=1e-14, derivative_error=1e-8)
+                  inverse_residual=1e-14, derivative_error=1e-8,
+                  joint_names=[f"joint_{i}" for i in range(6)],
+                  joint_rate_matrix=[0.] * 12, joint_rate_bias=[0.] * 6,
+                  joint_velocity_lower=[-1.] * 6, joint_velocity_upper=[1.] * 6)
     fields.update(changes)
     return NS(**fields)
 
@@ -124,6 +127,24 @@ class ConstraintTests(unittest.TestCase):
         result = self.propose(rates=[.1, -.175])
         self.assertTrue(result.valid, result.reason)
         np.testing.assert_allclose(result.rates, [.12, -.185], atol=1e-8)
+
+    def test_joint_velocity_intersection_and_invalid_bounds(self):
+        matrix = np.zeros((6, 2))
+        matrix[0] = [1, -1]
+        self.gate.update(constraint(joint_rate_matrix=matrix.ravel(),
+                                    joint_rate_bias=[-.05, 0, 0, 0, 0, 0],
+                                    joint_velocity_upper=[2.95, 1, 1, 1, 1, 1]), wall_now=100)
+        result = self.propose()
+        self.assertTrue(result.valid, result.reason)
+        np.testing.assert_allclose(result.rates, [.105, -.195], atol=1e-8)
+        for fields in (dict(joint_names=["same"]*6), dict(joint_rate_matrix=[0]*11),
+                       dict(joint_velocity_upper=[0]*6), dict(joint_velocity_lower=[np.nan]*6)):
+            self.gate.update(constraint(**fields), wall_now=100)
+            self.assertFalse(self.propose().valid)
+        matrix[0] = [1, 0]
+        self.gate.update(constraint(joint_rate_matrix=matrix.ravel(),
+                                    joint_velocity_upper=[1.01, 1, 1, 1, 1, 1]), wall_now=100)
+        self.assertIn("projection_unavailable", self.propose().reason)
 
     def test_update_owns_sample_and_explicit_recovery(self):
         msg = constraint()

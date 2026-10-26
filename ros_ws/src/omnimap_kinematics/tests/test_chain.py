@@ -242,6 +242,12 @@ class ChainTest(unittest.TestCase):
         task[0, 0], task[1, 1] = 0.2 * result.rate_scales[0], 0.2 * result.rate_scales[1]
         task[:, 2] = np.r_[np.array([0, 0, 0.03])-np.cross([0.1, -0.2, 0.3], offset), [0.1, -0.2, 0.3]]
         directions = np.linalg.solve(jac, task)
+        np.testing.assert_allclose(np.asarray(result.joint_rate_matrix).reshape(6, 2),
+                                   directions[:, :2], atol=1e-7)
+        np.testing.assert_allclose(result.joint_rate_bias, directions[:, 2], atol=1e-7)
+        np.testing.assert_allclose(result.joint_velocity_upper, np.arange(1, 7))
+        np.testing.assert_allclose(result.joint_velocity_lower, -np.arange(1, 7))
+        self.assertEqual(list(result.joint_names), ["j%d" % i for i in range(1, 7)])
         def metric(q):
             scaled = self.independent_jacobian(q)/((np.arange(1, 7)*0.1)[:, None]) * np.arange(1, 7)[None, :]
             return np.linalg.svd(scaled, compute_uv=False)[-1]
