@@ -103,6 +103,16 @@ monitor 新增私有只读服务 `~evaluate_model`，类型 `omnimap_msgs/Evalua
 服务从新鲜关节历史选择与候选时间相近且 TF 覆盖的样本，检查实际 MoveIt 状态、模型/TF、
 映射重建、导数和可用限值，返回标记 `advisory_preview:` 的 KinematicConstraint。
 查询不依赖旧 BridgeStatus，不向任何控制/反馈 topic 发布；失效在响应中显式标记。
-这补齐了停车后不借助先行运动即可重新获取模型的接口；Servo 尚未生成/调用候选预览，
+这补齐了停车后不借助先行运动即可重新获取模型的接口；Servo 现已具备无副作用候选计算及显式查询方法，但尚未调度自动查询；
 自动恢复与执行前重校验仍未接入。调用结果不能直接作为执行许可。
 新增服务需两端重建消息包并重启 monitor；本次既有消息字段及 MD5 不变。
+
+### Servo 候选计算与显式查询（2026-10-26）
+
+`_compute_servo_candidate` 与实际控制共用同一计算，实现径向 PI 抗饱和、角速度、
+速度/slew/deadband 及映射构造；返回候选积分状态，实际周期才提交积分及上一命令。
+`evaluate_preview(cmd, pose, pose_stamp, dt, query)` 检查来源时间/frame，构造 preview trace，
+调用传入的 EvaluateKinematicModel service proxy；不会发布命令或追踪，也不会推进积分、
+slew 或周期时钟。控制锁保护候选计算与实际周期之间的状态读取，RPC 在锁外执行。
+方法可用于停车命令的只读评估，但没有增加自动订阅、查询线程或运动恢复入口；
+响应仍需执行前重新检查，服务阻塞/超时处理和结果关联属于后续接入工作。

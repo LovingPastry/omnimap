@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import time
+import threading
 from dataclasses import dataclass
 from typing import Optional
 
@@ -29,6 +30,16 @@ from servo_runtime_common import (
 )
 
 
+@dataclass(frozen=True)
+class ServoCandidate:
+    linear: np.ndarray
+    angular: np.ndarray
+    radial_integral: float
+    rate_model: tuple
+    rate_limits: dict
+    details: dict
+
+
 @dataclass
 class CachedSphericalCommand:
     msg: object
@@ -51,6 +62,7 @@ class ServoStats:
 
 class InfoFlowServoRuntime:
     def __init__(self, args):
+        self._control_lock = threading.RLock()
         rospy.init_node("info_flow_servo_runtime", anonymous=True)
         spherical_command_msg = import_spherical_command_msg()
 
@@ -247,17 +259,7 @@ class InfoFlowServoRuntime:
         adaptive_timeout = min(adaptive_timeout, float(self.adaptive_cmd_timeout_cap_sec))
         return max(timeout_sec, adaptive_timeout)
 
-    def _publish_twist(self, *, cmd=None, stamp=None, linear_cmd=None,
-                       angular_cmd=None, reason, rate_model=None, rate_limits=None):
-        """Log the exact camera-reference Twist sent to the bridge, including zeros."""
-        if linear_cmd is None:
-            msg = publish_zero_twist(self.cmd_pub, cmd_frame=self.cmd_frame, stamp=stamp)
-        else:
-            msg = publish_motion_components(
-                self.cmd_pub, cmd_frame=self.cmd_frame, stamp=stamp,
-                linear_cmd=linear_cmd, angular_cmd=angular_cmd,
-            )
-        linear, angular = msg.twist.linear, msg.twist.angular
+    def _make_twist_trace(self, msg, *, cmd, reason, rate_model=None, rate_limits=None):
         trace = ServoTwistTrace()
         trace.header.stamp = msg.header.stamp
         trace.header.frame_id = msg.header.frame_id
@@ -283,6 +285,46 @@ class InfoFlowServoRuntime:
                 trace.linear_step_limit = rate_limits["step"]
                 trace.linear_deadband = rate_limits["deadband"]
                 trace.servo_dt_sec = rate_limits["dt"]
+        return trace
+
+    def evaluate_preview(self, cmd, current_c2w, pose_stamp, servo_dt_sec, query):
+        """Read-only candidate query; never commits controller state or motion.
+
+        query is an EvaluateKinematicModel service proxy. Calling this method
+        does not authorize use of its response and is not on the Servo timer.
+        """
+        now = rospy.Time.now().to_sec()
+        for stamp in (cmd.header.stamp, pose_stamp):
+            age = now-stamp.to_sec()
+            if stamp.is_zero() or age < -.05 or age > self.pose_stale_timeout_sec:
+                raise ValueError("preview source is stale")
+        if cmd.header.frame_id.lstrip("/") != self.world_frame.lstrip("/"):
+            raise ValueError("preview command frame mismatch")
+        with self._control_lock:
+            candidate = self._compute_servo_candidate(cmd, current_c2w, servo_dt_sec)
+        msg = TwistStamped()
+        msg.header.stamp, msg.header.frame_id = pose_stamp, self.cmd_frame
+        msg.twist.linear.x, msg.twist.linear.y, msg.twist.linear.z = candidate.linear
+        msg.twist.angular.x, msg.twist.angular.y, msg.twist.angular.z = candidate.angular
+        trace = self._make_twist_trace(msg, cmd=cmd, reason="preview",
+                                      rate_model=candidate.rate_model, rate_limits=candidate.rate_limits)
+        if not trace.rate_model_valid:
+            raise ValueError("preview model unavailable:" + trace.rate_model_reason)
+        return query(trace).constraint
+
+    def _publish_twist(self, *, cmd=None, stamp=None, linear_cmd=None,
+                       angular_cmd=None, reason, rate_model=None, rate_limits=None):
+        """Log the exact camera-reference Twist sent to the bridge, including zeros."""
+        if linear_cmd is None:
+            msg = publish_zero_twist(self.cmd_pub, cmd_frame=self.cmd_frame, stamp=stamp)
+        else:
+            msg = publish_motion_components(
+                self.cmd_pub, cmd_frame=self.cmd_frame, stamp=stamp,
+                linear_cmd=linear_cmd, angular_cmd=angular_cmd,
+            )
+        linear, angular = msg.twist.linear, msg.twist.angular
+        trace = self._make_twist_trace(msg, cmd=cmd, reason=reason,
+                                       rate_model=rate_model, rate_limits=rate_limits)
         self.twist_trace_pub.publish(trace)
         self.profile_logger.info(
             "servo_twist: tick=%d model_v=%d command_stamp=%.9f twist_stamp=%.9f "
@@ -328,7 +370,146 @@ class InfoFlowServoRuntime:
             int(stats.servo_exception),
         )
 
+    def _compute_servo_candidate(self, cmd, current_c2w, servo_dt_sec):
+        """Calculate one frozen cycle without changing PI, slew or publishers."""
+        if not np.isfinite(servo_dt_sec) or servo_dt_sec <= 0:
+            raise ValueError("invalid Servo candidate period")
+        radial_integral = float(self._radial_integral_error)
+        current_position = np.asarray(current_c2w[:3, 3], dtype=np.float64)
+        reference_scene_center = np.asarray(
+            cmd.reference_scene_center,
+            dtype=np.float64,
+        ).reshape(3)
+        radius, theta, phi = position_to_spherical(current_position, reference_scene_center)
+        e_theta, e_phi, n_hat = local_frame_from_theta_phi(theta, phi)
+        theta_rate = float(cmd.theta_rate)
+        phi_rate = float(cmd.phi_rate)
+        if not np.all(np.isfinite([theta_rate, phi_rate, cmd.reference_radius,
+                                   *reference_scene_center])):
+            raise ValueError("nonfinite spherical command")
+        # 切向速度：沿球面切平面的角速度分量。
+        v_t = radius * (theta_rate * e_theta + phi_rate * e_phi)
+
+        reference_radius = float(cmd.reference_radius)
+        radial_error = float(reference_radius - radius)
+        # 径向 PI：负责把当前半径收敛到参考半径，带抗积分饱和与速度限幅。
+        radial_p_term = self.radial_gain * radial_error
+        radial_i_term = self.radial_i_gain * radial_integral
+        radial_speed_raw = radial_p_term + radial_i_term
+        radial_speed_cmd = 0.0
+        radial_limited = False
+        radial_integral_accepted = False
+        if abs(radial_error) > self.radial_deadband:
+            _, radial_limited_pre = self._clip_scalar(
+                radial_speed_raw,
+                self.radial_vel_max,
+            )
+            anti_windup_allows_integral = not radial_limited_pre or radial_speed_raw * radial_error < 0.0
+            if anti_windup_allows_integral:
+                radial_integral = float(
+                    np.clip(
+                        radial_integral + radial_error * servo_dt_sec,
+                        -self.radial_integral_limit,
+                        self.radial_integral_limit,
+                    )
+                )
+                radial_integral_accepted = True
+            radial_i_term = self.radial_i_gain * radial_integral
+            radial_speed_raw = radial_p_term + radial_i_term
+            radial_speed_cmd, radial_limited = self._clip_scalar(
+                radial_speed_raw,
+                self.radial_vel_max,
+            )
+            v_r = radial_speed_cmd * n_hat
+        else:
+            # 在 deadband 内清零积分，避免微小抖动长期累积。
+            radial_integral = 0.0
+            radial_i_term = 0.0
+            radial_speed_raw = radial_p_term
+            v_r = np.zeros(3, dtype=np.float64)
+
+        # 平移速度 = 切向 + 径向，再做速度上限与加速度斜率限制（slew rate）。
+        linear_raw = v_t + v_r
+        linear_raw_norm = float(np.linalg.norm(linear_raw))
+        linear_cmd, linear_limited_norm = self._clip_vector_norm(
+            linear_raw,
+            self.linear_vel_max,
+        )
+        linear_cmd = self._slew_limit_vector(
+            linear_cmd,
+            self._last_linear_cmd,
+            self.linear_accel_max * servo_dt_sec,
+        )
+        # 线速度死区：当输出线速度足够小则直接清零，避免机械臂长期“慢爬”。
+        linear_cmd_norm = float(np.linalg.norm(linear_cmd))
+        if linear_cmd_norm < self.linear_deadband:
+            linear_cmd = np.zeros(3, dtype=np.float64)
+            linear_cmd_norm = 0.0
+
+        desired_c2w = look_at_c2w(current_position, reference_scene_center)
+        current_rotation = np.asarray(current_c2w[:3, :3], dtype=np.float64)
+        desired_rotation = np.asarray(desired_c2w[:3, :3], dtype=np.float64)
+        rotation_error = desired_rotation @ current_rotation.T
+        rotvec_error = R.from_matrix(rotation_error).as_rotvec().astype(np.float64)
+        angular_cmd = np.zeros(3, dtype=np.float64)
+        angular_raw_norm = 0.0
+        angular_limited_norm = 0.0
+        rotvec_error_norm = float(np.linalg.norm(rotvec_error))
+        # 角速度控制：将朝向误差 rotvec 比例映射为角速度，并进行限幅。
+        if self.enable_angular and rotvec_error_norm > self.angular_deadband:
+            angular_raw = self.angular_gain * rotvec_error
+            angular_raw_norm = float(np.linalg.norm(angular_raw))
+            angular_cmd, angular_limited_norm = self._clip_vector_norm(
+                angular_raw,
+                self.angular_speed_max,
+            )
+        # 同样施加角加速度斜率限制，减小控制突变。
+        angular_cmd = self._slew_limit_vector(
+            angular_cmd,
+            self._last_angular_cmd,
+            self.angular_accel_max * servo_dt_sec,
+        )
+        rate_model = camera_rate_model(
+            radius=radius, e_theta=e_theta, e_phi=e_phi,
+            rates=[theta_rate, phi_rate], radial_velocity=v_r,
+            linear_command=linear_cmd, angular_command=angular_cmd,
+            previous_linear=self._last_linear_cmd,
+            linear_speed_limit=self.linear_vel_max,
+            linear_step_limit=self.linear_accel_max * servo_dt_sec,
+            linear_deadband=self.linear_deadband,
+        )
+        rate_limits = dict(previous=self._last_linear_cmd.copy(), speed=max(0.0, self.linear_vel_max),
+                           step=self.linear_accel_max * servo_dt_sec, deadband=self.linear_deadband,
+                           dt=servo_dt_sec)
+        return ServoCandidate(linear_cmd, angular_cmd, radial_integral,
+                              rate_model, rate_limits, {
+            'reference_scene_center': reference_scene_center,
+            'reference_radius': reference_radius,
+            'radius': radius,
+            'radial_error': radial_error,
+            'theta_rate': theta_rate,
+            'phi_rate': phi_rate,
+            'v_t': v_t,
+            'v_r': v_r,
+            'radial_p_term': radial_p_term,
+            'radial_i_term': radial_i_term,
+            'radial_speed_raw': radial_speed_raw,
+            'radial_speed_cmd': radial_speed_cmd,
+            'radial_limited': radial_limited,
+            'radial_integral_accepted': radial_integral_accepted,
+            'linear_raw_norm': linear_raw_norm,
+            'linear_limited_norm': linear_limited_norm,
+            'linear_cmd_norm': linear_cmd_norm,
+            'rotvec_error_norm': rotvec_error_norm,
+            'angular_raw_norm': angular_raw_norm,
+            'angular_limited_norm': angular_limited_norm,
+        })
+
     def _servo_timer_callback(self, _event) -> None:
+        with self._control_lock:
+            self._servo_step()
+
+    def _servo_step(self) -> None:
         # 周期伺服主循环：
         # 1) 读取最新 planner 命令与本机位姿；
         # 2) 通过多重安全门（缺命令/过期/TF失败/位姿过期/策略要求停止）；
@@ -434,112 +615,10 @@ class InfoFlowServoRuntime:
 
         try:
             servo_dt_sec = self._servo_dt_sec()
-            current_position = np.asarray(current_c2w[:3, 3], dtype=np.float64)
-            reference_scene_center = np.asarray(
-                cmd.reference_scene_center,
-                dtype=np.float64,
-            ).reshape(3)
-            radius, theta, phi = position_to_spherical(current_position, reference_scene_center)
-            e_theta, e_phi, n_hat = local_frame_from_theta_phi(theta, phi)
-            theta_rate = float(cmd.theta_rate)
-            phi_rate = float(cmd.phi_rate)
-            if not np.all(np.isfinite([theta_rate, phi_rate, cmd.reference_radius,
-                                       *reference_scene_center])):
-                raise ValueError("nonfinite spherical command")
-            # 切向速度：沿球面切平面的角速度分量。
-            v_t = radius * (theta_rate * e_theta + phi_rate * e_phi)
-
-            reference_radius = float(cmd.reference_radius)
-            radial_error = float(reference_radius - radius)
-            # 径向 PI：负责把当前半径收敛到参考半径，带抗积分饱和与速度限幅。
-            radial_p_term = self.radial_gain * radial_error
-            radial_i_term = self.radial_i_gain * self._radial_integral_error
-            radial_speed_raw = radial_p_term + radial_i_term
-            radial_speed_cmd = 0.0
-            radial_limited = False
-            radial_integral_accepted = False
-            if abs(radial_error) > self.radial_deadband:
-                _, radial_limited_pre = self._clip_scalar(
-                    radial_speed_raw,
-                    self.radial_vel_max,
-                )
-                anti_windup_allows_integral = not radial_limited_pre or radial_speed_raw * radial_error < 0.0
-                if anti_windup_allows_integral:
-                    self._radial_integral_error = float(
-                        np.clip(
-                            self._radial_integral_error + radial_error * servo_dt_sec,
-                            -self.radial_integral_limit,
-                            self.radial_integral_limit,
-                        )
-                    )
-                    radial_integral_accepted = True
-                radial_i_term = self.radial_i_gain * self._radial_integral_error
-                radial_speed_raw = radial_p_term + radial_i_term
-                radial_speed_cmd, radial_limited = self._clip_scalar(
-                    radial_speed_raw,
-                    self.radial_vel_max,
-                )
-                v_r = radial_speed_cmd * n_hat
-            else:
-                # 在 deadband 内清零积分，避免微小抖动长期累积。
-                self._radial_integral_error = 0.0
-                radial_i_term = 0.0
-                radial_speed_raw = radial_p_term
-                v_r = np.zeros(3, dtype=np.float64)
-
-            # 平移速度 = 切向 + 径向，再做速度上限与加速度斜率限制（slew rate）。
-            linear_raw = v_t + v_r
-            linear_raw_norm = float(np.linalg.norm(linear_raw))
-            linear_cmd, linear_limited_norm = self._clip_vector_norm(
-                linear_raw,
-                self.linear_vel_max,
-            )
-            linear_cmd = self._slew_limit_vector(
-                linear_cmd,
-                self._last_linear_cmd,
-                self.linear_accel_max * servo_dt_sec,
-            )
-            # 线速度死区：当输出线速度足够小则直接清零，避免机械臂长期“慢爬”。
-            linear_cmd_norm = float(np.linalg.norm(linear_cmd))
-            if linear_cmd_norm < self.linear_deadband:
-                linear_cmd = np.zeros(3, dtype=np.float64)
-                linear_cmd_norm = 0.0
-
-            desired_c2w = look_at_c2w(current_position, reference_scene_center)
-            current_rotation = np.asarray(current_c2w[:3, :3], dtype=np.float64)
-            desired_rotation = np.asarray(desired_c2w[:3, :3], dtype=np.float64)
-            rotation_error = desired_rotation @ current_rotation.T
-            rotvec_error = R.from_matrix(rotation_error).as_rotvec().astype(np.float64)
-            angular_cmd = np.zeros(3, dtype=np.float64)
-            angular_raw_norm = 0.0
-            angular_limited_norm = 0.0
-            rotvec_error_norm = float(np.linalg.norm(rotvec_error))
-            # 角速度控制：将朝向误差 rotvec 比例映射为角速度，并进行限幅。
-            if self.enable_angular and rotvec_error_norm > self.angular_deadband:
-                angular_raw = self.angular_gain * rotvec_error
-                angular_raw_norm = float(np.linalg.norm(angular_raw))
-                angular_cmd, angular_limited_norm = self._clip_vector_norm(
-                    angular_raw,
-                    self.angular_speed_max,
-                )
-            # 同样施加角加速度斜率限制，减小控制突变。
-            angular_cmd = self._slew_limit_vector(
-                angular_cmd,
-                self._last_angular_cmd,
-                self.angular_accel_max * servo_dt_sec,
-            )
-            rate_model = camera_rate_model(
-                radius=radius, e_theta=e_theta, e_phi=e_phi,
-                rates=[theta_rate, phi_rate], radial_velocity=v_r,
-                linear_command=linear_cmd, angular_command=angular_cmd,
-                previous_linear=self._last_linear_cmd,
-                linear_speed_limit=self.linear_vel_max,
-                linear_step_limit=self.linear_accel_max * servo_dt_sec,
-                linear_deadband=self.linear_deadband,
-            )
-            rate_limits = dict(previous=self._last_linear_cmd.copy(), speed=max(0.0, self.linear_vel_max),
-                               step=self.linear_accel_max * servo_dt_sec, deadband=self.linear_deadband,
-                               dt=servo_dt_sec)
+            candidate = self._compute_servo_candidate(cmd, current_c2w, servo_dt_sec)
+            linear_cmd, angular_cmd = candidate.linear, candidate.angular
+            rate_model, rate_limits = candidate.rate_model, candidate.rate_limits
+            self._radial_integral_error = candidate.radial_integral
             self._last_linear_cmd = linear_cmd.copy()
             self._last_angular_cmd = angular_cmd.copy()
 
@@ -557,12 +636,12 @@ class InfoFlowServoRuntime:
                 1.0,
                 "info",
                 "reference_sphere_servo: center=[%.3f %.3f %.3f] reference_radius=%.3fm current_radius=%.3fm radial_error=%.3fm",
-                float(reference_scene_center[0]),
-                float(reference_scene_center[1]),
-                float(reference_scene_center[2]),
-                float(reference_radius),
-                float(radius),
-                float(radial_error),
+                float(candidate.details['reference_scene_center'][0]),
+                float(candidate.details['reference_scene_center'][1]),
+                float(candidate.details['reference_scene_center'][2]),
+                float(candidate.details['reference_radius']),
+                float(candidate.details['radius']),
+                float(candidate.details['radial_error']),
             )
             self.profile_logger.debug(
                 (
@@ -577,25 +656,25 @@ class InfoFlowServoRuntime:
                 float(cmd_age * 1000.0),
                 float(effective_timeout_sec * 1000.0),
                 float(servo_dt_sec),
-                float(theta_rate),
-                float(phi_rate),
-                float(np.linalg.norm(v_t)),
-                float(np.linalg.norm(v_r)),
-                float(radial_error),
-                float(radial_p_term),
-                float(radial_i_term),
+                float(candidate.details['theta_rate']),
+                float(candidate.details['phi_rate']),
+                float(np.linalg.norm(candidate.details['v_t'])),
+                float(np.linalg.norm(candidate.details['v_r'])),
+                float(candidate.details['radial_error']),
+                float(candidate.details['radial_p_term']),
+                float(candidate.details['radial_i_term']),
                 float(self._radial_integral_error),
-                float(radial_speed_raw),
-                float(radial_speed_cmd),
-                bool(radial_limited),
-                bool(radial_integral_accepted),
-                float(linear_raw_norm),
-                float(linear_limited_norm),
-                float(linear_cmd_norm),
+                float(candidate.details['radial_speed_raw']),
+                float(candidate.details['radial_speed_cmd']),
+                bool(candidate.details['radial_limited']),
+                bool(candidate.details['radial_integral_accepted']),
+                float(candidate.details['linear_raw_norm']),
+                float(candidate.details['linear_limited_norm']),
+                float(candidate.details['linear_cmd_norm']),
                 float(self.linear_deadband),
-                float(rotvec_error_norm),
-                float(angular_raw_norm),
-                float(angular_limited_norm),
+                float(candidate.details['rotvec_error_norm']),
+                float(candidate.details['angular_raw_norm']),
+                float(candidate.details['angular_limited_norm']),
                 float(np.linalg.norm(angular_cmd)),
             )
             self.stats.servo_nonzero += 1

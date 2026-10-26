@@ -306,6 +306,57 @@ class ServoTests(unittest.TestCase):
         self.assertEqual(trace.linear_step_limit, .06)
         self.assertEqual(trace.servo_dt_sec, .03)
 
+    def test_preview_query_is_repeatable_and_does_not_commit_or_publish(self):
+        pose = np.eye(4)
+        pose[0, 3] = .5
+        self.node.enable_angular, self.node.angular_accel_max = True, .5
+        self.node._last_angular_cmd = np.array([.01, 0., 0.])
+        self.node.radial_gain, self.node.radial_i_gain = .01, .02
+        self.node._radial_integral_error = .01
+        self.node._last_linear_cmd = np.array([.001, .04, 0.])
+        self.cmd.should_stop = True
+        old_linear = self.node._last_linear_cmd.copy()
+        old_angular = self.node._last_angular_cmd.copy()
+        response = object()
+        query = Mock(return_value=NS(constraint=response))
+        for _ in range(2):
+            self.assertIs(self.node.evaluate_preview(
+                self.cmd, pose, rospy.Time(100), .02, query), response)
+        first, second = [call.args[0] for call in query.call_args_list]
+        self.assertEqual(first, second)
+        self.assertEqual(first.reason, "preview")
+        self.assertEqual(first.servo_dt_sec, .02)
+        self.assertEqual(self.node._radial_integral_error, .01)
+        np.testing.assert_array_equal(self.node._last_linear_cmd, old_linear)
+        np.testing.assert_array_equal(self.node._last_angular_cmd, old_angular)
+        self.assertEqual(self.pub.messages, [])
+        self.assertEqual(self.trace_pub.messages, [])
+        # An actual fresh cycle from the same controller state yields the same
+        # Twist, and only this cycle commits the radial integral/slew state.
+        self.cmd.should_stop = False
+        with patch.object(servo, "lookup_latest_pose_from_tf", return_value=(pose, rospy.Time(100))), \
+                patch.object(self.node, "_servo_dt_sec", return_value=.02):
+            self.node._servo_timer_callback(None)
+        self.assertEqual(first.command.twist, self.pub.messages[-1].twist)
+        self.assertGreater(self.node._radial_integral_error, .01)
+
+    def test_preview_rejects_stale_frame_and_nonaffine_output_before_query(self):
+        pose = np.eye(4)
+        pose[0, 3] = .6
+        query = Mock()
+        for stamp in (rospy.Time(99), rospy.Time(101)):
+            with self.assertRaisesRegex(ValueError, "stale"):
+                self.node.evaluate_preview(self.cmd, pose, stamp, .02, query)
+        self.cmd.header.frame_id = "tool0"
+        with self.assertRaisesRegex(ValueError, "frame"):
+            self.node.evaluate_preview(self.cmd, pose, rospy.Time(100), .02, query)
+        self.cmd.header.frame_id = "base_link"
+        self.node.linear_accel_max = .001
+        with self.assertRaisesRegex(ValueError, "linear_slew_limit_active"):
+            self.node.evaluate_preview(self.cmd, pose, rospy.Time(100), .02, query)
+        query.assert_not_called()
+        self.assertEqual(self.pub.messages, [])
+
     def test_missing_stale_and_nonfinite_commands_stop(self):
         cached = self.node.latest_cmd
         self.node.latest_cmd = None
