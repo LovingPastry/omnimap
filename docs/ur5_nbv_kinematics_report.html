@@ -49,12 +49,12 @@
 <div id="report-content"><h1 id="从信息收益到可执行的视角">从信息收益，到可执行的视角</h1>
 <section id="problem" class="report-section">
 <div class="section-heading"><span class="section-index">01 / PROBLEM · 问题的提出</span><h2>信息最优的方向，机器人走不动</h2><p>地图认为继续沿某个方向移动能看到更多内容，UR5 却在执行过程中减速、停住。这不是某个单点 bug，而是信息决策与运动可执行性之间缺少一条链路。</p></div>
-<div class="report-prose opening"><p>本报告从一个具体的系统矛盾出发：OmniMap 的 Fisher 信息场给出“往哪看收益更大”的连续方向，info_flow/ 把它变成相机球面速率并交给 MoveIt Servo 执行；而 UR5 在执行途中反复减速甚至停住。只看相机轨迹，这个方向可能平滑而合理；放到机械臂上，同一段轨迹却可能要求腕部关节急剧转动，或者让下游 Servo 判定已接近奇异区域。因此，需要研究的对象不只是“下一个视角好不好”，还包括“从当前关节构型出发，机器人能否持续走向它”。</p><p><strong>本报告要回答的核心问题：如何把“沿 Fisher 梯度请求相机移动”，改造成“从当前 UR5 构型出发，选择能执行、能产生有效新观测的短时信息动作”。</strong></p><p>问题的几何根源是局部关系 <code>v_camera = J_camera(q) q̇</code>。当某个奇异值变小时，沿对应末端方向的速度需要更大的关节速度才能实现；这取决于期望运动的方向，并不意味着附近所有运动都不可执行。终点 IK 有解只能回答目标构型是否存在，不能回答沿途是否跳支、是否超速，以及当前速度命令能否实现。降低速度可以缓解瞬时需求，但不会自动改变通往危险构型的路线。换句话说，<b>终点有 IK 解、路径连续、沿途远离奇异构型，是三个不同的要求</b>——当前 Fisher 规划尚未显式预测这三项；独立运动学反馈及 enforce 状态停车已实现。页首的二连杆演示直观展示了这种几何退化：拖动肘关节角，最小奇异值如何随构型趋于零。</p></div>
+<div class="report-prose opening"><p>本报告从一个具体的系统矛盾出发：OmniMap 的 Fisher 信息场给出“往哪看收益更大”的连续方向，info_flow/ 把它变成相机球面速率并交给 MoveIt Servo 执行；而 UR5 在执行途中反复减速甚至停住。只看相机轨迹，这个方向可能平滑而合理；放到机械臂上，同一段轨迹却可能要求腕部关节急剧转动，或者让下游 Servo 判定已接近奇异区域。因此，需要研究的对象不只是“下一个视角好不好”，还包括“从当前关节构型出发，机器人能否持续走向它”。</p><p><strong>本报告要回答的核心问题：如何把“沿 Fisher 梯度请求相机移动”，改造成“从当前 UR5 构型出发，选择能执行、能产生有效新观测的短时信息动作”。</strong></p><p>问题的几何根源是局部关系 <code>v_camera = J_camera(q) q̇</code>。当某个奇异值变小时，沿对应末端方向的速度需要更大的关节速度才能实现；这取决于期望运动的方向，并不意味着附近所有运动都不可执行。终点 IK 有解只能回答目标构型是否存在，不能回答沿途是否跳支、是否超速，以及当前速度命令能否实现。降低速度可以缓解瞬时需求，但不会自动改变通往危险构型的路线。换句话说，<b>终点有 IK 解、路径连续、沿途远离奇异构型，是三个不同的要求</b>——当前 Fisher 规划尚未显式预测这三项；独立运动学反馈、状态停车及执行侧可选 enforce 投影输出已实现，实机效果待验收。页首的二连杆演示直观展示了这种几何退化：拖动肘关节角，最小奇异值如何随构型趋于零。</p></div>
 <div class="note"><span class="note-label">用一次受限动作解释</span><p>向北的 Fisher 梯度更大，但腕部构型让下游持续减速；向东北的信息斜率略小，却能连续执行并取得新图像。我们需要验证的是：选择后者，是否带来更高的实际重建收益。只让 Python 发出更大的 Twist，不能回答这个问题。</p></div>
 <div class="insight-grid">
 <article class="insight"><span class="large-number">01</span><h3>运动学已经进入 NBV</h3><p>COMPASS 将关节构型可操作度直接写入视角效用；Splat-CBF 把信息收益和连续安全约束结合。单独添加一个 manipulability reward，已有明确先例。</p><a href="#papers">查看直接相关工作 <span aria-hidden="true">↗</span></a></article>
 <article class="insight"><span class="large-number">02</span><h3>六轴需要重新定义任务</h3><p>UR5 严格跟踪完整六维位姿时，通常没有可用关节零空间。释放光轴 roll、允许适量误差或提前改道，才有调整构型的空间。</p><a href="#implementation">查看任务与接口设计 <span aria-hidden="true">↗</span></a></article>
-<article class="insight"><span class="large-number">03</span><h3>当前 policy 缺少关节反馈</h3><p>OmniMap 规划器尚未接入关节状态、Jacobian 和下游 Servo 状态。已发现角速度限幅配置风险，但真机停机来源仍需日志确认。</p><a href="#current">查看代码证据 <span aria-hidden="true">↗</span></a></article>
+<article class="insight"><span class="large-number">03</span><h3>关节反馈已接入，实机效果待验收</h3><p>Planning 已接收 KinematicStatus，执行侧使用实际关节/Jacobian 并提供流式投影与停车。真机停机来源和标定效果仍需现场日志确认。</p><a href="#current">查看代码证据 <span aria-hidden="true">↗</span></a></article>
 </div>
 <div class="report-prose section-bridge"><p>沿着这个问题，报告按技术报告的顺序展开：先盘点当前三环链路与代码证据，确认“现状缺什么”；再检索并精读前沿工作，看各层缺口分别有哪些已验证的做法；然后给出针对本工作空间的改进方案——公式推导与落地修改分开陈述；最后设计对照实验，把收益归因到具体一环。</p></div>
 <nav class="reading-route" aria-label="报告章节路线"><a href="#current"><span>02 / 现状分析</span>代码链路与证据 ↗</a><a href="#papers"><span>03–04 / 前沿算法</span>论文地图与精读 ↗</a><a href="#method"><span>05–06 / 改进方案</span>公式推导与落地 ↗</a><a href="#validation"><span>07 / 验证</span>对照实验设计 ↗</a></nav>
@@ -99,7 +99,7 @@
 </svg></div><figcaption>2026-10-21 的三环设计图。此后 KinematicStatus 已进入 Planning，快照 v4 已携带语义与几何的同帧编号；任务收益与实际运动进展的完整反馈仍待完善，对应<a href="#implementation">第 06 章</a>的 P1 交付。</figcaption></figure>
 <div class="table-scroll"><table><thead><tr><th>三环</th><th>当前链路</th><th>缺口与改造方向</th></tr></thead><tbody>
 <tr><td>Tracking<br>我知道了什么？</td><td>图像时间 TF → 关键帧 → OmniMap → 版本化 GS/TSDF/逐高斯语义快照 v4。pose 在入图前就发布。</td><td>快照已有 keyframe_idx 和语义 frame_idx；默认按当前实例 embedding 筛选高斯。新观测的任务收益仍未记录。</td></tr>
-<tr><td>Planning<br>接下来做什么？</td><td>当前相机 pose＋GS 快照 → 局部 Fisher 梯度 → 两个球面速率；另接收 KinematicStatus 下游反馈。</td><td>已实现 observe/enforce 状态反馈；归一化指标的方向修正与停滞恢复尚未接入。</td></tr>
+<tr><td>Planning<br>接下来做什么？</td><td>当前相机 pose＋GS 快照 → 局部 Fisher 梯度 → 两个球面速率；另接收 KinematicStatus 下游反馈。</td><td>已实现状态反馈；局部二维投影在执行侧可选 enforce，非零理想关节闭环通过，实机效果待验证。</td></tr>
 <tr><td>Servo<br>实际上做到了什么？</td><td>本机 TF → 切向＋径向 PI＋完整 look-at → Twist → MoveIt Servo / UR。</td><td>已有命令追踪、状态与局部构型导数诊断；实际进展评估与连续改道控制仍需接入。</td></tr>
 </tbody></table></div>
 <p class="boundary">当前 StopMonitor 的路径/方向覆盖来自输入实际 pose，但 stall 用的是命令速度，检测不了“命令非零、机器人没动”；当前 YAML 的 stop 与 stall 开关均关闭。完成判据必须另行标定，不能把约束堵塞或预算耗尽当作信息收敛。同一地图在相机运动时可以复用；昂贵评分分频后仍需保持轻量命令发布与有效期检查。</p>
@@ -193,7 +193,7 @@
 <div class="synthesis"><span class="section-index">WHAT THESE PAPERS JOINTLY TELL US</span><h3>值得组合的是四种能力，而非把一篇论文整体搬到 UR5。</h3><div class="report-prose"><p>COMPASS 让决策知道构型好坏；Splat-CBF 让执行途中继续获取信息；OSCBF 提供连续安全修正的具体机制；重建感知控制则提醒我们重新定义相机任务。将它们连起来，合理的系统应当在选方向时预判运动学，在执行时维护约束，并把受限结果反馈给规划器。</p><p>这也说明研究贡献不能只表述为“给 NBV 加可操作度奖励”或“把 Fisher 信息与 CBF 结合”，这些已有直接先例。更值得检验的问题是：在六轴、在线地图、有限控制接口的实际条件下，联合调整视角与 roll、评估短时关节轨迹、反馈真实执行状态，能否同时减少停滞并提高单位时间重建收益。这里提出的是待验证方向，尚未完成针对该组合的独立查新或实验论证。接下来两章把这组能力具体化：<a href="#method">第 05 章</a>给出算法与公式推导，<a href="#implementation">第 06 章</a>给出落地修改建议。</p></div></div>
 </section>
 <section id="method" class="report-section">
-<div class="section-heading"><span class="section-index">05 / PROPOSED METHOD · 公式与算法 · 2026.10.21</span><h2>改进方案 I：让信息梯度，沿机械臂能走的方向前进</h2><p>优先验证方案：连续梯度修正——保留 Fisher 信息方向，只在构型恶化过快时加入最小修正；离散 NBV 采样降级为停滞恢复手段。局部速度映射与方向导数诊断已实现，尚未接入 UR5 修正控制或完成实测。</p></div>
+<div class="section-heading"><span class="section-index">05 / PROPOSED METHOD · 公式与算法 · 2026.10.21</span><h2>改进方案 I：让信息梯度，沿机械臂能走的方向前进</h2><p>优先验证方案：连续梯度修正——保留 Fisher 信息方向，只在构型恶化过快时加入最小修正；离散 NBV 采样降级为停滞恢复手段。局部速度映射、方向导数及执行侧可选 enforce 已实现并通过非零理想关节闭环，尚未完成真实 UR5 标定与运动验收。</p></div>
 <div class="report-prose opening"><p><strong>设计原则：不替换信息目标，只约束它的实现方式。</strong>无需每 tick 采样多个视点、渲染和求 IK。终点 IK 采样是有价值的基线，但不检查整条到达路径；短时 rollout 保留为模型失配时的后续比较。方案分四步：①选一个反映“最薄弱方向”的构型指标 m(q)；②把它的改善方向拉回 Planning 实际的二维动作空间，用一条半空间约束做最小修正；③全程只需少量方向导数，不需要完整六维梯度；④明确闭式修正的失效条件与升级为小型 QP 的路径。</p></div>
 <div class="gradient-flow" role="img" aria-label="当前关节状态计算归一化 tool0 Jacobian，得到最小奇异值和二维改善方向，与 Fisher 运动合成后交给 Servo，并接收实际反馈"><span>当前 q 与执行规则<br><b>本机运动学模型</b></span><i>→</i><span>归一化 Jacobian<br><b>m 与方向导数 a</b></span><i>→</i><span>Fisher 信息运动<br><b>二维最小修正</b></span><i>→</i><span>Servo 执行反馈<br><b>下一 tick 重算</b></span></div>
 <p class="caption">流程对应可编辑的 <a href="assets/ur5_nbv/gradient-planning.drawio">draw.io 源文件</a>。下方两个演示均为合成教学数据，不代表 UR5 仿真或真机结果。</p>

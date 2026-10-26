@@ -64,6 +64,8 @@ class StreamProjection:
     constraint: object
     received_wall: float
     joint_difference: dict
+    health_epoch: int = 0
+    model_epoch: int = 0
 
 
 @dataclass
@@ -89,6 +91,7 @@ class ServoStats:
 class InfoFlowServoRuntime:
     def __init__(self, args):
         self._control_lock = threading.RLock()
+        self._command_lock = threading.RLock()
         self._projection_status_lock = threading.Lock()
         self._projection_health_epoch = 0
         self._projection_fault_wall = 0.
@@ -106,8 +109,15 @@ class InfoFlowServoRuntime:
         if self.preview_source not in ("query", "stream"):
             raise ValueError("invalid kinematic_preview_source")
         self.preview_mode = args.kinematic_preview_mode
-        if self.preview_mode not in ("off", "observe"):
+        if self.preview_mode not in ("off", "observe", "enforce"):
             raise ValueError("invalid kinematic_preview_mode")
+        self.execution_bridge_verified = False
+        self.execution_limits = tuple(getattr(args, name, None) for name in (
+            "kinematic_execution_max_age", "kinematic_execution_joint_delta", "kinematic_execution_residual"))
+        if self.preview_mode == "enforce":
+            if self.preview_source != "stream" or any(
+                    value is None or not np.isfinite(value) or value <= 0 for value in self.execution_limits):
+                raise ValueError("enforce requires stream and explicit positive execution age/joint-delta/residual limits")
         self.preview_hz = float(args.kinematic_preview_hz)
         if not np.isfinite(self.preview_hz) or self.preview_hz <= 0:
             raise ValueError("kinematic_preview_hz must be finite and positive")
@@ -131,7 +141,14 @@ class InfoFlowServoRuntime:
         self.camera_frame = str(args.camera_frame)
         self.cmd_frame = str(args.cmd_frame)
         self.cmd_topic = str(args.cmd_topic)
-        if (self.preview_mode == "observe" and
+        if self.preview_mode == "enforce":
+            bridge = str(getattr(args, "kinematic_execution_bridge_node", "/omnimap_camera_twist_bridge")).rstrip("/")
+            mode = rospy.get_param(bridge+"/filter_mode", None)
+            bridge_input = rospy.get_param(bridge+"/input_topic", "")
+            if mode != "none" or not bridge_input or rospy.resolve_name(bridge_input) != rospy.resolve_name(self.cmd_topic):
+                raise ValueError("enforce requires explicit unfiltered bridge configuration for this command topic")
+            self.execution_bridge_verified = True
+        if (self.preview_mode != "off" and
                 rospy.resolve_name(args.spherical_cmd_raw_topic) == rospy.resolve_name(args.spherical_cmd_topic)):
             raise ValueError("preview requires distinct raw and final command topics")
         if rospy.resolve_name(args.twist_trace_topic) == rospy.resolve_name(self.cmd_topic):
@@ -198,7 +215,7 @@ class InfoFlowServoRuntime:
             self._servo_timer_callback,
         )
 
-        if self.preview_mode == "observe":
+        if self.preview_mode != "off":
             self.raw_cmd_sub = rospy.Subscriber(args.spherical_cmd_raw_topic, spherical_command_msg,
                                                self.raw_spherical_cmd_callback, queue_size=1)
             if self.preview_source == "query":
@@ -208,6 +225,9 @@ class InfoFlowServoRuntime:
                 self.model_sub = rospy.Subscriber(args.kinematic_model_topic, KinematicModel,
                                                   self.model_stream_callback, queue_size=1)
 
+        self.main_logger.info("kinematic_control: mode=%s source=%s execution_limits=%s bridge_verified=%s",
+                              self.preview_mode, self.preview_source, self.execution_limits,
+                              self.execution_bridge_verified)
         self.main_logger.info(
             ("轻量 Servo runtime 已启动：spherical_cmd_topic=%s cmd_topic=%s servo_hz=%.1f cmd_timeout=%.3fs adaptive_scale=%.2f adaptive_cap=%.3fs"),
             args.spherical_cmd_topic,
@@ -307,27 +327,28 @@ class InfoFlowServoRuntime:
         return float(dt_sec)
 
     def spherical_cmd_callback(self, msg) -> None:
-        receipt_wall_time = float(time.monotonic())
-        if self._last_cmd_receipt_wall is not None:
-            interval_sec = max(0.0, receipt_wall_time - self._last_cmd_receipt_wall)
-            if self._cmd_interval_ema_sec is None:
-                self._cmd_interval_ema_sec = interval_sec
-            else:
-                self._cmd_interval_ema_sec = 0.2 * interval_sec + 0.8 * self._cmd_interval_ema_sec
-        self._last_cmd_receipt_wall = receipt_wall_time
-        self.latest_cmd = CachedSphericalCommand(
-            msg=msg,
-            receipt_wall_time=receipt_wall_time,
-        )
-        self.stats.cmd_rx_total += 1
-        self.profile_logger.debug(
-            "cmd_rx: model_v=%d tick=%d stop=%s reason=%s ema_interval=%.3fs",
-            int(msg.model_version),
-            int(msg.planner_tick),
-            bool(msg.should_stop),
-            str(msg.stop_reason),
-            float(self._cmd_interval_ema_sec if self._cmd_interval_ema_sec is not None else -1.0),
-        )
+        with self._command_lock:
+            receipt_wall_time = float(time.monotonic())
+            if self._last_cmd_receipt_wall is not None:
+                interval_sec = max(0.0, receipt_wall_time - self._last_cmd_receipt_wall)
+                if self._cmd_interval_ema_sec is None:
+                    self._cmd_interval_ema_sec = interval_sec
+                else:
+                    self._cmd_interval_ema_sec = 0.2 * interval_sec + 0.8 * self._cmd_interval_ema_sec
+            self._last_cmd_receipt_wall = receipt_wall_time
+            self.latest_cmd = CachedSphericalCommand(
+                msg=msg,
+                receipt_wall_time=receipt_wall_time,
+            )
+            self.stats.cmd_rx_total += 1
+            self.profile_logger.debug(
+                "cmd_rx: model_v=%d tick=%d stop=%s reason=%s ema_interval=%.3fs",
+                int(msg.model_version),
+                int(msg.planner_tick),
+                bool(msg.should_stop),
+                str(msg.stop_reason),
+                float(self._cmd_interval_ema_sec if self._cmd_interval_ema_sec is not None else -1.0),
+            )
 
     def _effective_cmd_timeout_sec(self) -> float:
         timeout_sec = float(self.spherical_cmd_timeout_sec)
@@ -366,10 +387,12 @@ class InfoFlowServoRuntime:
         return trace
 
     def raw_spherical_cmd_callback(self, msg):
-        self.latest_raw_cmd = CachedSphericalCommand(copy.deepcopy(msg), time.monotonic())
+        with self._command_lock:
+            self.latest_raw_cmd = CachedSphericalCommand(copy.deepcopy(msg), time.monotonic())
 
     def _preview_command_pair(self):
-        raw, final = self.latest_raw_cmd, self.latest_cmd
+        with self._command_lock:
+            raw, final = copy.deepcopy(self.latest_raw_cmd), copy.deepcopy(self.latest_cmd)
         if raw is None or final is None:
             raise ValueError("preview raw/final command missing")
         raw, final = copy.deepcopy(raw), copy.deepcopy(final)
@@ -553,7 +576,7 @@ class InfoFlowServoRuntime:
         return proposal
 
     def _observe_cycle_projection(self, cmd, pose, servo_dt_sec):
-        if self.preview_mode != "observe":
+        if self.preview_mode == "off":
             return
         if self.preview_source == "stream":
             self._observe_stream_projection(cmd, pose, servo_dt_sec)
@@ -594,10 +617,10 @@ class InfoFlowServoRuntime:
             self.profile_logger.info("kinematic_cycle_projection: mode=observe valid=False reason=%s", exc)
 
     def model_stream_callback(self, msg):
-        usable = self._model_stream.update(msg, ros_now=rospy.Time.now().to_sec(),
-            wall_now=time.monotonic(), timeout_sec=self.pose_stale_timeout_sec)
-        if not usable:
-            with self._projection_status_lock:
+        with self._projection_status_lock:
+            usable = self._model_stream.update(msg, ros_now=rospy.Time.now().to_sec(),
+                wall_now=time.monotonic(), timeout_sec=self.pose_stale_timeout_sec)
+            if not usable:
                 self.latest_cycle_proposal = None
                 self.latest_stream_projection = None
 
@@ -651,8 +674,9 @@ class InfoFlowServoRuntime:
             snapshot = copy.copy(self)
             snapshot._last_linear_cmd, snapshot._last_angular_cmd = self._last_linear_cmd.copy(), self._last_angular_cmd.copy()
             budget = min(self.cycle_projection_budget_sec, .25/max(self.servo_hz, 1e-6))
+            objective = final.msg if self.preview_mode == "enforce" and not final.msg.should_stop else raw.msg
             result = self._cycle_projection_queries.call(lambda payload: snapshot._project_model_sample(*payload),
-                (model, received, raw.msg, servo_dt_sec), budget)
+                (model, received, objective, servo_dt_sec), budget)
             new_raw, new_final = self._preview_command_pair()
             if new_raw.msg != raw.msg or new_final.msg != final.msg:
                 raise ValueError("stream command changed during solve")
@@ -671,16 +695,97 @@ class InfoFlowServoRuntime:
                         not -.05 <= now-stamp.to_sec() <= self.pose_stale_timeout_sec for stamp in
                         (model.header.stamp, model.joint_stamp, model.status_received_stamp, raw.msg.header.stamp))):
                     raise ValueError("stream result expired during solve")
+                result = StreamProjection(result.proposal, model, result.constraint, received, difference,
+                                          health_epoch, model_epoch)
                 self.latest_cycle_proposal, self.latest_stream_projection = result.proposal, result
             self.profile_logger.info(
-                "kinematic_stream_projection: mode=observe tick=%d model_seq=%d valid=%s reason=%s "
+                "kinematic_stream_projection: mode=%s tick=%d model_seq=%d valid=%s reason=%s "
                 "model_age=%.9g joint_delta=%.9g velocity_delta=%.9g joint_stamp_delta=%.9g "
                 "pose_delta=%.9g rotation_delta=%.9g dt=%.9g",
-                cmd.planner_tick, model.model_sequence, result.proposal.valid, result.proposal.reason,
+                self.preview_mode, cmd.planner_tick, model.model_sequence, result.proposal.valid, result.proposal.reason,
                 now-model.joint_stamp.to_sec(), difference["position_delta"], difference["velocity_delta"],
                 difference["stamp_delta"], pose_delta, rotation_delta, servo_dt_sec)
         except Exception as exc:
-            self.profile_logger.info("kinematic_stream_projection: mode=observe valid=False reason=%s", exc)
+            self.profile_logger.info("kinematic_stream_projection: mode=%s valid=False reason=%s", self.preview_mode, exc)
+
+    def _execution_candidate(self, cmd, pose, pose_stamp, dt):
+        if not self.execution_bridge_verified:
+            raise ValueError("execution bridge configuration unverified")
+        result = self.latest_stream_projection
+        if result is None or not result.proposal.valid:
+            raise ValueError("execution projection unavailable")
+        model, constraint = result.model, result.constraint
+        if not constraint.threshold_configured or not all(model.joint_acceleration_bounded):
+            raise ValueError("execution requires configured metric threshold and all joint acceleration limits")
+        max_age, max_delta, max_residual = self.execution_limits
+        now, wall = rospy.Time.now().to_sec(), time.monotonic()
+        if (not 0 <= wall-result.received_wall <= max_age or any(
+                not -.05 <= now-stamp.to_sec() <= max_age for stamp in
+                (model.header.stamp, model.joint_stamp, model.status_received_stamp, pose_stamp))):
+            raise ValueError("execution model/pose expired")
+        delta = self._preview_joints.difference(constraint, ros_now=now, wall_now=wall,
+                                               timeout=min(max_age, self.pose_stale_timeout_sec))
+        if delta["position_delta"] > max_delta:
+            raise ValueError("execution joint displacement exceeds configured limit")
+        if (constraint.planner_tick != cmd.planner_tick or constraint.model_version != cmd.model_version
+                or constraint.command_stamp != cmd.header.stamp
+                or not np.allclose(constraint.linearization_rates, [cmd.theta_rate, cmd.phi_rate], rtol=0, atol=1e-12)
+                or abs(constraint.servo_dt_sec-dt) > 1e-12):
+            raise ValueError("execution command/cycle changed")
+        projected = copy.deepcopy(cmd)
+        projected.theta_rate, projected.phi_rate = result.proposal.rates
+        candidate = self._compute_servo_candidate(projected, pose, dt)
+        valid, reason, matrix, bias = unclipped_preview_rate_model(candidate.rate_model, result.proposal.rates)
+        actual = np.r_[candidate.linear, candidate.angular]
+        if not valid or not np.allclose(matrix@result.proposal.rates+bias, actual, rtol=0, atol=1e-9):
+            raise ValueError("execution output would be changed by runtime limits:"+reason)
+        qdot = np.asarray(constraint.joint_rate_matrix).reshape(6, 2)@(
+            np.asarray(result.proposal.rates)/constraint.rate_scales)+constraint.joint_rate_bias
+        transform = self.tf_buffer.lookup_transform(self.world_frame, model.task_frame, pose_stamp, rospy.Duration(0))
+        tool_position = np.array([transform.transform.translation.x, transform.transform.translation.y,
+                                  transform.transform.translation.z])
+        offset = np.asarray(pose)[:3, 3]-tool_position
+        task_actual = actual.copy()
+        task_actual[:3] -= np.cross(actual[3:], offset)
+        expected = np.asarray(model.task_jacobian).reshape(6, 6)@qdot
+        residual = np.linalg.norm((task_actual-expected)/np.asarray(model.task_velocity_scales))
+        if not np.isfinite(residual) or residual > max_residual:
+            raise ValueError("execution task residual exceeds configured limit")
+        qdot = np.linalg.solve(np.asarray(model.task_jacobian).reshape(6, 6), task_actual)
+        lo, hi = np.asarray(model.joint_velocity_lower), np.asarray(model.joint_velocity_upper)
+        if np.any(qdot < lo-1e-9) or np.any(qdot > hi+1e-9):
+            raise ValueError("execution joint velocity bound")
+        mask = np.asarray(model.joint_position_bounded, dtype=bool)
+        prediction = np.asarray(model.joint_position)+dt*qdot
+        margin = delta["position_max"]
+        if (np.any((prediction-margin)[mask] < np.asarray(model.joint_position_lower)[mask]-1e-9)
+                or np.any((prediction+margin)[mask] > np.asarray(model.joint_position_upper)[mask]+1e-9)):
+            raise ValueError("execution current-position margin")
+        change = qdot-np.asarray(model.joint_velocity)
+        if (np.any(change-delta["velocity_max"] < np.asarray(model.joint_acceleration_lower)*dt-1e-9)
+                or np.any(change+delta["velocity_max"] > np.asarray(model.joint_acceleration_upper)*dt+1e-9)):
+            raise ValueError("execution current-velocity margin")
+        if float(np.asarray(model.metric_gradient)@qdot) < -model.alpha*(model.sigma_min-model.m_min)-1e-7:
+            raise ValueError("execution task violates model metric constraint")
+        self._validate_projection_readiness()
+        if (self._projection_health_epoch != result.health_epoch
+                or not self._model_stream.epoch_matches(result.model_epoch)):
+            raise ValueError("execution health/model epoch changed")
+        _, final = self._preview_command_pair()
+        if final.msg != cmd or cmd.should_stop:
+            raise ValueError("execution final command changed/stopped")
+        now, wall = rospy.Time.now().to_sec(), time.monotonic()
+        if (not 0 <= wall-result.received_wall <= max_age
+                or not -.05 <= now-model.joint_stamp.to_sec() <= max_age
+                or cmd.header.stamp.is_zero()
+                or not -.05 <= now-cmd.header.stamp.to_sec() <= self._effective_cmd_timeout_sec()):
+            raise ValueError("execution result/command expired before publication")
+        self.profile_logger.info(
+            "kinematic_execution: tick=%d model_seq=%d command_stamp=%.9f joint_stamp=%.9f "
+            "twist_stamp=%.9f residual=%.9g rates=[%.9g %.9g]",
+            cmd.planner_tick, model.model_sequence, cmd.header.stamp.to_sec(), model.joint_stamp.to_sec(),
+            pose_stamp.to_sec(), residual, *result.proposal.rates)
+        return projected, candidate
 
     def _validate_preview_response(self, trace, response):
         """Associate an advisory response; this does not authorize execution."""
@@ -927,7 +1032,7 @@ class InfoFlowServoRuntime:
         # 2) 通过多重安全门（缺命令/过期/TF失败/位姿过期/策略要求停止）；
         # 3) 将球坐标速度指令转换为 Twist 并发布。
         self.stats.servo_steps += 1
-        if self.preview_mode == "observe":
+        if self.preview_mode != "off":
             self.latest_cycle_proposal = None
             self.latest_stream_projection = None
 
@@ -962,11 +1067,11 @@ class InfoFlowServoRuntime:
             return
 
         if bool(cmd.should_stop):
-            diagnostic_dt = self._servo_dt_sec() if self.preview_mode == "observe" else None
+            diagnostic_dt = self._servo_dt_sec() if self.preview_mode != "off" else None
             self._publish_twist(cmd=cmd, reason=str(cmd.stop_reason))
             self._reset_slew_state()
             self.stats.servo_zero_policy_stop += 1
-            if self.preview_mode == "observe":
+            if self.preview_mode != "off":
                 try:
                     pose, stamp = lookup_latest_pose_from_tf(
                         self.tf_buffer, world_frame=self.world_frame, camera_frame=self.camera_frame,
@@ -1044,22 +1149,16 @@ class InfoFlowServoRuntime:
         try:
             servo_dt_sec = self._servo_dt_sec()
             self._observe_cycle_projection(cmd, current_c2w, servo_dt_sec)
-            candidate = self._compute_servo_candidate(cmd, current_c2w, servo_dt_sec)
-            linear_cmd, angular_cmd = candidate.linear, candidate.angular
-            rate_model, rate_limits = candidate.rate_model, candidate.rate_limits
-            self._radial_integral_error = candidate.radial_integral
-            self._last_linear_cmd = linear_cmd.copy()
-            self._last_angular_cmd = angular_cmd.copy()
-
-            self._publish_twist(
-                cmd=cmd,
-                linear_cmd=linear_cmd,
-                angular_cmd=angular_cmd,
-                stamp=pose_stamp,
-                reason="motion",
-                rate_model=rate_model,
-                rate_limits=rate_limits,
-            )
+            with self._command_lock, self._projection_status_lock:
+                if self.preview_mode == "enforce":
+                    cmd, candidate = self._execution_candidate(cmd, current_c2w, pose_stamp, servo_dt_sec)
+                else:
+                    candidate = self._compute_servo_candidate(cmd, current_c2w, servo_dt_sec)
+                linear_cmd, angular_cmd = candidate.linear, candidate.angular
+                self._radial_integral_error = candidate.radial_integral
+                self._last_linear_cmd, self._last_angular_cmd = linear_cmd.copy(), angular_cmd.copy()
+                self._publish_twist(cmd=cmd, linear_cmd=linear_cmd, angular_cmd=angular_cmd,
+                    stamp=pose_stamp, reason="motion", rate_model=candidate.rate_model, rate_limits=candidate.rate_limits)
             self._planner_log_throttle(
                 "reference_sphere_servo",
                 1.0,
@@ -1132,9 +1231,13 @@ def build_argparser():
     parser.add_argument("--kinematic_status_topic", default="/omnimap/kinematic_status")
     parser.add_argument("--kinematic_projection_recovery_sec", type=float, default=0.1)
     parser.add_argument("--kinematic_cycle_projection_budget_sec", type=float, default=0.003)
+    parser.add_argument("--kinematic_execution_bridge_node", default="/omnimap_camera_twist_bridge")
+    parser.add_argument("--kinematic_execution_max_age", type=float, default=None)
+    parser.add_argument("--kinematic_execution_joint_delta", type=float, default=None)
+    parser.add_argument("--kinematic_execution_residual", type=float, default=None)
     parser.add_argument("--kinematic_preview_source", choices=("query", "stream"), default="query")
     parser.add_argument("--kinematic_model_topic", default="/omnimap/kinematic_model")
-    parser.add_argument("--kinematic_preview_mode", choices=("off", "observe"), default="off")
+    parser.add_argument("--kinematic_preview_mode", choices=("off", "observe", "enforce"), default="off")
     parser.add_argument("--kinematic_preview_hz", type=float, default=2.)
     parser.add_argument("--kinematic_preview_service", default="/omnimap_kinematic_monitor/evaluate_model")
     parser.add_argument("--spherical_cmd_raw_topic", default="/omnimap/spherical_cmd_raw")

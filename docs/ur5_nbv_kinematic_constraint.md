@@ -1,6 +1,6 @@
 # 执行侧二维构型约束诊断
 
-更新：2026-10-26。该接口已实现局部方向导数和半空间参数的诊断输出，尚未接入控制。
+更新：2026-10-26。该接口已实现诊断、模型流和可选执行侧 enforce，投影结果已接入最终 Twist；默认关闭，实机验收未完成。
 它补充 [执行端升级](ur5_nbv_kinematics_upgrade_sumi.md)，不替代现场标定和非零闭环验收。
 
 ## 数据链和计算定义
@@ -130,7 +130,7 @@ SciPy 已列在 environment.yaml 和执行侧依赖中。求解后独立检查�
 
 Planning 观察模式已使用半空间与局部球联合求解：旧实现会拒绝半空间投影在球外、但交集内仍有解的情况。
 RobotModel 关节速度约束和源 Servo 周期的相机线速度/slew 约束现已通过 KinematicConstraint 接入；
-因此没有增加连续控制 enforce 模式。源周期关节边界见下节，执行时仍须重新验证。
+该阶段尚无连续控制 enforce；后续已增加，见文末执行接入。源周期关节边界见下节，执行时仍须重新验证。
 
 新增求解器测试 8 项通过，覆盖解析交点、限速后破坏半空间的反例、仿射偏置、不可行交集和伪成功结果；
 消费者现为 11 项，实际 Planning/Servo 回调 10 项通过。均为软件验证，不代表真实机器人验收。
@@ -275,3 +275,23 @@ query 保留冻结位姿/关节一致性检查。stream 则报告采样与最新
 新模型映射更新、无 RPC、MoveIt halt、断流恢复和 policy stop；捕获输出全为零。
 缓存与回调另测重放/重启、失效后快速恢复仍丢旧工作和故障前延迟模型拒绝。
 两份升级文档已整理为当前实现，删除累积阶段中重复/过期的结论；历史证据保留于本文和验收记录。
+
+### 最终 Twist 执行与非零闭环（2026-10-26）
+
+Servo 的 kinematic_preview_mode 新增显式 enforce，仅支持 stream，默认仍 off。
+启用必须显式给出正数 execution_max_age、execution_joint_delta、execution_residual（参数名前缀 kinematic_），
+同时具备配置的 m_min、六关节完整加速度边界和匹配输入 topic 的普通桥接启动配置。
+KF/缺配置在启动时拒绝；执行中未具备模型或门槛时发零速，不回退到未投影命令。
+
+QP 目标在 enforce 下采用 Planning 最终速率，以保留其状态减速；最终 should_stop 始终有效。
+发布前按当前 TF/PI 重新计算实际 Twist，拒绝额外限幅，按同时间相机/tool0 偏移转换 task Twist，
+检查 Dx 归一化模型残差，并以实际 task 在模型 J 上反解的 qdot 检查速度、最新 q/dq 差值裕量下的
+位置/加速度及梯度约束。命令、健康/模型代次和源/接收时效在发布点再检查。
+原始/Planning 最终球面命令保持不变，ServoTwistTrace 携带真正执行的投影速率；
+kinematic_execution 日志携带 model_seq、tick 和三个时间戳。Planning 本身的约束建议可设 off。
+
+新增 servo_execution.test：真实 ROS 非零投影输出经普通桥接驱动独立 FK/Jacobian 理想关节模型。
+3 项验证投影速率/限速及关节移动、MoveIt halt 后持续零速/恢复、policy stop 和关节断流/恢复。
+测试参数只属于合成链，不是 UR5 标定值；实机制动距离、连续时间硬安全和真实执行效果仍需现场验证。
+
+本批构建通过：回调 34 项、非零执行 ROS 3 项、stream observe 5 项、query observe 4 项，共 46 项相关检查通过。另以有效半空间测试确认发布速率由 .1 改为 .11rad/s（对应 .06→.066m/s），不只是输出限幅；原始命令不变。真实机器人尚未启用 enforce。

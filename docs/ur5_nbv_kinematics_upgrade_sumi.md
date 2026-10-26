@@ -4,7 +4,7 @@
 Git 管理实现位于工作区 `ros_ws/src/omnimap_kinematics`，通过包链接部署到机器人工作区。
 旧的“仅 SSH 只读检查”限制不再适用。[计算端分工](ur5_nbv_kinematics_upgrade_local.md)、
 [接口细节](ur5_nbv_kinematic_constraint.md)和[现场验收记录](ur5_nbv_kinematics_validation_sumi.md)分别维护。
-目前已有诊断、状态停车和只读投影建议；连续投影执行与完整实机验收尚未完成。
+软件侧已有诊断、状态停车、只读建议及显式 enforce 的最终 Twist 投影执行；完整实机验收尚未完成。
 
 ## 执行链与单一模型来源
 
@@ -40,9 +40,9 @@ model_sequence 递增用于缓存/重启检测。关节、TF、状态失效或�
 模型流不依赖原始命令/旧桥接；KinematicStatus 的完整链验证仍独立执行。
 m_min 默认未配置，此时 c 不可用于投影，不以合成测试阈值代替真实标定。
 
-## Servo observe 模式
+## Servo 模式
 
-默认 `--kinematic_preview_mode off`。observe 也不修改实际运动命令，来源二选一：
+默认 `--kinematic_preview_mode off`。observe 不修改实际运动命令，来源二选一：
 
 - query（默认来源）：独立 Timer 查询冻结数学候选，检查请求/响应关联、返回后的 TF/关节及控制器周期。
 - stream：每个实际周期在模型快照自己的位姿上重算候选和约束，不发 RPC、不启动名义预览 Timer。
@@ -60,6 +60,35 @@ ProjectionReadinessGate 在求解前后检查 KinematicStatus 的 frame/链/指�
 恢复至少需两条递增健康反馈和默认 0.1 秒健康窗口；故障清缓存并改变健康代次。
 stream 还检查模型序号/故障代次及源时间晚于最近健康故障，防止延迟旧模型跨故障复用。
 日志分别记录模型年龄、相对最新关节/TF 的差值和实际周期 dt；这些差值尚未成为经标定的执行裕量。
+
+
+### 最终输出 enforce
+
+显式 `--kinematic_preview_mode enforce --kinematic_preview_source stream` 才执行投影。
+三个执行限值必须以正数显式传入：max_age（秒）、joint_delta（六关节差 L2，rad）、
+residual（Dx 归一化 task 差 L2，无量纲），完整参数名见计算端文档。
+monitor 私有参数 constraint_m_min 必须已配置并重启生效，全部六关节加速度上/下限必须存在；缺少条件时输出零速。
+启动时检查 `--kinematic_execution_bridge_node`（默认 /omnimap_camera_twist_bridge）下
+filter_mode=none 且 input_topic 匹配，不支持 KF 执行。
+
+投影以 Planning 状态减速后的最终速率为目标；约束仍可改变幅值/方向，最终 should_stop 始终停车。
+最终 Twist 发布前重算当前位姿下的 PI/角速度/限幅结果，验证同时间 tool0 TF、归一化 task 残差、
+反解关节速度、最新 q/dq 差值裕量、指标约束和命令/健康/模型代次。
+失败不会发布原始非投影命令；先零速，只有健康窗口与新模型等全部重新满足后才恢复。
+原始和 Planning 最终球面命令不改，实际投影速率由 ServoTwistTrace 和 kinematic_execution 日志留证。
+本地 enforce 建议将 Planning 的 kinematic_projection_mode 设为 off，状态反馈门仍保留。
+
+启用示例中的变量必须先由现场测量/验证确定；未设置时命令会拒绝启动：
+
+```bash
+python info_flow/info_flow_servo_runtime.py --kinematic_preview_mode enforce \
+  --kinematic_preview_source stream \
+  --kinematic_execution_max_age "${MODEL_MAX_AGE_S:?set calibrated model age}" \
+  --kinematic_execution_joint_delta "${JOINT_DELTA_RAD:?set calibrated joint delta}" \
+  --kinematic_execution_residual "${TASK_RESIDUAL:?set calibrated task residual}"
+```
+
+本轮未在实机启用。测试中的 m_min/执行裕量/加速度值仅用于合成模型，不是 UR5 标定值。
 
 ## 构建与部署
 
@@ -103,22 +132,23 @@ rostest omnimap_kinematics kinematics.test use_sim_time:=true
 rostest omnimap_kinematics diagnostics_launch.test
 rostest omnimap_kinematics servo_preview.test
 rostest omnimap_kinematics servo_stream.test
+rostest omnimap_kinematics servo_execution.test
 ```
 
 前两套用独立 NumPy FK/有限差分校验实际 C++ J、完整梯度、a/drift、参考点与关节顺序，
 并覆盖时间/TF/状态失效。后两套实际运行 Servo 的订阅/Timer、monitor 和桥接，
 覆盖查询或流式建议、关节断流、MoveIt 停车及新模型恢复；stream 另验证关节变化后的连续建议更新。
-所有输入是合成关节/TF/球面命令，最终命令始终 stop，捕获控制输出全部为零。
-这不是实际机器人运动或真实地图/Fisher/GPU 的验收。
+observe 测试输入为合成关节/TF/球面命令且保持零速。servo_execution.test 则发布真实 ROS 非零
+投影命令，经普通桥接输出驱动独立 FK/Jacobian 理想关节积分模型，验证限速、MoveIt halt、
+policy stop、关节断流后的零速及恢复（3 项通过）。这不是实际机器人或真实地图/Fisher/GPU 的验收。
 
 现场需录制 raw/final SphericalCommand、ServoTwistTrace、BridgeStatus、KinematicStatus、
 KinematicConstraint、KinematicModel、实际 MoveIt status、joint_states 和 TF，并保留有效配置。
 可用 `python3 scripts/collect_sumi_kinematics.py` 辅助采集，完整记录要求见验收文档。
 2026-10-25 的真实关节零速样本不能证明持续对齐或非零控制有效。
 
-## 剩余门槛
+## 剩余实机门槛
 
-1. 将流式采样模型用于执行前，处理运动时延、模型/线性化和实际执行残差及可用裕量。
-2. 完成连续投影执行、完整恢复状态机和实际桥接/滤波映射验证，保留原始命令及失效零速。
-3. 用现场真实模型/减速样本标定 m_min，验证关节顺序、相机标定与模型一致性。
-4. 完成硬件断链、恢复和非零闭环验收；不绕过 MoveIt 停车或机器人保护停机。
+1. 用现场真实模型/减速数据标定 m_min，确定并验证执行年龄、关节变化和任务残差限值。
+2. 验证关节顺序、相机标定、普通桥接和真实执行反馈，评估采样时延、实际速度/加速度及制动效果。
+3. 完成硬件断链、恢复及非零闭环验收，不绕过 MoveIt 停车或机器人保护停机。

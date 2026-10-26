@@ -18,6 +18,7 @@ import numpy as np
 import rospy
 import tf2_ros
 from sensor_msgs.msg import JointState
+from geometry_msgs.msg import TransformStamped
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "info_flow")]
@@ -467,6 +468,117 @@ class ServoTests(unittest.TestCase):
         msg.joint_names = self.joint_sample.name
         msg.joint_velocity_lower, msg.joint_velocity_upper = [-1.]*6, [1.]*6
         return msg
+
+    def test_enforce_publishes_projected_twist_stops_and_recovers(self):
+        self.node.preview_mode, self.node.preview_source = "enforce", "stream"
+        self.node.execution_limits = (.2, .02, .01)
+        self.node.execution_bridge_verified = True
+        self.node.linear_vel_max = .054
+        self.node.raw_spherical_cmd_callback(self.cmd)
+        def complete_model(seq=1, stamp=100.):
+            msg = self.stream_model(seq, stamp)
+            msg.joint_acceleration_bounded = [True]*6
+            msg.joint_acceleration_lower, msg.joint_acceleration_upper = [-10.]*6, [10.]*6
+            return msg
+        self.node.model_stream_callback(complete_model())
+        tool = TransformStamped()
+        tool.transform.translation.x, tool.transform.rotation.w = .6, 1.
+        self.node.tf_buffer.lookup_transform.return_value = tool
+        with patch.object(self.node._cycle_projection_queries, "call",
+                          side_effect=lambda query, payload, timeout: query(payload)), \
+                patch.object(self.node, "_servo_dt_sec", return_value=.02):
+            self.node._servo_timer_callback(None)
+            self.assertAlmostEqual(self.pub.messages[-1].twist.linear.y, .054, msg=str(self.log.lines[-5:]))
+            self.assertAlmostEqual(self.trace_pub.messages[-1].spherical_rates[0], .09)
+            self.assertAlmostEqual(self.cmd.theta_rate, .1)  # source unchanged
+            self.cmd.theta_rate = .05  # Planning's final state-scaled objective
+            self.node._servo_timer_callback(None)
+            self.assertAlmostEqual(self.pub.messages[-1].twist.linear.y, .03)
+            self.assertAlmostEqual(self.trace_pub.messages[-1].spherical_rates[0], .05)
+            self.cmd.theta_rate = .1
+            self.node.preview_status_callback(feedback(moveit_status=2, stamp=100.01))
+            self.node._servo_timer_callback(None)
+            self.assert_zero()
+            with patch.object(rospy.Time, "now", return_value=rospy.Time.from_sec(100.02)), \
+                    patch("time.monotonic", return_value=100.02):
+                self.node.preview_status_callback(feedback(stamp=100.02))
+            with patch.object(rospy.Time, "now", return_value=rospy.Time.from_sec(100.14)), \
+                    patch("time.monotonic", return_value=100.14):
+                self.node.preview_status_callback(feedback(stamp=100.14))
+                self.joint_sample.header.stamp = rospy.Time.from_sec(100.14)
+                self.node.preview_joint_callback(self.joint_sample)
+                self.node.model_stream_callback(complete_model(2, 100.14))
+                self.node._servo_timer_callback(None)
+                self.assertAlmostEqual(self.pub.messages[-1].twist.linear.y, .054, msg=str(self.log.lines[-5:]))
+
+    def test_enforce_metric_halfspace_changes_published_direction_rate(self):
+        self.node.preview_mode, self.node.preview_source = "enforce", "stream"
+        self.node.execution_limits, self.node.execution_bridge_verified = (.2, .02, .01), True
+        self.node.raw_spherical_cmd_callback(self.cmd)
+        msg = self.stream_model()
+        msg.metric_gradient, msg.m_min = [0., 1., 0., 0., 0., 0.], 1.033
+        msg.joint_acceleration_bounded = [True]*6
+        msg.joint_acceleration_lower, msg.joint_acceleration_upper = [-10.]*6, [10.]*6
+        self.node.model_stream_callback(msg)
+        tool = TransformStamped()
+        tool.transform.translation.x, tool.transform.rotation.w = .6, 1.
+        self.node.tf_buffer.lookup_transform.return_value = tool
+        with patch.object(self.node._cycle_projection_queries, "call",
+                          side_effect=lambda query, payload, timeout: query(payload)), \
+                patch.object(self.node, "_servo_dt_sec", return_value=.02):
+            self.node._servo_timer_callback(None)
+        self.assertAlmostEqual(self.trace_pub.messages[-1].spherical_rates[0], .11)
+        self.assertAlmostEqual(self.pub.messages[-1].twist.linear.y, .066)
+        self.assertAlmostEqual(self.cmd.theta_rate, .1)
+
+    def test_enforce_rejects_missing_limits_stale_model_and_task_residual(self):
+        self.node.preview_mode, self.node.preview_source = "enforce", "stream"
+        self.node.execution_limits, self.node.execution_bridge_verified = (.2, .02, 1e-6), True
+        self.node.raw_spherical_cmd_callback(self.cmd)
+        msg = self.stream_model()
+        self.node.model_stream_callback(msg)
+        tool = TransformStamped()
+        tool.transform.translation.x, tool.transform.rotation.w = .6, 1.
+        self.node.tf_buffer.lookup_transform.return_value = tool
+        with patch.object(self.node._cycle_projection_queries, "call",
+                          side_effect=lambda query, payload, timeout: query(payload)), \
+                patch.object(self.node, "_servo_dt_sec", return_value=.02):
+            self.node._servo_timer_callback(None)
+            self.assert_zero()
+            self.assertIn("all joint acceleration", self.trace_pub.messages[-1].reason)
+            msg = self.stream_model(2, 100.01)
+            msg.joint_acceleration_bounded = [True]*6
+            msg.joint_acceleration_lower, msg.joint_acceleration_upper = [-10.]*6, [10.]*6
+            self.joint_sample.header.stamp = rospy.Time.from_sec(100.01)
+            self.node.preview_joint_callback(self.joint_sample)
+            self.node.model_stream_callback(msg)
+            self.preview_pose[1, 3] = .001
+            self.node._servo_timer_callback(None)
+            self.assert_zero()
+            self.assertIn("task residual", self.trace_pub.messages[-1].reason)
+            self.preview_pose[1, 3] = 0.
+            self.node.execution_limits = (.001, .02, .01)
+            with patch.object(rospy.Time, "now", return_value=rospy.Time.from_sec(100.02)), \
+                    patch("time.monotonic", return_value=100.02):
+                self.node._servo_timer_callback(None)
+            self.assert_zero()
+            self.assertIn("expired", self.trace_pub.messages[-1].reason)
+
+    def test_enforce_rejects_filtered_or_wrong_bridge_startup_config(self):
+        args = servo.build_argparser().parse_args(["--kinematic_preview_mode", "enforce",
+            "--kinematic_preview_source", "stream", "--kinematic_execution_max_age", ".2",
+            "--kinematic_execution_joint_delta", ".02", "--kinematic_execution_residual", ".01"])
+        for mode, topic in (("kalman", args.cmd_topic), (None, args.cmd_topic), ("none", "/wrong")):
+            with patch.object(rospy, "init_node"), patch.object(rospy, "get_param",
+                    side_effect=lambda name, default=None: mode if name.endswith("filter_mode") else topic):
+                with self.assertRaisesRegex(ValueError, "unfiltered bridge"):
+                    servo.InfoFlowServoRuntime(args)
+
+    def test_enforce_without_explicit_budgets_is_rejected_at_startup(self):
+        args = servo.build_argparser().parse_args(["--kinematic_preview_mode", "enforce",
+                                                  "--kinematic_preview_source", "stream"])
+        with self.assertRaisesRegex(ValueError, "explicit positive"):
+            servo.InfoFlowServoRuntime(args)
 
     def test_stream_cycle_uses_canonical_sample_without_rpc_and_rejects_replay(self):
         self.node.preview_mode, self.node.preview_source = "observe", "stream"

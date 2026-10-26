@@ -1,0 +1,49 @@
+<launch>
+  <arg name="use_sim_time" default="false"/>
+  <param name="use_sim_time" value="$(arg use_sim_time)"/>
+  <param name="robot_description" textfile="$(find omnimap_kinematics)/tests/chain.urdf"/>
+  <param name="robot_description_semantic" value="&lt;robot name='kinematics_test_chain'&gt;&lt;group name='manipulator'&gt;&lt;chain base_link='chain_root' tip_link='tool0'/&gt;&lt;/group&gt;&lt;/robot&gt;"/>
+  <rosparam ns="/test/servo">
+    move_group_name: manipulator
+    planning_frame: base_link
+    robot_link_command_frame: base_link
+    ee_frame_name: tool0
+    joint_topic: /test/joints
+    status_topic: feedback
+    cartesian_command_in_topic: /test/tool_twist
+  </rosparam>
+  <!-- Nonuniform partial overrides exercise RobotModel acceleration ordering. -->
+  <rosparam ns="robot_description_planning/joint_limits">
+    j1: {has_acceleration_limits: true, max_acceleration: 10.0}
+    j2: {has_acceleration_limits: true, max_acceleration: 10.0}
+    j3: {has_acceleration_limits: true, max_acceleration: 10.0}
+    j4: {has_acceleration_limits: true, max_acceleration: 10.0}
+    j5: {has_acceleration_limits: true, max_acceleration: 10.0}
+    j6: {has_acceleration_limits: true, max_acceleration: 10.0}
+  </rosparam>
+  <node pkg="omnimap_kinematics" type="omnimap_kinematic_monitor" name="test_monitor" output="screen">
+    <param name="servo_ns" value="/test/servo"/>
+    <param name="constraint_m_min" value="0.0001"/>
+    <param name="kinematic_model_topic" value="/test/model"/>
+    <param name="kinematic_constraint_topic" value="/test/constraint"/>
+    <param name="kinematic_status_topic" value="/test/kinematic"/>
+    <param name="bridge_status_topic" value="/test/bridge"/>
+    <param name="twist_trace_topic" value="/test/trace"/>
+    <param name="sample_timeout" value="0.4"/>
+    <param name="max_sample_skew" value="0.15"/>
+    <rosparam param="task_velocity_scales">[0.1, 0.2, 0.3, 0.4, 0.5, 0.6]</rosparam>
+  </node>
+  <node pkg="omnimap_kinematics" type="camera_twist_bridge.py" name="test_bridge" output="screen">
+    <param name="filter_mode" value="none"/>
+    <param name="input_topic" value="/test/camera_twist"/>
+    <param name="output_topic" value="/test/tool_twist"/>
+    <param name="servo_ns" value="/test/servo"/>
+    <param name="bridge_status_topic" value="/test/bridge"/>
+    <param name="stale_timeout" value="0.4"/>
+    <param name="status_timeout" value="0.4"/>
+  </node>
+  <test test-name="servo_execution_chain" pkg="omnimap_kinematics" type="test_servo_preview_chain.py" time-limit="90">
+    <env name="OMNIMAP_TEST_PREVIEW_SOURCE" value="stream"/>
+    <env name="OMNIMAP_TEST_EXECUTION" value="1"/>
+  </test>
+</launch>

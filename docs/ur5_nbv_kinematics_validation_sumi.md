@@ -210,7 +210,7 @@ camera 输入可用 `--input-topic` 指定。若 master 在线但 Servo 参数�
 | 2. TF 时间和参考点平移项 | 同采样时间查询及有限差分/刚体速度测试通过；真实 TF 年龄与标定仍待现场记录 |
 | 3. MoveIt 诊断节点 | C++ 节点、构建、部署和真实 RobotState 隔离测试完成；已有真实模型/joint_states 零速样本，持续运行验收待完成 |
 | 4. 标定 m_min / 比较减速时机 | raw/normalized condition、sigma_min、status 的对齐接口已就绪；需要真实减速日志 |
-| 5. 二维最小半空间控制修正 | 执行侧局部映射和 a/drift/c 诊断已实现，控制尚未接入；已实现只读建议的联合限值/时效约束，仍需步骤 4 标定及连续执行/实际残差验证 |
+| 5. 二维最小半空间控制修正 | 执行侧流式模型、联合约束与可选 enforce 最终输出已接入并通过理想关节闭环；仍需步骤 4 真实标定与现场执行残差/运动验收 |
 | 6. stale/TF/status 零速策略 | 普通/KF 桥接 watchdog、状态停车和失效恢复测试通过；硬件断链验收待完成 |
 
 ## 2026-10-25 关节与 TF 延迟对齐修复
@@ -228,7 +228,7 @@ monitor 不再只查询最新 joint_states 时刻：缓存最多 200 个且未�
 
 新增 `/omnimap/kinematic_constraint`，详细数值定义见 [构型约束诊断](ur5_nbv_kinematic_constraint.md)。
 ServoTwistTrace 的消息 MD5 已改变，两端须重建消息并重启相关节点。
-当前不发布修正控制命令；阈值默认未配置，c=NaN，不以测试阈值代替实机标定。
+该阶段仅发布诊断；后续已新增可选 enforce。默认仍关闭且阈值未配置，不以测试阈值代替实机标定。
 
 本轮验证：消息/C++ 构建通过；InfoFlow 数值与模型测试 11 项、Planning/Servo 回调 9 项、
 inventory 1 项通过；直接节点和正式 diagnostics.launch 两套隔离 ROS 测试各 9 项通过。
@@ -261,3 +261,7 @@ rostest omnimap_kinematics servo_preview.test
 ## 2026-10-26 流式 observe 接入
 
 Servo 现可选择 kinematic_preview_source=stream，在模型同采样位姿上按实际周期生成建议，无 RPC/名义查询 Timer。servo_stream.test 覆盖变化的合成关节、模型/映射更新、MoveIt 停车、关节断流和 policy stop（5 项），全程最终 stop，捕获控制输出全为零。query 来源保留单独回归，仍使用冻结检查。模型年龄及相对最新 q/dq/TF 的差值仅作诊断，不能替代执行时延/残差裕量或实机验收。升级文档现按当前实现重新整理。
+
+## 2026-10-26 非零投影执行验证
+
+servo_execution.test 在隔离 ROS master、合成 URDF 和 /test/* topic 下运行实际 enforce，非零输出经真实桥接进入独立 FK/Jacobian 理想关节积分模型。3 项通过：投影速率和速度上限、关节移动、MoveIt halt 持续零速及新模型恢复、policy stop 与关节断流恢复。测试加速度/阈值/时延裕量仅用于合成模型，没有驱动真实 UR5。当前代码侧核心闭环已接入，真实 m_min/执行预算标定和硬件验收未完成。

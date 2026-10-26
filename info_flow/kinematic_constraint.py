@@ -1,7 +1,7 @@
 """Validate execution-side local models and compute non-actuating proposals.
 
-This consumer deliberately has no enforce mode: model recovery, execution
-revalidation and calibration remain to be integrated.
+This gate only validates and solves. Servo runtime owns optional enforcement,
+feedback recovery and publication-time revalidation; calibration remains external.
 """
 from dataclasses import dataclass
 import copy

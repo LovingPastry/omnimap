@@ -79,9 +79,9 @@ Planning 不加载机器人模型、不计算 Jacobian、不从 MoveIt code 推�
 不能仅凭 `transform_chain_valid=true` 声明已经验证关节顺序。
 
 `kinematic_projection.py` 保留二维最小半空间投影定义，要求 `u_info/a` 为两个有限速率、`c` 为有限标量。
-需要修正而方向范数不可用时抛出 `ValueError`。新的 KinematicConstraint 提供执行侧 `a/drift` 及显式阈值下的 `c`，Planning 已验证并记录投影建议，仍未接入控制路径；
-将来接入时，调用方必须把该异常转成零速或重新规划，禁止复用上一次修正方向。
-当前 enforce 只使用真实反馈进行状态停车和持续奇异减速。
+需要修正而方向范数不可用时抛出 `ValueError`。新的 KinematicConstraint 提供执行侧 `a/drift` 及显式阈值下的 `c`，Planning 记录只读建议，Servo 现已可选 enforce 接入最终 Twist；
+enforce 已把这类失效转为零速；其他调用方仍须零速或重新规划，禁止复用上一次修正方向。
+Planning 的 enforce 仍仅做状态停车/持续奇异减速；Servo 的 enforce 独立执行二维投影。
 
 ## 本机验证
 
@@ -146,7 +146,7 @@ rosbag record -O kinematic_chain.bag /omnimap/spherical_cmd_raw /omnimap/spheric
 ## 2026-10-26 消费者回归
 
 Planning 新增独立 KinematicConstraint 订阅及只读投影日志；投影建议与最终控制命令明确分开。
-该阶段消费者测试 10 项、Planning/Servo 回调 10 项通过（历史计数）。后续已接入联合可用关节/相机限值、只读模型重新查询、实际周期建议重算和健康恢复门槛；连续投影执行、运动中模型更新和现场验收仍未完成。
+该阶段消费者测试 10 项、Planning/Servo 回调 10 项通过（历史计数）。后续已接入联合可用关节/相机限值、只读模型重新查询、实际周期建议重算和健康恢复门槛；后续流式模型更新及可选最终 Twist 投影执行均已实现；现场标定与验收仍未完成。
 参数、失效原因及日志定义见 [约束接口](ur5_nbv_kinematic_constraint.md)。
 
 ## 2026-10-26 自动预览链路验证
@@ -175,3 +175,7 @@ rostest omnimap_kinematics servo_preview.test
 ## 2026-10-26 流式 observe 接入
 
 Servo 现可选择 kinematic_preview_source=stream，在模型同采样位姿上按实际周期生成建议，无 RPC/名义查询 Timer。servo_stream.test 覆盖变化的合成关节、模型/映射更新、MoveIt 停车、关节断流和 policy stop（5 项），全程最终 stop，捕获控制输出全为零。query 来源保留单独回归，仍使用冻结检查。模型年龄及相对最新 q/dq/TF 的差值仅作诊断，不能替代执行时延/残差裕量或实机验收。升级文档现按当前实现重新整理。
+
+## 2026-10-26 非零投影执行验证
+
+servo_execution.test 在隔离 ROS master、合成 URDF 和 /test/* topic 下运行实际 enforce，非零输出经真实桥接进入独立 FK/Jacobian 理想关节积分模型。3 项通过：投影速率和速度上限、关节移动、MoveIt halt 持续零速及新模型恢复、policy stop 与关节断流恢复。测试加速度/阈值/时延裕量仅用于合成模型，没有驱动真实 UR5。当前代码侧核心闭环已接入，真实 m_min/执行预算标定和硬件验收未完成。

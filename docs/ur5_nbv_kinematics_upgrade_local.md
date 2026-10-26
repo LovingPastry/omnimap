@@ -3,7 +3,7 @@
 更新：2026-10-26。工作区 `/home/sumi/experience/omnimap`，通过 Git 同步到算力端。
 本文描述当前实现；阶段数值和历史验证见[约束接口](ur5_nbv_kinematic_constraint.md)。
 执行端部署见 [sumi 升级](ur5_nbv_kinematics_upgrade_sumi.md)，现场要求见[本机验收](ur5_nbv_kinematics_validation_local.md)。
-完整升级尚未完成：目前有状态干预和只读投影建议，没有连续投影执行。
+软件侧已接入最终 Twist 的流式投影执行及故障恢复；默认关闭。实机标定与验收尚未完成。
 
 ## 当前分工
 
@@ -25,7 +25,7 @@
 |---|---|---|
 | Planning `--kinematic_feedback_mode` | observe | 记录状态；enforce 才对持续 code 1 减速、对 2–5/未知/失效停车 |
 | Planning `--kinematic_projection_mode` | observe | 只计算/记录建议；off 禁用 |
-| Servo `--kinematic_preview_mode` | off | observe 启用执行侧建议，不修改运动输出 |
+| Servo `--kinematic_preview_mode` | off | observe 只记录；enforce 将流式投影接入最终 Twist |
 | Servo `--kinematic_preview_source` | query | query 为冻结候选 RPC；stream 为每个实际周期使用连续模型快照 |
 
 原始 Fisher 命令独立发布到 `/omnimap/spherical_cmd_raw`；最终命令为 `/omnimap/spherical_cmd`。
@@ -95,7 +95,38 @@ PI/角速度偏置变化时 query 旧模型拒绝，stream 在该周期重新构
 超时或不可行则建议失效，不保留上一周期建议。停车分支先发零速，再进行有界诊断。
 ProjectionReadinessGate 要求新鲜且有效的 KinematicStatus、MoveIt 0/1、至少两条递增健康样本，
 以及默认 0.1 秒健康窗口。故障清模型/建议并推进健康代次；求解前后均检查，旧工作不能跨故障恢复。
-这些都是只读建议的门槛，尚未授权投影运动或解除保护停机。
+observe 仅记录建议；enforce 通过下节额外门槛后才发布投影结果，不解除或绕过保护停机。
+
+
+## 显式 enforce 执行
+
+`--kinematic_preview_mode enforce --kinematic_preview_source stream` 将投影接到最终 Twist。
+默认仍为 off；enforce 不支持 query，并要求显式提供三个正数限值（没有实机猜测默认值）：
+
+| 参数 | 单位/含义 |
+|---|---|
+| `--kinematic_execution_max_age` | 秒；模型/位姿源时间和模型接收年龄上限 |
+| `--kinematic_execution_joint_delta` | rad；最新六关节位置相对模型样本的 L2 差上限 |
+| `--kinematic_execution_residual` | 无量纲；实际 task Twist 与模型预测之差的 Dx 归一化 L2 上限 |
+
+还要求 monitor 显式配置 constraint_m_min（私有参数，重启 monitor 生效），模型提供全部六关节加速度界限，且实际桥接启动配置为 none。
+`--kinematic_execution_bridge_node` 默认 /omnimap_camera_twist_bridge；启动时检查该节点的
+filter_mode 和 input_topic，拒绝 KF、缺失配置或错误输入 topic。改配置后应重启相关节点。
+
+enforce 以 Planning 状态减速后的最终速率为目标；约束投影仍可改变幅值/方向，最终 should_stop 始终停车。
+发布前在本周期最新相机位姿重算投影命令，拒绝额外限幅，获取同时间 tool0 TF，检查 task 残差，
+将该 task Twist 经模型 J 反解后再次检查关节速度、带最新 q/dq 差值裕量的位置/加速度及指标约束。
+命令、健康/模型代次和时间在最终发布处再校验；失败、超时、不可行、未标定或缺界限都发零速，
+不会退回未经投影的原速率。PI/slew 仅在成功发布周期提交。
+
+原始/Planning 最终 SphericalCommand 保持不变；ServoTwistTrace 记录实际投影速率及线角速度。
+kinematic_execution 日志用 tick、model_seq、command/joint/twist 时间关联模型与实际输出。
+使用本地 enforce 时，Planning 建议设置 `--kinematic_projection_mode off`，避免重复建议；
+Planning 的反馈状态门仍可保留。
+
+这里的 task 残差比较本周期待发布命令与模型预测，不是机械臂实测跟踪误差。
+这些是离散采样模型上的执行检查，不是实机制动距离或连续时间硬安全证明。
+实机使用前仍须测定三个限值和 m_min，核验模型/标定及实际执行误差。
 
 ## 构建与证据
 
@@ -111,12 +142,12 @@ python tests/test_projection_readiness.py
 
 算力端默认只构建消息；执行端用 `--with-kinematics`。新增 KinematicModel 需两端生成并重启相关节点。
 ROS 验证命令见执行端文档：独立 FK/完整梯度/移动样本转换、查询链、流式链和故障恢复已有合成测试。
-ROS 测试的最终命令始终 stop，捕获的控制 Twist 全为零；没有真实地图/Fisher/GPU 或机器人运动证据。
+observe 测试保持零输出；新增 servo_execution.test 用非零投影命令驱动独立 FK/Jacobian 理想关节模型，
+验证限速、故障零速和健康/新模型恢复。未运行真实地图/Fisher/GPU 或实际机器人。
 既往真实关节零速诊断不能替代持续对齐、标定或非零闭环验收。
 
-## 完整升级仍需完成
+## 实机阶段仍需完成
 
-1. 将流式采样建议接入实际控制前，完成运动时延、线性化/执行残差与可用误差裕量处理。
-2. 完成连续投影执行和完整恢复状态机，保留原始 Fisher、来源关联及失效零速；不能靠状态减速替代。
-3. 验证实际桥接/滤波与执行映射。当前数学候选不包含 KF 动态，不能把未滤波模型当作滤波后执行保证。
-4. 现场对齐真实模型、标定 m_min，录制真实减速/断链/恢复及非零运动的闭环证据。
+1. 现场标定 m_min 和执行年龄/关节变化/任务残差限值，验证适用工况与真实误差裕量。
+2. 核验真实模型、关节顺序、相机标定、普通桥接配置和执行反馈；确认实际速度/加速度及停车效果。
+3. 完成硬件断链、保护停机后的人工恢复边界和非零闭环验收，保留完整数据与有效配置。
