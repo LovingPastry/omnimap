@@ -5,6 +5,7 @@ Git 管理实现位于工作区 `ros_ws/src/omnimap_kinematics`，通过包链�
 旧的“仅 SSH 只读检查”限制不再适用。[计算端分工](ur5_nbv_kinematics_upgrade_local.md)、
 [接口细节](ur5_nbv_kinematic_constraint.md)和[现场验收记录](ur5_nbv_kinematics_validation_sumi.md)分别维护。
 软件侧已有诊断、状态停车、只读建议及显式 enforce 的最终 Twist 投影执行；完整实机验收尚未完成。
+现场逐步操作见[真实运动标定与验收 SOP](ur5_nbv_real_motion_sop.md)，不要直接从合成测试参数启用实机 enforce。
 
 ## 执行链与单一模型来源
 

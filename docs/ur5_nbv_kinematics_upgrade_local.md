@@ -4,6 +4,7 @@
 本文描述当前实现；阶段数值和历史验证见[约束接口](ur5_nbv_kinematic_constraint.md)。
 执行端部署见 [sumi 升级](ur5_nbv_kinematics_upgrade_sumi.md)，现场要求见[本机验收](ur5_nbv_kinematics_validation_local.md)。
 软件侧已接入最终 Twist 的流式投影执行及故障恢复；默认关闭。实机标定与验收尚未完成。
+现场操作顺序、启动命令、标定交付物及停车/恢复判据见[真实运动验收 SOP](ur5_nbv_real_motion_sop.md)。
 
 ## 当前分工
 
