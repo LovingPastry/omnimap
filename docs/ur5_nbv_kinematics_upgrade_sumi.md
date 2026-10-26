@@ -94,3 +94,15 @@ Planning 对有界关节联合求解 `q_min <= q + dt*(A*u+bq) <= q_max`，以�
 已补充 RobotModel 集成覆盖：隔离 `kinematics.test` 仅为 j1/j3 设置不同加速度上限，
 验证六关节名称顺序、正负上限和缺失标记，以及乱序 JointState 的位置/非零速度传输；
 生产 launch 测试保留完全未配置加速度上限的路径。两套各 9 项通过，均为合成模型证据。
+
+### 停车后模型查询基础接口（2026-10-26）
+
+monitor 新增私有只读服务 `~evaluate_model`，类型 `omnimap_msgs/EvaluateKinematicModel`。
+默认节点名下路径为 `/omnimap_kinematic_monitor/evaluate_model`。请求携带
+`reason=preview` 的候选 ServoTwistTrace；其中 command 是候选重建值，不表示已发布或已执行。
+服务从新鲜关节历史选择与候选时间相近且 TF 覆盖的样本，检查实际 MoveIt 状态、模型/TF、
+映射重建、导数和可用限值，返回标记 `advisory_preview:` 的 KinematicConstraint。
+查询不依赖旧 BridgeStatus，不向任何控制/反馈 topic 发布；失效在响应中显式标记。
+这补齐了停车后不借助先行运动即可重新获取模型的接口；Servo 尚未生成/调用候选预览，
+自动恢复与执行前重校验仍未接入。调用结果不能直接作为执行许可。
+新增服务需两端重建消息包并重启 monitor；本次既有消息字段及 MD5 不变。

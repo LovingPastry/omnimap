@@ -1,0 +1,6 @@
+# Non-actuating candidate evaluation. This is not an execution authorization.
+# reason must be "preview"; command is the reconstructed candidate Twist,
+# never a claim that it has been published. All timestamps must be fresh.
+omnimap_msgs/ServoTwistTrace candidate
+---
+omnimap_msgs/KinematicConstraint constraint

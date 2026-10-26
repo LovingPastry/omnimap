@@ -188,3 +188,16 @@ Planning 对有界关节联合求解 `q_min <= q + dt*(A*u+bq) <= q_max`，以�
 两条消息 MD5 均改变，算力端和执行端必须重新构建并重启相关节点。
 
 本阶段构建通过：消费者 15 项、Planning/Servo 回调 11 项、隔离 ROS 两套各 9 项通过。ROS 合成模型验证了位置边界传输与缺失加速度上限标记；加速度已配置的消费者数值分支通过，已补充 RobotModel 部分关节配置加速度上限的集成覆盖：j1=0.7、j3=1.3，其余关节保持缺失；按名称核对上下限、标记和 q/dq。生产 launch 的无上限配置路径也通过。未操作真实机器人。
+
+### 只读候选查询
+
+`omnimap_msgs/EvaluateKinematicModel.srv` 接收 `ServoTwistTrace candidate`，返回
+`KinematicConstraint constraint`。monitor 以私有 `~evaluate_model` 提供服务。
+候选必须使用 `reason=preview`、正确 command frame 和新鲜 command/Planning 时间戳；
+关节选择使用候选时间而非旧桥接输入时间。查询沿用同一 RobotModel、TF、MoveIt 状态、
+映射重建和导数检查；省略实际桥接输出一致性检查，因为候选尚未发布。
+响应 reason 的 `advisory_preview:` 前缀区分候选结果与实际命令追踪结果。
+服务不发布任何命令或反馈消息，不检查碰撞轨迹，也不授权控制；阈值未配置仍返回
+`threshold_configured=false` 和不可用的 c。执行方仍须生成正确候选并在使用时重新校验。
+
+候选查询构建通过，两套隔离 ROS 测试各 10 项通过；新增用例覆盖旧桥接过期后重新查询、模型/新关节样本一致性、请求过期、错误 frame 和 MoveIt 停车拒绝。未运行实机，未接入 Servo 自动查询或恢复。

@@ -7,6 +7,7 @@
 #include <omnimap_msgs/KinematicStatus.h>
 #include <omnimap_msgs/KinematicConstraint.h>
 #include <omnimap_msgs/ServoTwistTrace.h>
+#include <omnimap_msgs/EvaluateKinematicModel.h>
 #include <moveit/robot_model_loader/robot_model_loader.h>
 #include <moveit/robot_state/robot_state.h>
 #include <tf2_ros/transform_listener.h>
@@ -153,6 +154,7 @@ public:
     bridge_sub_ = nh_.subscribe(topic, 10, &KinematicMonitor::bridge, this);
     pnh_.param<std::string>("twist_trace_topic", topic, "/omnimap/servo_twist_trace");
     trace_sub_ = nh_.subscribe(topic, 100, &KinematicMonitor::trace, this);
+    evaluation_service_ = pnh_.advertiseService("evaluate_model", &KinematicMonitor::evaluateModel, this);
     timer_ = nh_.createWallTimer(ros::WallDuration(1.0/hz), &KinematicMonitor::publish, this);
   }
 
@@ -192,7 +194,7 @@ private:
       joint_history_.pop_front();
   }
 
-  void selectJointSample()
+  void selectJointSample(const ros::Time& requested = ros::Time(), bool use_bridge = true)
   {
     // Latest input must itself be healthy. Buffering only compensates TF delivery
     // latency; it must not mask stopped, corrupt, or future-dated joint streams.
@@ -205,7 +207,8 @@ private:
       const double age = (ros::Time::now()-msg->header.stamp).toSec();
       if (msg->header.stamp.isZero() || age < -0.05 || age > timeout_ ||
           (ros::SteadyTime::now()-it->received).toSec() > timeout_) continue;
-      if (bridge_ && std::abs((msg->header.stamp-bridge_->input.header.stamp).toSec()) > skew_) continue;
+      if (!requested.isZero() && std::abs((msg->header.stamp-requested).toSec()) > skew_) continue;
+      if (use_bridge && bridge_ && std::abs((msg->header.stamp-bridge_->input.header.stamp).toSec()) > skew_) continue;
       if (!tf_.canTransform(base_, tool_, msg->header.stamp, ros::Duration(0)) ||
           !tf_.canTransform(base_, camera_, msg->header.stamp, ros::Duration(0))) continue;
       selected_joints_ = msg;
@@ -307,7 +310,7 @@ private:
   void computeConstraint(const omnimap_msgs::ServoTwistTrace& trace,
                          const Eigen::MatrixXd& jacobian,
                          const Eigen::VectorXd& singular_values,
-                         omnimap_msgs::KinematicConstraint& out)
+                         omnimap_msgs::KinematicConstraint& out, bool preview = false)
   {
     out.joint_stamp = selected_joints_->header.stamp;
     out.twist_stamp = trace.command.header.stamp; out.twist_seq = trace.command.header.seq;
@@ -319,7 +322,7 @@ private:
         !std::all_of(trace.reference_scene_center.begin(), trace.reference_scene_center.end(),
                      [](double value) { return std::isfinite(value); }))
       throw std::runtime_error("servo_rate_model_reference_invalid");
-    if (!trace.rate_model_valid || trace.reason != "motion")
+    if (!trace.rate_model_valid || trace.reason != (preview ? "preview" : "motion"))
       throw std::runtime_error("servo_rate_model_invalid:" + trace.rate_model_reason);
     if (status_ != 0 && status_ != 1) throw std::runtime_error("moveit_not_executable");
     // Reject a multiple/near-zero weakest singular value: its central difference
@@ -365,7 +368,7 @@ private:
       task.col(col).head<3>() -= Eigen::Vector3d(camera.col(col).tail<3>()).cross(offset);
     bias.head<3>() -= Eigen::Vector3d(bias.tail<3>()).cross(offset);
     // KF filtering or downstream bridge stops are not part of this affine map.
-    if ((task*rates+bias-twist(bridge_->output)).norm() > 1e-9)
+    if (!preview && (task*rates+bias-twist(bridge_->output)).norm() > 1e-9)
       throw std::runtime_error("bridge_rate_model_mismatch");
     task = task*rate_scales_.asDiagonal(); // dimensionless u -> task velocity
     Eigen::JacobiSVD<Eigen::MatrixXd> solver(jacobian, Eigen::ComputeThinU | Eigen::ComputeThinV);
@@ -417,6 +420,41 @@ private:
     if (out.threshold_configured && !std::isfinite(out.c)) throw std::runtime_error("constraint_nonfinite");
     out.valid = true;
     out.reason = out.threshold_configured ? "ok:advisory_only" : "ok:threshold_unset_advisory_only";
+  }
+
+  bool evaluateModel(omnimap_msgs::EvaluateKinematicModel::Request& request,
+                     omnimap_msgs::EvaluateKinematicModel::Response& response)
+  {
+    auto& out = response.constraint;
+    out.header.stamp = ros::Time::now(); out.header.frame_id = base_;
+    out.source_frame = base_; out.task_frame = tool_;
+    out.m_min = m_min_; out.alpha = alpha_;
+    out.c = out.sigma_min = out.drift = out.a[0] = out.a[1] =
+        out.inverse_residual = out.derivative_error = std::numeric_limits<double>::quiet_NaN();
+    for (int i = 0; i < 2; ++i) out.rate_scales[i] = rate_scales_[i];
+    try
+    {
+      const auto& candidate = request.candidate;
+      if (candidate.reason != "preview" || frame(candidate.command.header.frame_id) != base_)
+        throw std::runtime_error("preview_reason_or_frame_invalid");
+      const auto received = ros::SteadyTime::now();
+      fresh(candidate.command.header.stamp, received, "preview");
+      fresh(candidate.command_stamp, received, "preview_command");
+      selected_joints_.reset();
+      // Candidate queries must work without any previous control/bridge sample.
+      selectJointSample(candidate.command.header.stamp, false);
+      fresh(status_stamp_, status_received_, "moveit_status");
+      checkTF(tool_); checkTF(camera_);
+      const auto jacobian = taskJacobian(*state_);
+      const Eigen::MatrixXd normalized = dx_.cwiseInverse().asDiagonal()*jacobian*dq_.asDiagonal();
+      if (!normalized.allFinite()) throw std::runtime_error("normalized_jacobian_nonfinite");
+      const Eigen::VectorXd values = Eigen::JacobiSVD<Eigen::MatrixXd>(normalized).singularValues();
+      computeConstraint(candidate, jacobian, values, out, true);
+      out.reason = "advisory_preview:" + out.reason;
+    }
+    catch (const std::exception& exc) { out.valid = false; out.reason = exc.what(); }
+    // No publisher is used here. The caller must revalidate before execution.
+    return true;
   }
 
   void publish(const ros::WallTimerEvent&)
@@ -513,6 +551,7 @@ private:
                     << " reason=" << out.reason);
   }
 
+  ros::ServiceServer evaluation_service_;
   ros::NodeHandle nh_, pnh_;
   tf2_ros::Buffer tf_;
   tf2_ros::TransformListener tf_listener_;

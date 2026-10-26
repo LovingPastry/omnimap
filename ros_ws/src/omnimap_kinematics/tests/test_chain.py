@@ -4,6 +4,7 @@
 Independent NumPy forward kinematics and finite differences check the monitor's
 frame, reference point, variable order, normalization and measured speed.
 """
+import copy
 import threading
 import time
 import unittest
@@ -15,6 +16,7 @@ import rostest
 import tf2_ros
 from geometry_msgs.msg import TransformStamped, TwistStamped
 from omnimap_msgs.msg import BridgeStatus, KinematicStatus, ServoTwistTrace, KinematicConstraint
+from omnimap_msgs.srv import EvaluateKinematicModel
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Int8
 from rosgraph_msgs.msg import Clock
@@ -167,6 +169,7 @@ class ChainTest(unittest.TestCase):
                     cls.input_pub.publish(msg)
                     # rospy has now assigned msg.header.seq. Nested headers in
                     # the trace preserve that actual wire sequence.
+                    cls.latest_trace = copy.deepcopy(trace)
                     cls.trace_pub.publish(trace)
 
     def wait(self, predicate, description, timeout=3):
@@ -235,6 +238,47 @@ class ChainTest(unittest.TestCase):
             rdot = ((plus[:3, :3]-minus[:3, :3])/2e-6) @ rotation.T
             jac[3:, i] = [rdot[2, 1], rdot[0, 2], rdot[1, 0]]
         return jac
+
+    def test_preview_reacquires_model_without_fresh_bridge(self):
+        service = ("/omnimap_kinematic_monitor/evaluate_model" if
+                   rospy.get_param("/test/configure_servo_late", False) else
+                   "/test_monitor/evaluate_model")
+        rospy.wait_for_service(service, timeout=3)
+        query = rospy.ServiceProxy(service, EvaluateKinematicModel)
+        self.wait(lambda: hasattr(self, "latest_trace") and self.constraint is not None
+                  and self.constraint.valid, "source model")
+        baseline = self.constraint
+        with self.lock:
+            self.__class__.send_input = False
+            candidate = copy.deepcopy(self.latest_trace)
+        # The ordinary monitor loses its bridge source. Queries use only the
+        # candidate timestamp plus fresh q/dq, TF and actual MoveIt status.
+        time.sleep(.5)
+        self.wait(lambda: not self.kinematic.transform_chain_valid, "bridge expires")
+        def refresh():
+            candidate.reason = "preview"
+            candidate.command.header.stamp = rospy.Time.now()-rospy.Duration(.06)
+            candidate.command_stamp = candidate.command.header.stamp
+        refresh()
+        result = query(candidate).constraint
+        self.assertTrue(result.valid, result.reason)
+        self.assertTrue(result.reason.startswith("advisory_preview:"))
+        np.testing.assert_allclose(result.joint_rate_matrix, baseline.joint_rate_matrix)
+        np.testing.assert_allclose(result.joint_rate_bias, baseline.joint_rate_bias)
+        self.assertGreater(result.joint_stamp.to_sec(), baseline.joint_stamp.to_sec())
+        candidate.command.header.stamp = rospy.Time(1)
+        self.assertIn("preview_stale", query(candidate).constraint.reason)
+        refresh()
+        candidate.command.header.frame_id = "tool0"
+        self.assertEqual(query(candidate).constraint.reason, "preview_reason_or_frame_invalid")
+        candidate.command.header.frame_id = "base_link"
+        with self.lock:
+            self.__class__.code = 2
+        time.sleep(.1)
+        refresh()
+        rejected = query(candidate).constraint
+        self.assertFalse(rejected.valid)
+        self.assertEqual(rejected.reason, "moveit_not_executable")
 
     def test_directional_model_matches_independent_fk_and_bridge(self):
         self.wait(lambda: self.constraint is not None and self.constraint.valid, "constraint derivatives")
