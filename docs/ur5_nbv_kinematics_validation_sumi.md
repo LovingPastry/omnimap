@@ -282,5 +282,32 @@ servo_execution.test 在隔离 ROS master、合成 URDF 和 /test/* topic 下运
 失效模型中的空关节名、未置位边界等字段不可用来判断实际 RobotModel 缺少限值。
 
 本机证据为 `/tmp/omnimap_monitor_readonly_live.log` 和
-`/tmp/omnimap_monitor_readonly_live.json`。下一步应先核验 Servo 在该运行模式下何时发布状态，
-再进行现场监督下的零速链路验收；不得把缺失状态当成健康、延长超时来掩盖缺失，或填造状态值。
+`/tmp/omnimap_monitor_readonly_live.json`。后续原因定位和零速检查见下一节；
+没有把缺失状态当成健康、延长超时来掩盖缺失，或填造状态值。
+
+## 2026-10-26 21:09 真实零速链路验收
+
+实际安装 MoveIt Servo 1.1.16，当前有效 `low_latency_mode=true`。
+对应版本的 [ServoCalcs 源码](https://github.com/moveit/moveit/blob/1.1.16/moveit_ros/moveit_servo/src/servo_calcs.cpp)
+在低延迟主循环等待新输入，在 calculateSingleIteration 起始处发布 status。
+因此无输入时仅启动 monitor 并不能获取持续状态。无需更改 Servo 或放宽状态有效性检查。
+
+两轮均保留现有 Servo/驱动，仅启动正式 diagnostics.launch 的 monitor 和普通桥接，
+使用专用输入 topic，开始前确认 Servo 输入没有其他 publisher，结束后退出本轮节点。
+不切换控制器、不重启现有 Servo、不修改状态或模型阈值。
+
+1. 专用输入无 publisher，桥接 input_missing watchdog 持续发零速，观察约 12 秒：
+   222 条模型中 220 条有效（其余两条启动时尚无关节数据），521 条 MoveIt status 均为 0；
+   531 条输出全零，1,623 条真实关节样本速度全零。模型 sigma_min 约 6.44085，
+   导数误差约 2.91e-7，六关节速度/加速度边界与有效参数一致，m_min 仍未设置。
+   该轮 bridge 输入缺失，不能单凭模型有效声称完整桥接链有效。
+2. 在专用输入上发布 594 条全零相机 Twist，时间戳取 TF buffer 中两参考点可用的较早时间，
+   而非未来时间或无时间标签。518 条桥接反馈中 513 条有效，其余 5 条为启动状态未到达；
+   219 条 KinematicStatus 中 217 条链有效，其余两条为启动关节未到达。
+   519 条实际 Servo 输入全零，真实关节速度全零。
+   未运行 Planning，因此 tick_unavailable 符合预期，不能据此验收 Planning tick/实际运动追踪。
+
+本机记录分别为 `/tmp/omnimap_monitor_zero_live.{log,json}` 和
+`/tmp/omnimap_zero_chain_live.{log,json}`。两轮均未发送非零命令。
+这些数据证明当前静止构型的短时模型/TF/桥接对齐和零速唤醒链路；
+不覆盖运动构型、真实减速、执行残差/年龄裕量、非零投影或硬件故障恢复。

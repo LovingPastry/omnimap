@@ -172,6 +172,7 @@ KinematicConstraint、KinematicModel、实际 MoveIt status、joint_states 和 T
 下一步为启动仅诊断的 monitor、确认真实模型/TF 连续对齐，再依据现场记录确定 m_min 和三个执行限值。
 本轮没有实机非零运动、保护停机恢复或制动测量结果，软件测试中的数值不能补齐这些证据。
 
-随后仅启动 monitor 复核，221 条模型均未就绪：真实关节已接收，但没有新鲜 MoveIt 状态，
-所以仍不能验证真实模型/TF 持续对齐。节点已退出，没有发送控制命令。
-完整结果见[现场复核记录](ur5_nbv_kinematics_validation_sumi.md#2026-10-26-2055-仅-monitor-的现场复核)。
+随后仅启动 monitor 时未收到新鲜 MoveIt 状态；已定位为当前 low_latency_mode 等待输入的行为。
+21:09 两轮零速现场检查中，220 条模型、217 条完整链反馈有效，输出及实测关节速度全零；
+两轮临时节点均已退出。只证明当前静止构型的短时对齐，不代表标定或非零实机运动通过。
+完整结果见[零速现场验收](ur5_nbv_kinematics_validation_sumi.md#2026-10-26-2109-真实零速链路验收)。
