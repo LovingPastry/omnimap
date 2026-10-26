@@ -1,269 +1,122 @@
 # OmniMap 计算端运动学反馈升级
 
-更新：2026-10-26。本文按当前源码维护，替代 2026-10-22 的实施前清单。
-当前工作区为 `/home/sumi/experience/omnimap`，代码通过 Git 同步到算力端；部署路径可不同。
-执行端见 [sumi 升级](ur5_nbv_kinematics_upgrade_sumi.md)，模式参数、日志和测试命令见
-[本机验收](ur5_nbv_kinematics_validation_local.md)。
+更新：2026-10-26。工作区 `/home/sumi/experience/omnimap`，通过 Git 同步到算力端。
+本文描述当前实现；阶段数值和历史验证见[约束接口](ur5_nbv_kinematic_constraint.md)。
+执行端部署见 [sumi 升级](ur5_nbv_kinematics_upgrade_sumi.md)，现场要求见[本机验收](ur5_nbv_kinematics_validation_local.md)。
+完整升级尚未完成：目前有状态干预和只读投影建议，没有连续投影执行。
 
-## 已实现
+## 当前分工
 
-| 源码 | 职责 |
+| 组件 | 当前职责 |
 |---|---|
-| `ros_ws/src/omnimap_msgs/msg/KinematicStatus.msg` | 独立 14 字段反馈，消息已生成 |
-| `info_flow/info_flow_planning_node.py` | 接收状态与约束反馈，记录投影建议，发布原始 Fisher 命令和最终命令 |
-| `info_flow/kinematic_feedback.py` | 双时钟超时、frame/指标/状态校验、持续奇异减速及停车 |
-| `info_flow/kinematic_constraint.py` | 关联最近执行命令，验证约束来源/新鲜度/参考球/局部范围，计算只读投影建议 |
-| `info_flow/kinematic_projection.py` | 二维半空间、线性限值和仿射范数限值的联合最小投影，以及 Servo 局部速度模型；尚未接入控制 |
-| `info_flow/info_flow_servo_runtime.py` | 生成相机参考点 Twist，发布实际命令追踪，失效零速 |
-| `ros_ws/src/omnimap_kinematics` | 执行侧桥接、MoveIt RobotState monitor 与二维构型导数诊断 |
+| Planning | Fisher 原始命令、最终命令、状态门及只读约束建议；不加载另一套 RobotModel |
+| Servo runtime | 本机 TF、径向 PI/朝向/速度/slew 控制；实际 Twist 追踪；可选查询或流式建议 |
+| C++ monitor | 实际 MoveIt 模型/group/边界、归一化指标、二维导数、连续同采样模型流 |
+| 普通/KF 桥接 | 相机到 tool0 参考点变换、状态停车、墙钟 watchdog；只能运行一个控制 publisher |
 
-Planning 不加载 RobotModel，不从 status 码推导 Jacobian 或修正方向。
-默认 observe 记录反馈、保留 Fisher 输出；enforce 才启用状态干预：code 1 持续 0.1 秒后默认缩放至 0.5，
-code 2–5、未知码或失效反馈停车。原始命令独立发布到 `/omnimap/spherical_cmd_raw`，可回放。
-反馈在 Fisher 计算完成后重新读取；原始/最终命令保留相同 tick。
+主要源码：`info_flow/info_flow_planning_node.py`、`info_flow/info_flow_servo_runtime.py`、
+`info_flow/kinematic_feedback.py`、`info_flow/kinematic_constraint.py`、
+`info_flow/kinematic_projection.py`、`info_flow/kinematic_model.py`、
+`ros_ws/src/omnimap_kinematics/src/omnimap_kinematic_monitor.cpp`。
 
-## 坐标和指标契约
+## 模式及默认值
 
-Servo 在 world_frame 计算速度，要求 cmd_frame 相同；UR5 链路均为 base_link 表达。
-`/servo_server/delta_twist_camera` 以 cam_1_color_optical_frame 为参考点，桥接输出
-`/servo_server/delta_twist_cmds` 以 tool0 为参考点，仅做一次：
+| 参数 | 默认 | 行为 |
+|---|---|---|
+| Planning `--kinematic_feedback_mode` | observe | 记录状态；enforce 才对持续 code 1 减速、对 2–5/未知/失效停车 |
+| Planning `--kinematic_projection_mode` | observe | 只计算/记录建议；off 禁用 |
+| Servo `--kinematic_preview_mode` | off | observe 启用执行侧建议，不修改运动输出 |
+| Servo `--kinematic_preview_source` | query | query 为冻结候选 RPC；stream 为每个实际周期使用连续模型快照 |
+
+原始 Fisher 命令独立发布到 `/omnimap/spherical_cmd_raw`；最终命令为 `/omnimap/spherical_cmd`。
+两者按 tick/model、来源时间/frame 和参考球关联，Header.seq 由不同 publisher 分配，不能据此关联。
+原始策略 stop 禁止建议；最终状态反馈 stop 可以只读评估，但绝不借此恢复运动。
+Planning 的状态 enforce 不等于连续投影 enforce，不从状态码推导 Jacobian 或逃逸方向。
+
+## 坐标与模型契约
+
+相机参考点为 cam_1_color_optical_frame，末端参考点为 tool0；速度均以 base_link 表达。
+`/servo_server/delta_twist_camera` 经桥接到 `/servo_server/delta_twist_cmds`，只做一次：
 
 ```text
 v_T^B = v_C^B - omega^B × (p_C^B - p_T^B)
 omega_T^B = omega_C^B
 ```
 
-Planning/Servo 不重复参考点变换；没有使用 cam_1_baselink。
-monitor 使用实际 Servo 模型、group、关节顺序及 tool0 Jacobian，计算
-`Jbar = inverse(Dx) J_B Dq`、`m = sigma_min(Jbar)`。
-反馈 condition 已归一化；日志 raw_condition 用于比较下游原始条件数，17/30 不能直接用于归一化阈值。
+没有改为 tool0 frame，也不使用 cam_1_baselink。monitor 从实际 Servo 参数读取模型/group/topics，
+关节按名称装配，并检查 TF 与模型一致。指标为 `Jbar=Dx^-1 J_B Dq`、`m=sigma_min(Jbar)`，
+Dq 来自实际 RobotModel 速度上限；归一化 condition 不能共用 raw condition 的 17/30 阈值。
+m_min 必须显式标定配置，默认未配置时 threshold_configured=false、c=NaN。
+Int8 status 只有接收时间，不能证明它与 Twist 属于同一 MoveIt 内部周期。
 
-## 连续修正仍需完成
+## 查询与流式建议
 
-目标仍为两个球面速率上的 `min 0.5 ||u-u_info||², subject to a.T u >= c`。
-投影函数已拒绝非有限输入和不可用修正方向。新增独立 KinematicConstraint 消息，
-执行侧按实际 Servo 映射和同一 MoveIt 模型生成 a、drift；显式配置 m_min 后才生成有限 c。
-接口、尺度、失效条件见 [二维构型约束诊断](ur5_nbv_kinematic_constraint.md)。
-Planning 已订阅该接口，默认 `--kinematic_projection_mode observe` 只计算/记录建议，不修改命令；
-`off` 可关闭建议计算。消费者的双时钟、命令来源、参考球及局部范围检查已有回调测试。
-联合求解器已支持线性关节限值、仿射线速度/每周期速度变化限值和局部球；Planning 当前接入半空间、局部球与实际 RobotModel 关节速度上下限。
-执行侧通过 KinematicConstraint 发布带关节名称的 qdot=A u+bq，以及源 Servo 周期的相机线速度、速度变化限值和死区。
-Planning 已将这些限值联合求解。仍需执行时重新校验、制动距离与实际关节加速度验证、现场标定、停车后的模型恢复和非零闭环验收，再接入控制。
-状态减速不能替代这一目标，status code 不能推导 a。
-无效/不可行方向必须零速或重新规划，不复用旧方向；加入速度等额外约束后需联合求解，
-投影后任意裁剪可能破坏半空间约束。
+query 使用 `~evaluate_model` 服务（默认 `/omnimap_kinematic_monitor/evaluate_model`）。
+候选计算不提交 PI/slew 状态、不推进 Servo 时钟、不发布命令。名义预览 dt 为 1/servo_hz，
+日志标记 dt_source=nominal。请求和响应关联、新鲜度、返回后 TF/关节及控制器周期均检查；
+冻结条件变化会拒绝结果。单个后台 RPC worker 到期使调用端返回，不能强制取消底层阻塞操作；
+它实际结束前不创建替代任务，晚结果不复用。
 
-## 构建和完整验收
+stream 订阅 `/omnimap/kinematic_model`，不使用查询 RPC 或名义预览 Timer。
+同一 monitor 连续发布同关节/TF 采样的 J、相机 c2w/参考点偏移、完整指标梯度和实际模型边界。
+每个实际 Servo 周期用快照自己的位姿重新计算相机数学候选，再重建二维约束。
+Python 不加载另一套机器人模型；不会给旧位姿候选仅改时间标签。
+模型、关节和 status 源时间以及接收时间都必须新鲜，且不能早于最近健康故障门槛。
+重放、失效样本或发布器序号重启使旧缓存/在途结果失效；重启后的递增新样本才重新使用。
+
+流式建议描述采样状态，不冒充最新或未来物理状态。日志记录 model_seq/model_age、
+joint_delta、velocity_delta、joint_stamp_delta、pose_delta、rotation_delta 和实际有效 dt。
+模型与最新本机样本可以不同；差值用于观察，尚未作为经标定的执行误差裕量。
+
+```bash
+python info_flow/info_flow_servo_runtime.py --kinematic_preview_mode observe \
+  --kinematic_preview_source stream --kinematic_model_topic /omnimap/kinematic_model \
+  --kinematic_joint_topic /joint_states --kinematic_status_topic /omnimap/kinematic_status
+```
+
+这是部署选项，未在真实机器人上执行。joint/status/model topic 应匹配实际执行端配置。
+
+## 当前周期约束与恢复门槛
+
+目标仍为二维速率上的最小修正；物理速率 `rates=rate_scales*u`，约束包括：
+
+- `a.T*u >= c`，以及局部模型球；a/drift 来自实际模型，c 依赖显式 m_min。
+- RobotModel 关节速度界限，以及有界关节的一周期位置预测。
+- 模型提供的关节加速度界限；缺失时明确标记，不填猜测值。
+- 源控制器状态下的相机线速度、每周期 slew 和死区约束。
+
+实际周期按 Servo 使用的有效 dt 重建位置/加速度/slew 限值；dt 有既有启动默认及上下限处理。
+PI/角速度偏置变化时 query 旧模型拒绝，stream 在该周期重新构造候选。
+速度/slew/deadband 生效的源可以作为限幅前数学预览，绝不作为超限执行命令发布。
+死区外部为非凸集，当前求保守支撑半空间内的最小修正，不保证整个非凸集合全局最优。
+投影后再通过真实控制计算核对输出，不允许任意裁剪修复结果。
+
+数值求解使用独立控制器快照/单个 worker，等待预算默认 3ms，最多名义周期的四分之一。
+超时或不可行则建议失效，不保留上一周期建议。停车分支先发零速，再进行有界诊断。
+ProjectionReadinessGate 要求新鲜且有效的 KinematicStatus、MoveIt 0/1、至少两条递增健康样本，
+以及默认 0.1 秒健康窗口。故障清模型/建议并推进健康代次；求解前后均检查，旧工作不能跨故障恢复。
+这些都是只读建议的门槛，尚未授权投影运动或解除保护停机。
+
+## 构建与证据
 
 ```bash
 conda activate InfoFlow
 ./scripts/build_ros_ws.sh
 source /opt/ros/noetic/setup.bash
 source ros_ws/devel/setup.bash
-python tests/test_kinematic_feedback.py
-python tests/test_kinematic_constraint.py
 python tests/test_kinematic_runtime.py
+python tests/test_kinematic_model_cache.py
+python tests/test_projection_readiness.py
 ```
 
-计算端默认仅构建消息，执行端使用 --with-kinematics；消息修改后两端重建并 source。
-完整升级仍须满足：
+算力端默认只构建消息；执行端用 `--with-kinematics`。新增 KinematicModel 需两端生成并重启相关节点。
+ROS 验证命令见执行端文档：独立 FK/完整梯度/移动样本转换、查询链、流式链和故障恢复已有合成测试。
+ROS 测试的最终命令始终 stop，捕获的控制 Twist 全为零；没有真实地图/Fisher/GPU 或机器人运动证据。
+既往真实关节零速诊断不能替代持续对齐、标定或非零闭环验收。
 
-- 同 tick 的原始/最终命令、实际 Twist、桥接输入/输出可关联，joint/status 按时间关联。
-- sigma/condition 的模型、参考点、frame 和关节顺序与实际 Servo 一致。
-- 区分奇异减速/急停、collision、joint bound；保留原始 Fisher 独立回放能力。
-- 无效方向、TF/关节/status 或桥接失效时反馈无效、enforce 零速，执行桥接另有 watchdog。
-- 标定和连续投影接入后验证约束、恢复及实际运动效果。
+## 完整升级仍需完成
 
-Int8 status 没有源时间戳，不能声称与 Twist 属于同一 MoveIt 内部周期。
-2026-10-25 已有真实关节状态零速诊断；持续对齐、减速标定、硬件断链和非零闭环仍未验收。
-
-2026-10-26 再次只读检查本机默认 ROS master 不可访问，现场数据门槛仍未完成。
-这不影响代码与隔离回调验证，不能据此假定实机链路已经运行。
-
-### 源周期关节位置与加速度边界（2026-10-26）
-
-ServoTwistTrace 传输实际 `servo_dt_sec`；KinematicConstraint 传输对应关节样本的
-`joint_position`、`joint_velocity`，以及 RobotModel 的位置/加速度上下限和各关节 bounded 标记。
-Planning 对有界关节联合求解 `q_min <= q + dt*(A*u+bq) <= q_max`，以及
-`dq + a_min*dt <= A*u+bq <= dq + a_max*dt`。模型未配置的加速度上限不填猜测值；
-日志 `acceleration_limits_complete` 明确标记是否六个关节均有上限。
-这是一周期 Euler 预测和相对测量速度的约束，不证明真实执行加速度或制动距离安全；
-源关节样本与 Twist 允许的小量时间偏差也仍需在执行重校验中处理。
-两条消息 MD5 均改变，算力端和执行端必须重新构建并重启相关节点。
-
-已补充 RobotModel 集成覆盖：隔离 `kinematics.test` 仅为 j1/j3 设置不同加速度上限，
-验证六关节名称顺序、正负上限和缺失标记，以及乱序 JointState 的位置/非零速度传输；
-生产 launch 测试保留完全未配置加速度上限的路径。两套各 9 项通过，均为合成模型证据。
-
-### 停车后模型查询基础接口（2026-10-26）
-
-monitor 新增私有只读服务 `~evaluate_model`，类型 `omnimap_msgs/EvaluateKinematicModel`。
-默认节点名下路径为 `/omnimap_kinematic_monitor/evaluate_model`。请求携带
-`reason=preview` 的候选 ServoTwistTrace；其中 command 是候选重建值，不表示已发布或已执行。
-服务从新鲜关节历史选择与候选时间相近且 TF 覆盖的样本，检查实际 MoveIt 状态、模型/TF、
-映射重建、导数和可用限值，返回标记 `advisory_preview:` 的 KinematicConstraint。
-查询不依赖旧 BridgeStatus，不向任何控制/反馈 topic 发布；失效在响应中显式标记。
-这补齐了停车后不借助先行运动即可重新获取模型的接口；Servo 现已具备无副作用候选计算、显式查询及可选 observe 调度；
-自动恢复与执行前重校验仍未接入。调用结果不能直接作为执行许可。
-新增服务需两端重建消息包并重启 monitor；本次既有消息字段及 MD5 不变。
-
-### Servo 候选计算与显式查询（2026-10-26）
-
-`_compute_servo_candidate` 与实际控制共用同一计算，实现径向 PI 抗饱和、角速度、
-速度/slew/deadband 及映射构造；返回候选积分状态，实际周期才提交积分及上一命令。
-`evaluate_preview(cmd, pose, pose_stamp, dt, query)` 检查来源时间/frame，构造 preview trace，
-调用传入的 EvaluateKinematicModel service proxy；不会发布命令或追踪，也不会推进积分、
-slew 或周期时钟。控制锁保护候选计算与实际周期之间的状态读取，RPC 在锁外执行。
-方法可用于停车命令的只读评估；可选 observe 调度见后文，尚无运动恢复入口；
-响应已检查候选关联、返回年龄、控制器周期变化和返回后的最新 TF；实际周期建议重算及最新关节复核见后文。
-
-### 预览响应关联与周期失效（2026-10-26）
-
-`evaluate_preview` 对请求命令作独立拷贝，检查返回的 preview 标记、有效性、frame、
-tick/model、command/twist 时间与序号、参考球、速率、相机映射及所有源周期线速度限值。
-响应 header/joint/twist/command 时间均须新鲜；超过 pose_stale_timeout_sec 才返回的 RPC 结果被丢弃。
-查询期间控制器周期编号或 PI/上一线角速度发生变化时拒绝结果，包括数值相同的新周期。
-这只是返回结果的关联和失效检查：RPC 等待现有调用端截止时间，但底层阻塞操作不能强制取消；
-查询后最新 TF 已复核，最新关节已增加本机冻结状态复核，实际周期 dt 现已用于重建建议约束，尚未执行投影或恢复运动。
-相关回调测试现为 14 项通过。
-
-### 有界查询等待和返回后 TF 复核（2026-10-26）
-
-`--kinematic_preview_timeout_sec` 默认 0.1 秒，须有限且大于零；实际等待预算还受
-pose_stale_timeout_sec 限制。`SingleFlightQuery` 在单个 daemon worker 中执行只读 RPC；
-调用端到期抛 TimeoutError。底层 RPC 不能强制取消，超时 worker 返回前拒绝新请求，
-不创建替代 worker，晚到结果不复用。RPC 异常原样传递，实际返回后才释放占用。
-返回后立即读取最新 TF（零等待），要求时间新鲜且与请求位姿在 1e-9 数值容差内一致；
-这适用于冻结状态的预览，不能当作运动中模型误差的硬件安全裕量。
-RPC 等待期间不持有控制锁；候选计算和末尾控制器状态比较持锁。命令/位姿/请求均独立拷贝。
-新增 2 项有界查询测试及 15 项回调测试通过。执行 dt 复核、
-连续投影执行和恢复运动仍未接入。
-
-### 本机关节流复核（2026-10-26）
-
-Servo 以 `--kinematic_joint_topic`（默认 `/joint_states`，部署时须与实际 Servo/monitor
-配置一致）订阅本机关节状态，只用于只读预览校验。响应返回后，最新样本必须在 ROS 和
-接收墙钟两种年龄上均新鲜，时间不早于模型选用样本，六关节按名称与响应 q/dq 对齐。
-位置和速度要求在 1e-9 数值容差内一致；这是冻结状态检查，不是允许运动误差的安全裕量。
-畸形、重复/倒退时间样本使旧好样本失效；更新且合格的样本才恢复检查。
-本次关节状态 5 项、实际回调 16 项测试通过，包括 TF 不变但关节变化的拒绝。
-本机样本复核仍是返回后的单次观察，不能证明后续执行期间状态不变；
-实际周期建议重算已接入，投影执行与恢复仍未接入。
-
-未来时间的本机关节样本在接收时拒绝，不推进已接受时间基线；后续正常新样本可恢复，相关测试已覆盖。
-
-### 自动只读 observe 调度（2026-10-26）
-
-Servo 参数 `--kinematic_preview_mode observe` 显式启用独立 ROS Timer（默认 off，
-`--kinematic_preview_hz 2`）；`--kinematic_preview_service` 默认
-`/omnimap_kinematic_monitor/evaluate_model`。调度订阅 `--spherical_cmd_raw_topic`
-（默认 `/omnimap/spherical_cmd_raw`，须与最终命令 topic 不同）。
-查询前后均核对原始/最终命令的 tick、model、来源时间/frame、参考球和接收年龄，
-原始策略 stop 禁止查询；最终状态反馈 stop 可做只读评估。原始/最终 Header.seq
-由不同 publisher 分配，不用于二者关联。查询期间任一命令变化，结果即失效。
-结果只存为 `latest_preview_constraint` 并写 kinematic_preview 日志，不发布任何控制/追踪消息。
-每次调度先清除旧建议，错误或超时不会保留上次结果。调度不推进 Servo 周期时钟。
-预览 dt 使用 1/servo_hz，日志标记 `dt_source=nominal`，不代表测得的未来执行周期。
-同样保留查询期间 Servo 周期变化失效检查，因此查询跨过控制周期时会被拒绝；
-当前是冻结状态诊断，并不保证运动中持续取得可用模型。18 项回调测试通过。
-
-```bash
-python info_flow/info_flow_servo_runtime.py --kinematic_preview_mode observe \
-  --kinematic_preview_hz 2 --kinematic_preview_timeout_sec 0.1 \
-  --kinematic_joint_topic /joint_states
-```
-
-命令是部署选项，未在实机执行；实际 joint topic 应与 Servo/monitor 配置一致。
-实际周期建议重算见后文；下一步仍需投影执行、恢复状态机和现场标定验收。
-
-### 实际周期建议重算（2026-10-26）
-
-observe 调度保留带来源命令、完整相机仿射映射和冻结位姿的 PreviewEvaluation。
-实际 Servo 周期以本周期有效 dt（含现有启动默认/上下限处理）重算 PI、角速度与限值，
-复核 raw/final 来源、本机关节样本和位姿。完整仿射映射变化时拒绝旧模型，要求重新查询；
-仅 dt/上一线速度限值变化时，重建位置、关节加速度、相机 speed/slew/deadband 约束，
-联合求解并再次核对投影后的实际计算输出没有被限幅改变。
-KinematicConstraintGate 显式区分 preview 与 execution 来源，拒绝角色混用。
-数值求解使用独立控制器快照及单个后台 worker，调用端等待预算默认
-`--kinematic_cycle_projection_budget_sec 0.003`，并受名义周期四分之一上限约束。
-超时仍占用唯一 worker，晚结果丢弃，不创建替代求解；每个实际周期先清空旧建议。
-运动分支只记录建议，原输出不变；停车分支先发布零速/清理状态，再做零等待 TF 和有界诊断，
-不会借诊断恢复运动。日志为 `kinematic_cycle_projection ... dt_source=actual`。
-本阶段消费者 16 项、回调 21 项通过，包括 dt 变短后加速度约束改变建议速率、
-PI 映射变化拒绝、运动输出不变、停车保持零速和阻塞求解无替代任务。
-这仍是冻结模型的建议重算；限幅前候选的查询/投影见后文，
-连续投影执行、完整恢复状态机、现场标定及实机验收仍未完成。
-
-### 限幅前数学候选与死区恢复建议（2026-10-26）
-
-preview 现使用 `unclipped_preview_rate_model` 描述线速度限幅前的仿射候选。
-速度/slew/deadband 生效不再阻止只读查询；非有限、退化或未知失效原因仍拒绝。
-preview command 可超出限值，只通过服务传输，绝不送往控制 publisher；实际 motion trace
-继续对已限幅输出标记无效仿射模型。两者 reason/来源角色严格区分。
-当前周期先联合求出满足限值的速率，再用真实 PI/限幅计算核对输出，不把超限候选当执行值。
-预览源位于死区内时，从半空间偏好的候选速度选择支撑方向，必要时从映射方向选择；
-仍求解保守凸子集，无可观察方向或不可行交集时失败。实际执行来源的旧死区内模型仍拒绝。
-这不保证整个非凸死区外部的全局最优，也不自动恢复运动。
-测试覆盖 speed/slew 源限幅的可行投影、零速死区逃逸建议、无效模型不被提升，
-所有预览均无发布。原始候选 .06m/s 可投影至 .054m/s 并通过真实输出核对。
-
-### 独立反馈准备状态机（2026-10-26）
-
-实际周期建议求解前后新增 ProjectionReadinessGate，订阅
-`--kinematic_status_topic /omnimap/kinematic_status`。有效反馈须满足双时钟年龄、
-source/task frame、变换链和数值指标检查，并且 MoveIt code 为 0/1；2–5、未知码、
-失效链路、过期/未来/倒退时钟立即阻断建议。旧的模型查询成功不能覆盖新停车反馈。
-恢复要求至少两条源时间递增的健康样本，并持续
-`--kinematic_projection_recovery_sec 0.1`（允许配置零，但仍需两条样本）。
-断流/坏样本/重复时间重置恢复；新的停车/无效链路样本也推进合法源时间基线，
-因此更旧的健康重放不能跨越它启动恢复。异常未来时间不推进基线。
-求解返回后再次检查准备状态；求解期间出现停车反馈时丢弃结果。
-本次准备状态机 6 项、回调 26 项软件测试通过，包括停车后恢复、乱序重放和晚到停车。
-这是完整控制恢复中的健康门槛组件，不执行投影、不解除 MoveIt 停车或保护停机，
-也不自行恢复运动；实际投影执行、模型连续更新及现场标定验收仍待完成。
-默认 off/observe 的运动行为保持原样。
-
-健康准备未就绪时，回调立即清除缓存模型/建议并推进健康代次；查询与求解在同一代次才可保存结果，存储检查与反馈更新由同一锁串行化。因此即使工作期间先停车再快速恢复健康，也不能复用停车前结果，须重新查询。测试已覆盖该交错顺序。
-
-### 自动预览链路的隔离 ROS 验证（2026-10-26）
-
-新增 `rostest omnimap_kinematics servo_preview.test`，真实运行 Servo 的订阅/Timer、
-EvaluateKinematicModel RPC、C++ RobotModel monitor 和普通桥接。输入是合成 URDF、
-静态 q/TF、合成原始球面命令和始终停车的最终命令，所有 topic 均在 `/test/*`。
-4 项通过：自动查询与当前周期建议；MoveIt halt 清缓存及新模型恢复；关节断流/恢复；
-原始 policy stop 阻止查询。完整捕获的控制输出均为零。
-该验证不替换网络发布、TF 查询或 RPC，但没有运行真实 Fisher/地图/GPU，也没有实机运动。
-它证明冻结合成场景中的自动只读恢复链，不证明运动中的模型连续更新、投影执行或物理安全。
-
-```bash
-source /opt/ros/noetic/setup.bash
-source ros_ws/devel/setup.bash
-rostest omnimap_kinematics servo_preview.test
-```
-
-测试构造运行参数后实例化实际 Servo 类，不调用生产 CLI 的配置加载；源码从包的真实路径
-解析仓库根目录，因此支持机器人 catkin_ws 内的符号链接部署。新用例已加入 CMake rostest 清单。
-
-### 连续同采样模型流与二维转换（2026-10-26）
-
-新增只读 `/omnimap/kinematic_model`（私有参数 kinematic_model_topic）。同一个 MoveIt
-monitor 按 publish_hz 连续发布 KinematicModel，不依赖旧桥接命令，也无需先发运动命令。
-每个快照包含递增 model_sequence、发布/关节/status 接收时间、实际关节顺序与 q/dq/模型边界、
-base_link 表达的 tool0 Jacobian、同关节时间的相机 c2w/参考点偏移、归一化 sigma_min 和
-六关节完整指标梯度。梯度沿各关节单位方向作两档中心差分，并检查数值稳定性。
-TF/关节/status 失效、MoveIt 2–5/未知码或最小奇异值不可微时发布 valid=false，
-不拿旧快照冒充有效结果。m_min 仍默认未配置，不能据此宣称已标定。
-
-`info_flow/kinematic_model.py:constraint_from_model` 可由快照及同时间的相机数学候选重建
-KinematicConstraint：一次参考点变换后求 J*[A,bq]=[B*rate_scales,b]，再算
-`a=gradient^T*A`、`drift=gradient^T*bq`。转换验证双时钟年龄、时间/frame、数组/边界、
-位姿旋转、指标与 Jacobian 自洽、秩和逆解残差；返回独立复制的只读 preview 约束。
-调用方必须由该快照 camera_c2w 重新计算候选，不能给旧位姿候选仅改时间标签。
-没有在 Python 加载另一套机器人模型。
-
-两套 ROS 测试均增加独立 NumPy FK/Jacobian/完整梯度比较，关节数值连续变化时快照和
-转换后的速率映射随之更新，旧桥接过期仍更新，MoveIt halt 使快照失效；非法来源/模型拒绝。
-这证明模型流和转换接口能够跟随合成关节样本，尚未把 Servo 的冻结查询路径切换为流式控制。
-运动中的时延/残差处理、最终投影执行与实机标定验收仍待完成。
-新增消息需两端重建并重启 monitor；既有消息字段/MD5 本批未改变。
-部署脚本现检查新模型消息及查询服务的生成文件，避免把旧构建当成完整部署。
+1. 将流式采样建议接入实际控制前，完成运动时延、线性化/执行残差与可用误差裕量处理。
+2. 完成连续投影执行和完整恢复状态机，保留原始 Fisher、来源关联及失效零速；不能靠状态减速替代。
+3. 验证实际桥接/滤波与执行映射。当前数学候选不包含 KF 动态，不能把未滤波模型当作滤波后执行保证。
+4. 现场对齐真实模型、标定 m_min，录制真实减速/断链/恢复及非零运动的闭环证据。

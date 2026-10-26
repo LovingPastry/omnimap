@@ -34,7 +34,7 @@ class PreviewJointState:
             except (ValueError, TypeError) as exc:
                 self._error = str(exc)
 
-    def validate(self, response, *, ros_now, wall_now, timeout):
+    def difference(self, response, *, ros_now, wall_now, timeout):
         with self._lock:
             sample, error = self._latest, self._error
         if sample is None:
@@ -53,6 +53,13 @@ class PreviewJointState:
         if not math.isfinite(source_stamp) or source_stamp <= 0 or stamp < source_stamp:
             raise ValueError("preview local joint sample precedes response")
         actual = np.asarray([joints[name] for name in names])
-        if (not np.allclose(actual[:, 0], q, rtol=0, atol=1e-9)
-                or not np.allclose(actual[:, 1], dq, rtol=0, atol=1e-9)):
+        return dict(stamp_delta=stamp-source_stamp,
+                    position_delta=float(np.linalg.norm(actual[:, 0]-q)),
+                    velocity_delta=float(np.linalg.norm(actual[:, 1]-dq)),
+                    position_max=float(np.max(np.abs(actual[:, 0]-q))),
+                    velocity_max=float(np.max(np.abs(actual[:, 1]-dq))))
+
+    def validate(self, response, *, ros_now, wall_now, timeout):
+        delta = self.difference(response, ros_now=ros_now, wall_now=wall_now, timeout=timeout)
+        if delta["position_max"] > 1e-9 or delta["velocity_max"] > 1e-9:
             raise ValueError("preview joint state changed since model sample")

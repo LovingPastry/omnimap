@@ -256,4 +256,8 @@ rostest omnimap_kinematics servo_preview.test
 
 ## 2026-10-26 连续模型流验证
 
-新增 KinematicModel，同一 MoveIt monitor 连续发布同采样 J、相机位姿和完整指标梯度。直接节点及生产 launch 的两套 ROS 用例覆盖独立 FK/梯度比较、关节变化后更新、无桥接依赖、停车失效，以及快照到二维约束的转换与非法数据拒绝。自动只读 Servo 链路另有 4 项回归，部署脚本检查新生成文件。此为合成关节/TF 数值变化的证据，未验证实际运动或 Servo 流式控制接入；细节见升级文档。
+新增 KinematicModel，同一 MoveIt monitor 连续发布同采样 J、相机位姿和完整指标梯度。直接节点及生产 launch 的两套 ROS 用例覆盖独立 FK/梯度比较、关节变化后更新、无桥接依赖、停车失效，以及快照到二维约束的转换与非法数据拒绝。自动只读 Servo 链路另有 4 项回归，部署脚本检查新生成文件。此为合成关节/TF 数值变化的证据，已增加 Servo 流式 observe 验证，但未验证实际运动或流式投影执行；细节见升级文档。
+
+## 2026-10-26 流式 observe 接入
+
+Servo 现可选择 kinematic_preview_source=stream，在模型同采样位姿上按实际周期生成建议，无 RPC/名义查询 Timer。servo_stream.test 覆盖变化的合成关节、模型/映射更新、MoveIt 停车、关节断流和 policy stop（5 项），全程最终 stop，捕获控制输出全为零。query 来源保留单独回归，仍使用冻结检查。模型年龄及相对最新 q/dq/TF 的差值仅作诊断，不能替代执行时延/残差裕量或实机验收。升级文档现按当前实现重新整理。

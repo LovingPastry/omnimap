@@ -22,7 +22,7 @@ from sensor_msgs.msg import JointState
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "info_flow")]
 
-from omnimap_msgs.msg import KinematicStatus, SphericalCommand, KinematicConstraint
+from omnimap_msgs.msg import KinematicStatus, SphericalCommand, KinematicConstraint, KinematicModel
 from kinematic_constraint import KinematicConstraintGate
 from kinematic_feedback import KinematicFeedbackGate
 from test_kinematic_feedback import feedback
@@ -453,6 +453,67 @@ class ServoTests(unittest.TestCase):
             self.assertAlmostEqual(proposal.rates[0], .09)
         self.assertEqual(self.pub.messages, [])
         self.assertEqual(self.trace_pub.messages, [])
+
+    def stream_model(self, sequence=1, stamp=100.):
+        msg = KinematicModel()
+        msg.header.stamp = msg.joint_stamp = msg.status_received_stamp = rospy.Time.from_sec(stamp)
+        msg.header.frame_id = msg.source_frame = "base_link"
+        msg.task_frame, msg.camera_frame = "tool0", "cam_1_color_optical_frame"
+        msg.valid, msg.reason, msg.model_sequence = True, "synthetic", sequence
+        msg.task_jacobian = np.diag(np.arange(1., 7.)).reshape(-1).tolist()
+        msg.camera_c2w = self.preview_pose.reshape(-1).tolist()
+        msg.task_velocity_scales, msg.rate_scales = [1.]*6, [.1, .1]
+        msg.sigma_min, msg.m_min, msg.alpha, msg.threshold_configured = 1., .1, 1., True
+        msg.joint_names = self.joint_sample.name
+        msg.joint_velocity_lower, msg.joint_velocity_upper = [-1.]*6, [1.]*6
+        return msg
+
+    def test_stream_cycle_uses_canonical_sample_without_rpc_and_rejects_replay(self):
+        self.node.preview_mode, self.node.preview_source = "observe", "stream"
+        self.node.preview_query = Mock()
+        self.node.raw_spherical_cmd_callback(self.cmd)
+        self.node.model_stream_callback(self.stream_model())
+        with patch.object(self.node._cycle_projection_queries, "call",
+                          side_effect=lambda query, payload, timeout: query(payload)):
+            self.node._servo_timer_callback(None)
+        self.assertTrue(self.node.latest_cycle_proposal.valid)
+        self.assertEqual(self.node.latest_stream_projection.model.model_sequence, 1)
+        self.assertAlmostEqual(self.pub.messages[-1].twist.linear.y, .06)
+        self.node.preview_query.assert_not_called()
+        self.node.model_stream_callback(self.stream_model())
+        self.assertIsNone(self.node.latest_stream_projection)
+        self.node._servo_timer_callback(None)
+        self.assertIsNone(self.node.latest_cycle_proposal)
+
+    def test_stream_rejects_delayed_prefault_model_and_wrong_command_frame(self):
+        self.node.preview_mode, self.node.preview_source = "observe", "stream"
+        self.node.raw_spherical_cmd_callback(self.cmd)
+        self.node.model_stream_callback(self.stream_model())
+        self.node._projection_fault_ros = 100.01
+        self.node._servo_timer_callback(None)
+        self.assertIsNone(self.node.latest_stream_projection)
+        self.assertTrue(any("predates health recovery" in line for line in self.log.lines))
+        wrong = copy.deepcopy(self.cmd)
+        wrong.header.frame_id = "tool0"
+        with self.assertRaisesRegex(ValueError, "frame mismatch"):
+            self.node._project_model_sample(self.stream_model(), 100, wrong, .02)
+
+    def test_invalid_then_healthy_stream_still_discards_inflight_old_sample(self):
+        self.node.preview_mode, self.node.preview_source = "observe", "stream"
+        self.node.raw_spherical_cmd_callback(self.cmd)
+        self.node.model_stream_callback(self.stream_model())
+        def solve(query, payload, timeout):
+            result = query(payload)
+            bad = self.stream_model(2, 100.01)
+            bad.valid = False
+            self.node.model_stream_callback(bad)
+            self.node.model_stream_callback(self.stream_model(3, 100.02))
+            return result
+        with patch.object(self.node._cycle_projection_queries, "call", side_effect=solve):
+            self.node._servo_timer_callback(None)
+        self.assertIsNone(self.node.latest_stream_projection)
+        self.assertIsNone(self.node.latest_cycle_proposal)
+        self.assertTrue(any("model epoch changed" in line for line in self.log.lines))
 
     def test_actual_cycle_rebuilds_joint_acceleration_bounds_without_actuation(self):
         def respond(trace):

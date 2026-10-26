@@ -12,7 +12,7 @@ import numpy as np
 import rospy
 import tf2_ros
 from geometry_msgs.msg import TwistStamped
-from omnimap_msgs.msg import ServoTwistTrace, KinematicStatus
+from omnimap_msgs.msg import ServoTwistTrace, KinematicStatus, KinematicModel
 from omnimap_msgs.srv import EvaluateKinematicModel
 from scipy.spatial.transform import Rotation as R
 from kinematic_projection import camera_rate_model, unclipped_preview_rate_model
@@ -20,6 +20,7 @@ from kinematic_constraint import KinematicConstraintGate
 from bounded_query import SingleFlightQuery
 from preview_joint_state import PreviewJointState
 from projection_readiness import ProjectionReadinessGate
+from kinematic_model import KinematicModelCache, constraint_from_model
 from sensor_msgs.msg import JointState
 
 from servo_runtime_common import (
@@ -56,6 +57,15 @@ class PreviewEvaluation:
     received_wall: float
 
 
+@dataclass(frozen=True)
+class StreamProjection:
+    proposal: object
+    model: object
+    constraint: object
+    received_wall: float
+    joint_difference: dict
+
+
 @dataclass
 class CachedSphericalCommand:
     msg: object
@@ -81,6 +91,10 @@ class InfoFlowServoRuntime:
         self._control_lock = threading.RLock()
         self._projection_status_lock = threading.Lock()
         self._projection_health_epoch = 0
+        self._projection_fault_wall = 0.
+        self._projection_fault_ros = 0.
+        self._model_stream = KinematicModelCache()
+        self.latest_stream_projection = None
         self._control_generation = 0
         self._preview_queries = SingleFlightQuery()
         self._cycle_projection_queries = SingleFlightQuery()
@@ -88,6 +102,9 @@ class InfoFlowServoRuntime:
         if not np.isfinite(self.cycle_projection_budget_sec) or self.cycle_projection_budget_sec <= 0:
             raise ValueError("kinematic_cycle_projection_budget_sec must be finite and positive")
         self._preview_joints = PreviewJointState()
+        self.preview_source = args.kinematic_preview_source
+        if self.preview_source not in ("query", "stream"):
+            raise ValueError("invalid kinematic_preview_source")
         self.preview_mode = args.kinematic_preview_mode
         if self.preview_mode not in ("off", "observe"):
             raise ValueError("invalid kinematic_preview_mode")
@@ -182,10 +199,14 @@ class InfoFlowServoRuntime:
         )
 
         if self.preview_mode == "observe":
-            self.preview_query = rospy.ServiceProxy(args.kinematic_preview_service, EvaluateKinematicModel)
             self.raw_cmd_sub = rospy.Subscriber(args.spherical_cmd_raw_topic, spherical_command_msg,
                                                self.raw_spherical_cmd_callback, queue_size=1)
-            self.preview_timer = rospy.Timer(rospy.Duration(1./self.preview_hz), self._preview_timer_callback)
+            if self.preview_source == "query":
+                self.preview_query = rospy.ServiceProxy(args.kinematic_preview_service, EvaluateKinematicModel)
+                self.preview_timer = rospy.Timer(rospy.Duration(1./self.preview_hz), self._preview_timer_callback)
+            else:
+                self.model_sub = rospy.Subscriber(args.kinematic_model_topic, KinematicModel,
+                                                  self.model_stream_callback, queue_size=1)
 
         self.main_logger.info(
             ("轻量 Servo runtime 已启动：spherical_cmd_topic=%s cmd_topic=%s servo_hz=%.1f cmd_timeout=%.3fs adaptive_scale=%.2f adaptive_cap=%.3fs"),
@@ -371,6 +392,7 @@ class InfoFlowServoRuntime:
             return
         self.latest_preview_constraint = None
         self.latest_preview_evaluation = None
+        self.latest_cycle_proposal = None
         try:
             with self._projection_status_lock:
                 self._validate_projection_readiness()
@@ -407,6 +429,9 @@ class InfoFlowServoRuntime:
             self.projection_readiness.update(msg, ros_now=now, wall_now=wall)
             if not self.projection_readiness.decision(ros_now=now, wall_now=wall).ready:
                 self._projection_health_epoch += 1
+                self._projection_fault_wall = wall
+                self._projection_fault_ros = now
+                self.latest_stream_projection = None
                 self.latest_cycle_proposal = None
                 self.latest_preview_constraint = None
                 self.latest_preview_evaluation = None
@@ -419,6 +444,18 @@ class InfoFlowServoRuntime:
 
     def preview_joint_callback(self, msg):
         self._preview_joints.update(msg, time.monotonic(), ros_now=rospy.Time.now().to_sec())
+
+    def _candidate_preview_trace(self, cmd, candidate, pose_stamp):
+        msg = TwistStamped()
+        msg.header.stamp, msg.header.frame_id = pose_stamp, self.cmd_frame
+        preview_model = unclipped_preview_rate_model(candidate.rate_model, [cmd.theta_rate, cmd.phi_rate])
+        _, _, matrix, bias = preview_model
+        mathematical = matrix @ np.asarray([cmd.theta_rate, cmd.phi_rate]) + bias
+        msg.twist.linear.x, msg.twist.linear.y, msg.twist.linear.z = mathematical[:3]
+        msg.twist.angular.x, msg.twist.angular.y, msg.twist.angular.z = mathematical[3:]
+        trace = self._make_twist_trace(msg, cmd=cmd, reason="preview",
+                                      rate_model=preview_model, rate_limits=candidate.rate_limits)
+        return trace
 
     def evaluate_preview(self, cmd, current_c2w, pose_stamp, servo_dt_sec, query, *, return_evaluation=False):
         """Read-only candidate query; never commits controller state or motion.
@@ -439,15 +476,7 @@ class InfoFlowServoRuntime:
             state_before = (self._radial_integral_error, self._last_linear_cmd.copy(),
                             self._last_angular_cmd.copy(), self._control_generation)
             candidate = self._compute_servo_candidate(cmd, current_c2w, servo_dt_sec)
-        msg = TwistStamped()
-        msg.header.stamp, msg.header.frame_id = pose_stamp, self.cmd_frame
-        preview_model = unclipped_preview_rate_model(candidate.rate_model, [cmd.theta_rate, cmd.phi_rate])
-        _, _, matrix, bias = preview_model
-        mathematical = matrix @ np.asarray([cmd.theta_rate, cmd.phi_rate]) + bias
-        msg.twist.linear.x, msg.twist.linear.y, msg.twist.linear.z = mathematical[:3]
-        msg.twist.angular.x, msg.twist.angular.y, msg.twist.angular.z = mathematical[3:]
-        trace = self._make_twist_trace(msg, cmd=cmd, reason="preview",
-                                      rate_model=preview_model, rate_limits=candidate.rate_limits)
+        trace = self._candidate_preview_trace(cmd, candidate, pose_stamp)
         if not trace.rate_model_valid:
             raise ValueError("preview model unavailable:" + trace.rate_model_reason)
         started = time.monotonic()
@@ -526,6 +555,9 @@ class InfoFlowServoRuntime:
     def _observe_cycle_projection(self, cmd, pose, servo_dt_sec):
         if self.preview_mode != "observe":
             return
+        if self.preview_source == "stream":
+            self._observe_stream_projection(cmd, pose, servo_dt_sec)
+            return
         self.latest_cycle_proposal = None
         try:
             with self._projection_status_lock:
@@ -546,6 +578,9 @@ class InfoFlowServoRuntime:
             proposal = self._cycle_projection_queries.call(
                 lambda payload: snapshot.revalidate_cycle_preview(*payload),
                 (evaluation, raw.msg, np.array(pose, copy=True), servo_dt_sec), budget)
+            new_raw, new_final = self._preview_command_pair()
+            if new_raw.msg != raw.msg or new_final.msg != final.msg:
+                raise ValueError("preview cycle command changed during solve")
             with self._projection_status_lock:
                 self._validate_projection_readiness()
                 if self._projection_health_epoch != health_epoch:
@@ -557,6 +592,95 @@ class InfoFlowServoRuntime:
                 cmd.planner_tick, proposal.valid, proposal.reason, servo_dt_sec, *proposal.rates)
         except Exception as exc:
             self.profile_logger.info("kinematic_cycle_projection: mode=observe valid=False reason=%s", exc)
+
+    def model_stream_callback(self, msg):
+        usable = self._model_stream.update(msg, ros_now=rospy.Time.now().to_sec(),
+            wall_now=time.monotonic(), timeout_sec=self.pose_stale_timeout_sec)
+        if not usable:
+            with self._projection_status_lock:
+                self.latest_cycle_proposal = None
+                self.latest_stream_projection = None
+
+    def _project_model_sample(self, model, received, raw_cmd, servo_dt_sec):
+        self._validate_projection_readiness()
+        if (raw_cmd.should_stop or raw_cmd.header.frame_id.lstrip("/") != self.world_frame.lstrip("/")
+                or model.source_frame.lstrip("/") != self.world_frame.lstrip("/")
+                or model.camera_frame.lstrip("/") != self.camera_frame.lstrip("/")):
+            raise ValueError("stream command/model frame mismatch or policy stop")
+        pose = np.asarray(model.camera_c2w).reshape(4, 4)
+        candidate = self._compute_servo_candidate(raw_cmd, pose, servo_dt_sec)
+        trace = self._candidate_preview_trace(raw_cmd, candidate, model.joint_stamp)
+        msg = constraint_from_model(model, trace, received_wall=received,
+            ros_now=rospy.Time.now().to_sec(), wall_now=time.monotonic(),
+            timeout_sec=self.pose_stale_timeout_sec)
+        # Streaming observe reports the difference to the latest local sample;
+        # it does not pretend the canonical sampled q is the future state.
+        difference = self._preview_joints.difference(msg, ros_now=rospy.Time.now().to_sec(),
+            wall_now=time.monotonic(), timeout=self.pose_stale_timeout_sec)
+        gate = KinematicConstraintGate(source_frame=self.world_frame, timeout_sec=self.pose_stale_timeout_sec)
+        gate.remember_preview_command(raw_cmd)
+        gate.update(msg, wall_now=received)
+        proposal = gate.propose(rates=[raw_cmd.theta_rate, raw_cmd.phi_rate],
+            reference_radius=raw_cmd.reference_radius, reference_scene_center=raw_cmd.reference_scene_center,
+            model_version=raw_cmd.model_version, should_stop=raw_cmd.should_stop,
+            state_allows_motion=True, ros_now=rospy.Time.now().to_sec(), wall_now=time.monotonic())
+        if proposal.valid:
+            projected = copy.deepcopy(raw_cmd)
+            projected.theta_rate, projected.phi_rate = proposal.rates
+            output = self._compute_servo_candidate(projected, pose, servo_dt_sec)
+            predicted = np.asarray(trace.camera_rate_matrix).reshape(6, 2)@proposal.rates+trace.camera_bias
+            if not np.allclose(np.r_[output.linear, output.angular], predicted, rtol=0, atol=1e-9):
+                raise ValueError("stream projected output changed by runtime limits")
+        return StreamProjection(proposal, model, msg, received, difference)
+
+    def _observe_stream_projection(self, cmd, current_pose, servo_dt_sec):
+        self.latest_cycle_proposal = self.latest_stream_projection = None
+        try:
+            with self._projection_status_lock:
+                self._validate_projection_readiness()
+                health_epoch, fault_wall, fault_ros = (self._projection_health_epoch,
+                    self._projection_fault_wall, self._projection_fault_ros)
+            raw, final = self._preview_command_pair()
+            if final.msg != cmd:
+                raise ValueError("stream cycle final command changed")
+            model, received, model_epoch = self._model_stream.get(ros_now=rospy.Time.now().to_sec(),
+                wall_now=time.monotonic(), timeout_sec=self.pose_stale_timeout_sec)
+            if received < fault_wall or any(stamp.to_sec() < fault_ros for stamp in
+                    (model.header.stamp, model.joint_stamp, model.status_received_stamp)):
+                raise ValueError("stream model predates health recovery")
+            snapshot = copy.copy(self)
+            snapshot._last_linear_cmd, snapshot._last_angular_cmd = self._last_linear_cmd.copy(), self._last_angular_cmd.copy()
+            budget = min(self.cycle_projection_budget_sec, .25/max(self.servo_hz, 1e-6))
+            result = self._cycle_projection_queries.call(lambda payload: snapshot._project_model_sample(*payload),
+                (model, received, raw.msg, servo_dt_sec), budget)
+            new_raw, new_final = self._preview_command_pair()
+            if new_raw.msg != raw.msg or new_final.msg != final.msg:
+                raise ValueError("stream command changed during solve")
+            difference = self._preview_joints.difference(result.constraint, ros_now=rospy.Time.now().to_sec(),
+                wall_now=time.monotonic(), timeout=self.pose_stale_timeout_sec)
+            result = StreamProjection(result.proposal, result.model, result.constraint, received, difference)
+            canonical_pose = np.asarray(model.camera_c2w).reshape(4, 4)
+            pose_delta = np.linalg.norm(np.asarray(current_pose)[:3, 3]-canonical_pose[:3, 3])
+            rotation_delta = np.linalg.norm(R.from_matrix(np.asarray(current_pose)[:3, :3]@canonical_pose[:3, :3].T).as_rotvec())
+            with self._projection_status_lock:
+                self._validate_projection_readiness()
+                if self._projection_health_epoch != health_epoch or not self._model_stream.epoch_matches(model_epoch):
+                    raise ValueError("stream health/model epoch changed during solve")
+                now, wall = rospy.Time.now().to_sec(), time.monotonic()
+                if (not 0 <= wall-received <= self.pose_stale_timeout_sec or any(
+                        not -.05 <= now-stamp.to_sec() <= self.pose_stale_timeout_sec for stamp in
+                        (model.header.stamp, model.joint_stamp, model.status_received_stamp, raw.msg.header.stamp))):
+                    raise ValueError("stream result expired during solve")
+                self.latest_cycle_proposal, self.latest_stream_projection = result.proposal, result
+            self.profile_logger.info(
+                "kinematic_stream_projection: mode=observe tick=%d model_seq=%d valid=%s reason=%s "
+                "model_age=%.9g joint_delta=%.9g velocity_delta=%.9g joint_stamp_delta=%.9g "
+                "pose_delta=%.9g rotation_delta=%.9g dt=%.9g",
+                cmd.planner_tick, model.model_sequence, result.proposal.valid, result.proposal.reason,
+                now-model.joint_stamp.to_sec(), difference["position_delta"], difference["velocity_delta"],
+                difference["stamp_delta"], pose_delta, rotation_delta, servo_dt_sec)
+        except Exception as exc:
+            self.profile_logger.info("kinematic_stream_projection: mode=observe valid=False reason=%s", exc)
 
     def _validate_preview_response(self, trace, response):
         """Associate an advisory response; this does not authorize execution."""
@@ -805,6 +929,7 @@ class InfoFlowServoRuntime:
         self.stats.servo_steps += 1
         if self.preview_mode == "observe":
             self.latest_cycle_proposal = None
+            self.latest_stream_projection = None
 
         cmd_cache = self.latest_cmd
         if cmd_cache is None:
@@ -1007,6 +1132,8 @@ def build_argparser():
     parser.add_argument("--kinematic_status_topic", default="/omnimap/kinematic_status")
     parser.add_argument("--kinematic_projection_recovery_sec", type=float, default=0.1)
     parser.add_argument("--kinematic_cycle_projection_budget_sec", type=float, default=0.003)
+    parser.add_argument("--kinematic_preview_source", choices=("query", "stream"), default="query")
+    parser.add_argument("--kinematic_model_topic", default="/omnimap/kinematic_model")
     parser.add_argument("--kinematic_preview_mode", choices=("off", "observe"), default="off")
     parser.add_argument("--kinematic_preview_hz", type=float, default=2.)
     parser.add_argument("--kinematic_preview_service", default="/omnimap_kinematic_monitor/evaluate_model")

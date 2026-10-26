@@ -121,3 +121,54 @@ def constraint_from_model(model, trace, *, received_wall, ros_now, wall_now, tim
     out.linear_deadband, out.servo_dt_sec = trace.linear_deadband, trace.servo_dt_sec
     out.valid, out.reason = True, "advisory_preview:model_snapshot"
     return out
+
+
+class KinematicModelCache:
+    """Own the latest stream sample; faults/restarts invalidate in-flight work."""
+    def __init__(self):
+        import threading
+        self._lock = threading.Lock()
+        self._latest = None
+        self._sequence, self._stamp, self._epoch = 0, 0., 0
+        self._error = "model stream missing"
+
+    def update(self, msg, *, ros_now, wall_now, timeout_sec):
+        with self._lock:
+            self._latest = None
+            try:
+                stamp, sequence = msg.header.stamp.to_sec(), int(msg.model_sequence)
+                if (not all(math.isfinite(v) for v in (stamp, ros_now, wall_now, timeout_sec))
+                        or timeout_sec <= 0 or stamp <= 0 or sequence <= 0
+                        or not -.05 <= ros_now-stamp <= timeout_sec):
+                    raise ValueError("model stream stamp invalid")
+                if stamp <= self._stamp or sequence <= self._sequence:
+                    # A fresh producer restart invalidates this sample, but
+                    # permits the next increasing sample to establish a stream.
+                    if stamp > self._stamp and sequence == 1:
+                        self._stamp, self._sequence = stamp, sequence
+                    raise ValueError("model stream sequence reset or replay")
+                self._stamp, self._sequence = stamp, sequence
+                if not msg.valid:
+                    raise ValueError("model stream invalid:"+msg.reason)
+                self._latest = (copy.deepcopy(msg), wall_now)
+                self._error = ""
+                return True
+            except (ValueError, TypeError) as exc:
+                self._epoch += 1
+                self._error = str(exc)
+                return False
+
+    def get(self, *, ros_now, wall_now, timeout_sec):
+        with self._lock:
+            if self._latest is None:
+                raise ValueError(self._error)
+            model, received = self._latest
+            if (not all(math.isfinite(x) for x in (ros_now, wall_now, timeout_sec)) or timeout_sec <= 0
+                    or not -.05 <= ros_now-model.header.stamp.to_sec() <= timeout_sec
+                    or not 0 <= wall_now-received <= timeout_sec):
+                raise ValueError("model stream stale")
+            return copy.deepcopy(model), received, self._epoch
+
+    def epoch_matches(self, epoch):
+        with self._lock:
+            return self._epoch == epoch and self._latest is not None

@@ -214,7 +214,7 @@ SingleFlightQuery 现在以单个后台 worker 限制 RPC 调用端等待；超�
 
 未来时间的本机关节样本在接收时拒绝，不推进已接受时间基线；后续正常新样本可恢复，相关测试已覆盖。
 
-可选 kinematic_preview_mode=observe（默认 off）以独立 2Hz ROS Timer 关联 raw/final 命令并查询模型，使用名义 1/servo_hz 预览 dt，日志明确 dt_source=nominal。结果只存为建议且每轮先失效旧值，无命令发布；原始 policy stop、错配、陈旧或查询期间命令变化均拒绝。跨 Servo 周期仍拒绝，是冻结诊断而非连续执行；实际周期建议重算现已接入，投影执行/恢复仍未接入。回调 18 项通过。
+query 来源的 kinematic_preview_mode=observe（默认 off）以独立 2Hz ROS Timer 关联 raw/final 命令并查询模型，使用名义 1/servo_hz 预览 dt，日志明确 dt_source=nominal。结果只存为建议且每轮先失效旧值，无命令发布；原始 policy stop、错配、陈旧或查询期间命令变化均拒绝。跨 Servo 周期仍拒绝，是冻结诊断而非连续执行；实际周期建议重算现已接入，投影执行/恢复仍未接入。回调 18 项通过。
 
 实际周期 observe 现以 PreviewEvaluation 保留的完整 affine 映射/位姿进行重验证，并按当前有效 dt 和上一线速度重建约束。PI/角速度映射变化要求重新查询；投影结果再次通过真实计算输出一致性检查。preview/execution 来源角色分离。独立快照 worker 默认等待 3ms（最多名义周期四分之一），超时单个占用、不复用晚结果；停止分支先零速再诊断。消费者 16 项、回调 21 项通过，仍不执行建议或自动恢复。
 
@@ -247,9 +247,31 @@ KinematicConstraint：一次参考点变换后求 J*[A,bq]=[B*rate_scales,b]，�
 
 两套 ROS 测试均增加独立 NumPy FK/Jacobian/完整梯度比较，关节数值连续变化时快照和
 转换后的速率映射随之更新，旧桥接过期仍更新，MoveIt halt 使快照失效；非法来源/模型拒绝。
-这证明模型流和转换接口能够跟随合成关节样本，尚未把 Servo 的冻结查询路径切换为流式控制。
+模型流和转换接口能够跟随合成关节样本；Servo 的 stream observe 接入见下节，实际投影控制仍未实现。
 运动中的时延/残差处理、最终投影执行与实机标定验收仍待完成。
 新增消息需两端重建并重启 monitor；既有消息字段/MD5 本批未改变。
 部署脚本现检查新模型消息及查询服务的生成文件，避免把旧构建当成完整部署。
 
 本批构建通过，模型流直接节点/生产 launch 两套各 12 项、自动 Servo 预览链 4 项、部署 3 项，共 31 项相关测试通过。新消息增加类型，既有消息字段未改；算力端与执行端仍需生成新类型并重启 monitor。
+
+### Servo 流式 observe（2026-10-26）
+
+`--kinematic_preview_mode observe --kinematic_preview_source stream` 启用连续模型来源，
+默认 model topic 为 /omnimap/kinematic_model；来源默认仍 query，mode 默认仍 off。
+stream 不创建 RPC 或名义预览 Timer，每个实际 Servo 周期在快照 camera_c2w 上重算
+PI/角速度、限幅前数学候选及约束，联合求解后核对同一采样状态下的实际计算输出。
+计算使用控制器副本及原有有界单 worker，不提交 PI/slew 或改写运动命令。
+
+KinematicModelCache 复制数据、检查序号和发布时间；重放/失效/发布器重启递增故障代次，
+旧缓存和在途结果不能跨越故障。健康故障后，模型的发布/关节/status 源时间和接收时间
+都不能早于健康门槛，防止晚到的故障前样本被使用。求解后再次校验 raw/final 命令、健康/模型代次、
+源/接收年龄以及本机关节流；异常使建议失效。
+
+query 保留冻结位姿/关节一致性检查。stream 则报告采样与最新样本的差值，不要求它们静止：
+日志包含模型年龄、关节位置/速度差、时间差、相机位置/角度差和有效 dt。
+这些差值还没有经标定的执行界限，结果仅是同采样模型上的建议，不能直接发布为物理控制。
+
+新增 servo_stream.test 使用真实 Servo Timer/模型 topic/monitor/桥接，5 项包含变化的合成关节、
+新模型映射更新、无 RPC、MoveIt halt、断流恢复和 policy stop；捕获输出全为零。
+缓存与回调另测重放/重启、失效后快速恢复仍丢旧工作和故障前延迟模型拒绝。
+两份升级文档已整理为当前实现，删除累积阶段中重复/过期的结论；历史证据保留于本文和验收记录。

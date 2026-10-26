@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Real Servo timers, RPC, monitor and bridge on synthetic /test/* inputs."""
 import copy
+import os
 import sys
 import threading
 import time
@@ -34,6 +35,8 @@ class ServoPreviewChain(unittest.TestCase):
             spherical_cmd_topic="/test/final", spherical_cmd_raw_topic="/test/raw",
             kinematic_joint_topic="/test/joints", kinematic_status_topic="/test/kinematic",
             kinematic_preview_service="/test_monitor/evaluate_model", kinematic_preview_mode="observe",
+            kinematic_preview_source=os.environ.get("OMNIMAP_TEST_PREVIEW_SOURCE", "query"),
+            kinematic_model_topic="/test/model",
             kinematic_preview_hz=10., kinematic_preview_timeout_sec=.1,
             kinematic_cycle_projection_budget_sec=.02, kinematic_projection_recovery_sec=.1,
             servo_hz=10., pose_stale_timeout_sec=.4, spherical_cmd_timeout_sec=.6,
@@ -43,6 +46,7 @@ class ServoPreviewChain(unittest.TestCase):
             radial_vel_max=.015, angular_gain=1., angular_deadband=.001,
             linear_accel_max=0., angular_accel_max=0., status_log_interval_sec=10.)
         cls.runtime = InfoFlowServoRuntime(args)
+        cls.lock = threading.RLock()
         cls.code, cls.send_joints, cls.policy_stop = 0, True, False
         cls.raw_pub = rospy.Publisher("/test/raw", SphericalCommand, queue_size=1)
         cls.final_pub = rospy.Publisher("/test/final", SphericalCommand, queue_size=1)
@@ -62,7 +66,8 @@ class ServoPreviewChain(unittest.TestCase):
     def tearDownClass(cls):
         cls.closed.set()
         cls.worker.join(timeout=2)
-        cls.runtime.preview_timer.shutdown()
+        if cls.runtime.preview_timer is not None:
+            cls.runtime.preview_timer.shutdown()
         cls.runtime.timer.shutdown()
 
     @classmethod
@@ -70,9 +75,12 @@ class ServoPreviewChain(unittest.TestCase):
         next_command, tick = 0., 0
         while not cls.closed.wait(.02) and not rospy.is_shutdown():
             now = rospy.Time.now()
+            with cls.lock:
+                q = cls.q.copy()
+            poses = ChainTest.fk(q)
             transforms = []
             for frame in ("tool0", "cam_1_color_optical_frame"):
-                pose = cls.poses[frame]
+                pose = poses[frame]
                 tr = TransformStamped()
                 tr.header.stamp, tr.header.frame_id, tr.child_frame_id = now, "base_link", frame
                 tr.transform.translation.x, tr.transform.translation.y, tr.transform.translation.z = pose[:3, 3]
@@ -83,14 +91,14 @@ class ServoPreviewChain(unittest.TestCase):
             cls.tf.sendTransform(transforms)
             if cls.send_joints:
                 js = JointState(name=["j%d" % i for i in range(6, 0, -1)],
-                                position=cls.q[::-1].tolist(), velocity=[0.]*6)
+                                position=q[::-1].tolist(), velocity=[0.]*6)
                 js.header.stamp = now
                 cls.joint_pub.publish(js)
             cls.status_pub.publish(Int8(cls.code))
             if time.monotonic() >= next_command:
                 tick += 1
                 next_command = time.monotonic()+.25
-                center = cls.poses["cam_1_color_optical_frame"][:3, 3]+[.5, 0, 0]
+                center = poses["cam_1_color_optical_frame"][:3, 3]+[.5, 0, 0]
                 raw = SphericalCommand(planner_tick=tick, model_version=7, theta_rate=.01,
                     reference_radius=.5, reference_scene_center=center.tolist(), should_stop=cls.policy_stop)
                 raw.header.stamp, raw.header.frame_id = now, "base_link"
@@ -111,9 +119,25 @@ class ServoPreviewChain(unittest.TestCase):
         self.fail("timeout %s; health=%s evaluation=%s proposal=%s" %
             (label, decision, self.runtime.latest_preview_evaluation, self.runtime.latest_cycle_proposal))
 
+    def current_record(self):
+        return (self.runtime.latest_stream_projection if self.runtime.preview_source == "stream"
+                else self.runtime.latest_preview_evaluation)
+
     def ready(self):
         proposal = self.runtime.latest_cycle_proposal
         return proposal is not None and proposal.valid
+
+    def wait_record(self, label="consistent model/proposal"):
+        captured = []
+        def capture():
+            proposal, record = self.runtime.latest_cycle_proposal, self.current_record()
+            if (proposal is not None and proposal.valid and record is not None
+                    and proposal.source_tick == record.constraint.planner_tick):
+                captured[:] = [(record, proposal)]
+                return True
+            return False
+        self.wait(capture, label)
+        return captured[0]
 
     def assert_stopped(self):
         self.assertTrue(self.twists)
@@ -123,26 +147,26 @@ class ServoPreviewChain(unittest.TestCase):
 
     def setUp(self):
         self.__class__.code, self.__class__.send_joints, self.__class__.policy_stop = 0, True, False
-        self.wait(self.ready, "real RPC and actual-cycle proposal")
+        self.record, self.proposal = self.wait_record("model and actual-cycle proposal")
 
     def test_real_timer_rpc_and_projection_keep_final_stop(self):
-        record = self.runtime.latest_preview_evaluation
+        record = self.record
         self.assertIsNotNone(record)
         self.assertTrue(record.constraint.reason.startswith("advisory_preview:"))
         self.assertGreater(record.constraint.joint_stamp.to_sec(), 0.)
-        self.assertEqual(self.runtime.latest_cycle_proposal.reason, "advisory_projection")
+        self.assertEqual(self.proposal.reason, "advisory_projection")
         self.assert_stopped()
 
     def test_moveit_halt_clears_model_and_requires_fresh_recovery(self):
-        old = self.runtime.latest_preview_evaluation
+        old = self.record
         self.__class__.code = 4
-        self.wait(lambda: self.runtime.latest_preview_evaluation is None
+        self.wait(lambda: self.current_record() is None
                   and not self.runtime.projection_readiness.decision(
                       ros_now=rospy.Time.now().to_sec(), wall_now=time.monotonic()).ready, "halt")
         self.assertIsNone(self.runtime.latest_cycle_proposal)
         self.__class__.code = 0
-        self.wait(self.ready, "health recovery and new model")
-        self.assertIsNot(self.runtime.latest_preview_evaluation, old)
+        recovered, _ = self.wait_record("health recovery and new model")
+        self.assertIsNot(recovered, old)
         self.assert_stopped()
 
     def test_joint_stream_loss_and_recovery(self):
@@ -151,16 +175,44 @@ class ServoPreviewChain(unittest.TestCase):
             ros_now=rospy.Time.now().to_sec(), wall_now=time.monotonic()).ready, "joint loss")
         self.assertIsNone(self.runtime.latest_cycle_proposal)
         self.__class__.send_joints = True
-        self.wait(self.ready, "new joints and new model")
+        self.wait_record("new joints and new model")
         self.assert_stopped()
 
     def test_policy_stop_prevents_preview(self):
         self.__class__.policy_stop = True
         self.wait(lambda: self.runtime.latest_raw_cmd is not None and self.runtime.latest_raw_cmd.msg.should_stop
-                  and self.runtime.latest_preview_evaluation is None
+                  and self.current_record() is None
                   and self.runtime.latest_cycle_proposal is None, "policy stop")
         self.assert_stopped()
 
 
+class StreamServoChain(ServoPreviewChain):
+    def test_moving_samples_get_new_canonical_projection_without_rpc(self):
+        self.assertIsNone(self.runtime.preview_query)
+        self.assertIsNone(self.runtime.preview_timer)
+        records = []
+        for step in range(1, 6):
+            target = .2+.005*step
+            with self.lock:
+                self.__class__.q[0] = target
+            captured = []
+            def at_target():
+                record, proposal = self.current_record(), self.runtime.latest_cycle_proposal
+                if (record is not None and proposal is not None and proposal.valid
+                        and proposal.source_tick == record.constraint.planner_tick
+                        and abs(record.model.joint_position[0]-target) < 1e-10):
+                    captured[:] = [record]
+                    return True
+                return False
+            self.wait(at_target, "moving canonical projection")
+            records.append(captured[0])
+        self.assertGreater(records[-1].model.model_sequence, records[0].model.model_sequence)
+        self.assertGreater(np.linalg.norm(np.asarray(records[-1].constraint.joint_rate_matrix)-
+                                          records[0].constraint.joint_rate_matrix), 1e-5)
+        self.assert_stopped()
+
+
 if __name__ == "__main__":
-    rostest.rosrun("omnimap_kinematics", "servo_preview_chain", ServoPreviewChain)
+    streaming = os.environ.get("OMNIMAP_TEST_PREVIEW_SOURCE") == "stream"
+    rostest.rosrun("omnimap_kinematics", "servo_stream_chain" if streaming else "servo_preview_chain",
+                  StreamServoChain if streaming else ServoPreviewChain)
