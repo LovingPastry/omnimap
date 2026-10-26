@@ -1,6 +1,6 @@
 # 本机运动学反馈接入与验收
 
-日期：2026-10-24。对应 [本机升级计划](ur5_nbv_kinematics_upgrade_local.md)。
+更新：2026-10-26（保留 2026-10-24 起的阶段记录）。对应 [本机升级计划](ur5_nbv_kinematics_upgrade_local.md)。
 
 执行侧桥接与 MoveIt monitor 现已实现并部署源文件入口；构建、启动、指标定义及待完成的硬件验收见
 [sumi 诊断实现与验收](ur5_nbv_kinematics_validation_sumi.md)。本文下方“现场验收仍待完成”保留此前本机接入核查记录。
@@ -97,6 +97,10 @@ python -m py_compile info_flow/info_flow_planning_node.py info_flow/kinematic_fe
 python tests/test_kinematic_feedback.py
 python tests/test_kinematic_constraint.py
 python tests/test_kinematic_runtime.py
+python tests/test_kinematic_projection.py
+python tests/test_bounded_query.py
+python tests/test_preview_joint_state.py
+python tests/test_projection_readiness.py
 ```
 
 纯数值测试验证投影的约束与最短距离、不可用方向、双时钟过期、frame、指标、状态码、持续减速和恢复。
@@ -104,7 +108,7 @@ python tests/test_kinematic_runtime.py
 覆盖 observe 原样输出、enforce 停车、原始命令留存、消息序列化、计算期间收到的急停、真实 Twist 记录和失效零速。
 这些测试验证本机处理逻辑，不验证机器人上的 Jacobian 数值或 MoveIt 实际减速时机。
 
-本次实际结果：ROS 消息构建退出码 0；InfoFlow 的 Python 编译通过；纯数值/反馈测试 8 项、
+2026-10-24 阶段结果（历史计数）：ROS 消息构建退出码 0；InfoFlow 的 Python 编译通过；纯数值/反馈测试 8 项、
 Planning/Servo 回调测试 9 项全部通过；`git diff --check` 通过。
 
 ## 现场验收仍待完成
@@ -142,5 +146,24 @@ rosbag record -O kinematic_chain.bag /omnimap/spherical_cmd_raw /omnimap/spheric
 ## 2026-10-26 消费者回归
 
 Planning 新增独立 KinematicConstraint 订阅及只读投影日志；投影建议与最终控制命令明确分开。
-消费者测试 10 项、Planning/Servo 回调 10 项通过。控制层联合速度约束、停车后模型重新获取和现场验收未完成。
+该阶段消费者测试 10 项、Planning/Servo 回调 10 项通过（历史计数）。后续已接入联合可用关节/相机限值、只读模型重新查询、实际周期建议重算和健康恢复门槛；连续投影执行、运动中模型更新和现场验收仍未完成。
 参数、失效原因及日志定义见 [约束接口](ur5_nbv_kinematic_constraint.md)。
+
+## 2026-10-26 自动预览链路验证
+
+新增 `rostest omnimap_kinematics servo_preview.test`，真实运行 Servo 的订阅/Timer、
+EvaluateKinematicModel RPC、C++ RobotModel monitor 和普通桥接。输入是合成 URDF、
+静态 q/TF、合成原始球面命令和始终停车的最终命令，所有 topic 均在 `/test/*`。
+4 项通过：自动查询与当前周期建议；MoveIt halt 清缓存及新模型恢复；关节断流/恢复；
+原始 policy stop 阻止查询。完整捕获的控制输出均为零。
+该验证不替换网络发布、TF 查询或 RPC，但没有运行真实 Fisher/地图/GPU，也没有实机运动。
+它证明冻结合成场景中的自动只读恢复链，不证明运动中的模型连续更新、投影执行或物理安全。
+
+```bash
+source /opt/ros/noetic/setup.bash
+source ros_ws/devel/setup.bash
+rostest omnimap_kinematics servo_preview.test
+```
+
+测试构造运行参数后实例化实际 Servo 类，不调用生产 CLI 的配置加载；源码从包的真实路径
+解析仓库根目录，因此支持机器人 catkin_ws 内的符号链接部署。新用例已加入 CMake rostest 清单。

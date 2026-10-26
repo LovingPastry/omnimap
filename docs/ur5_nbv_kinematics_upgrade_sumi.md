@@ -224,3 +224,22 @@ source/task frame、变换链和数值指标检查，并且 MoveIt code 为 0/1�
 默认 off/observe 的运动行为保持原样。
 
 健康准备未就绪时，回调立即清除缓存模型/建议并推进健康代次；查询与求解在同一代次才可保存结果，存储检查与反馈更新由同一锁串行化。因此即使工作期间先停车再快速恢复健康，也不能复用停车前结果，须重新查询。测试已覆盖该交错顺序。
+
+### 自动预览链路的隔离 ROS 验证（2026-10-26）
+
+新增 `rostest omnimap_kinematics servo_preview.test`，真实运行 Servo 的订阅/Timer、
+EvaluateKinematicModel RPC、C++ RobotModel monitor 和普通桥接。输入是合成 URDF、
+静态 q/TF、合成原始球面命令和始终停车的最终命令，所有 topic 均在 `/test/*`。
+4 项通过：自动查询与当前周期建议；MoveIt halt 清缓存及新模型恢复；关节断流/恢复；
+原始 policy stop 阻止查询。完整捕获的控制输出均为零。
+该验证不替换网络发布、TF 查询或 RPC，但没有运行真实 Fisher/地图/GPU，也没有实机运动。
+它证明冻结合成场景中的自动只读恢复链，不证明运动中的模型连续更新、投影执行或物理安全。
+
+```bash
+source /opt/ros/noetic/setup.bash
+source ros_ws/devel/setup.bash
+rostest omnimap_kinematics servo_preview.test
+```
+
+测试构造运行参数后实例化实际 Servo 类，不调用生产 CLI 的配置加载；源码从包的真实路径
+解析仓库根目录，因此支持机器人 catkin_ws 内的符号链接部署。新用例已加入 CMake rostest 清单。

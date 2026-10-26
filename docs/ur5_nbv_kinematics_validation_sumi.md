@@ -210,7 +210,7 @@ camera 输入可用 `--input-topic` 指定。若 master 在线但 Servo 参数�
 | 2. TF 时间和参考点平移项 | 同采样时间查询及有限差分/刚体速度测试通过；真实 TF 年龄与标定仍待现场记录 |
 | 3. MoveIt 诊断节点 | C++ 节点、构建、部署和真实 RobotState 隔离测试完成；已有真实模型/joint_states 零速样本，持续运行验收待完成 |
 | 4. 标定 m_min / 比较减速时机 | raw/normalized condition、sigma_min、status 的对齐接口已就绪；需要真实减速日志 |
-| 5. 二维最小半空间控制修正 | 执行侧局部映射和 a/drift/c 诊断已实现，控制尚未接入；仍需步骤 4 标定及速度/时效约束 |
+| 5. 二维最小半空间控制修正 | 执行侧局部映射和 a/drift/c 诊断已实现，控制尚未接入；已实现只读建议的联合限值/时效约束，仍需步骤 4 标定及连续执行/实际残差验证 |
 | 6. stale/TF/status 零速策略 | 普通/KF 桥接 watchdog、状态停车和失效恢复测试通过；硬件断链验收待完成 |
 
 ## 2026-10-25 关节与 TF 延迟对齐修复
@@ -234,3 +234,22 @@ ServoTwistTrace 的消息 MD5 已改变，两端须重建消息并重启相关�
 inventory 1 项通过；直接节点和正式 diagnostics.launch 两套隔离 ROS 测试各 9 项通过。
 独立 NumPy FK 有限差分核对 a/drift；显式测试阈值只在隔离合成模型中设置，正式 launch 验证未配置时 c 为 NaN。
 日志：`/tmp/omnimap_constraint_test.log`、`/tmp/omnimap_constraint_launch_test.log`。
+
+## 2026-10-26 自动预览链路验证
+
+新增 `rostest omnimap_kinematics servo_preview.test`，真实运行 Servo 的订阅/Timer、
+EvaluateKinematicModel RPC、C++ RobotModel monitor 和普通桥接。输入是合成 URDF、
+静态 q/TF、合成原始球面命令和始终停车的最终命令，所有 topic 均在 `/test/*`。
+4 项通过：自动查询与当前周期建议；MoveIt halt 清缓存及新模型恢复；关节断流/恢复；
+原始 policy stop 阻止查询。完整捕获的控制输出均为零。
+该验证不替换网络发布、TF 查询或 RPC，但没有运行真实 Fisher/地图/GPU，也没有实机运动。
+它证明冻结合成场景中的自动只读恢复链，不证明运动中的模型连续更新、投影执行或物理安全。
+
+```bash
+source /opt/ros/noetic/setup.bash
+source ros_ws/devel/setup.bash
+rostest omnimap_kinematics servo_preview.test
+```
+
+测试构造运行参数后实例化实际 Servo 类，不调用生产 CLI 的配置加载；源码从包的真实路径
+解析仓库根目录，因此支持机器人 catkin_ws 内的符号链接部署。新用例已加入 CMake rostest 清单。
